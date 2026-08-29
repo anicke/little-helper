@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["lh-core", "lh-cli", "lh-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anicke/little-helper"
+authors = ["Little Helper contributors"]
+
+[workspace.dependencies]
+lh-core = { path = "lh-core", version = "0.1.0" }
+claxon = "0.4"
+metaflac = "0.2"
+md-5 = "0.10"
+hex = "0.4"
+thiserror = "2"
+anyhow = "1"
+walkdir = "2"
+which = "8"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+directories = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel = "0.5"
+rayon = "1"
+
+[profile.release]
+lto = "thin"
