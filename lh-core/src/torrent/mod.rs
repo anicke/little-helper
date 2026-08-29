@@ -7,7 +7,9 @@
 pub mod layout;
 pub mod metainfo;
 pub mod report;
+pub mod verify;
 
 pub use layout::{check_sizes, join_checked, resolve_root};
 pub use metainfo::{Metainfo, TorrentFile};
-pub use report::{FileOutcome, FileStatus, TorrentReport, Verdict};
+pub use report::{FileOutcome, FileStatus, PieceCounts, TorrentReport, Verdict};
+pub use verify::{check, check_with_progress};

@@ -26,6 +26,13 @@ pub enum FileStatus {
     Unreadable {
         reason: String,
     },
+    /// Every piece we could check passed, but some could not be checked at all because a
+    /// neighbouring file is missing or the wrong size and the shared piece is unreadable.
+    /// Claiming this file is complete would overstate what we know.
+    Partial {
+        verified: u32,
+        unverifiable: u32,
+    },
     /// BEP 47 padding: zero bytes in the stream that are not expected on disk.
     Padding,
 }
@@ -52,9 +59,20 @@ impl FileStatus {
             Self::Missing => "MISSING",
             Self::WrongSize { .. } => "WRONG SIZE",
             Self::Unreadable { .. } => "UNREADABLE",
+            Self::Partial { .. } => "PARTIAL",
             Self::Padding => "PADDING",
         }
     }
+}
+
+/// How the pieces came out. Absent from a `--quick` report, which reads no contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PieceCounts {
+    pub total: u32,
+    pub ok: u32,
+    pub failed: u32,
+    /// Could not be hashed, because a file the piece covers is missing or the wrong size.
+    pub unverifiable: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +106,8 @@ pub struct TorrentReport {
     pub extra_local: Vec<PathBuf>,
     /// True when only sizes were compared.
     pub quick: bool,
+    /// `None` for a quick report.
+    pub pieces: Option<PieceCounts>,
 }
 
 impl TorrentReport {
@@ -95,8 +115,20 @@ impl TorrentReport {
         self.files.iter().filter(|f| f.status.is_failure())
     }
 
+    /// Everything the user has to look at: outright failures plus files we could not
+    /// finish checking because a neighbour was bad.
+    pub fn needs_attention(&self) -> impl Iterator<Item = &FileOutcome> {
+        self.files
+            .iter()
+            .filter(|f| f.status.is_failure() || matches!(f.status, FileStatus::Partial { .. }))
+    }
+
     pub fn verdict(&self) -> Verdict {
-        if self.failures().next().is_some() {
+        let anything_unverified = self
+            .files
+            .iter()
+            .any(|f| matches!(f.status, FileStatus::Partial { .. }));
+        if self.failures().next().is_some() || anything_unverified {
             Verdict::Incomplete
         } else if self.quick {
             Verdict::SizesMatch

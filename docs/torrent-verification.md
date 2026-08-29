@@ -89,6 +89,29 @@ the implementation forced:
 `lh torrent check` without `--quick` fails with the specific message that piece verification
 is milestone T3, rather than silently doing something less than asked.
 
+### T3 notes
+
+Piece streaming, pad-file zeros and attribution all landed as designed. The boundary rule
+works: damage inside one file convicts only that file, damage on a shared piece convicts
+neither neighbour.
+
+One status had to be added that §6 did not anticipate. When a file is missing, the piece it
+shares with its neighbour cannot be hashed at all — so the *innocent* neighbour has pieces
+that were never checked. Calling it `Complete` would overstate what we know, and `Suspect`
+would imply it might be corrupt. It reports **`Partial { verified, unverifiable }`** instead:
+"every piece I could check passed, and N could not be checked because a neighbouring file is
+bad." `Partial` counts toward the overall verdict being incomplete, and toward the
+files-needing-attention total.
+
+The size pre-check earns its place here: a wrong-sized file is never read, so its pieces are
+marked unverifiable rather than being hashed into garbage that would convict its neighbours.
+
+**Not yet done: an end-to-end run against a real third-party torrent and its payload.** The
+verification fixtures carry real SHA-1 piece hashes, but over payload our own script
+generated. No independent torrent creator (`mktorrent`, `transmission-create`) is installed
+here, and archive.org's own torrents are unsuitable as a vector because they warn that the
+files behind them change over time. Worth closing on a machine that has `mktorrent`.
+
 ---
 
 ## 1. What a `.torrent` actually is
@@ -366,6 +389,7 @@ Then, with generated fixtures:
 | ~~**T0**~~ | ~~bendy spike~~ | **Done** — bendy adopted, infohash mechanism verified against six real torrents. See §0. |
 | ~~**T1**~~ | ~~Parse + `lh torrent info`~~ | **Done** — `Metainfo`, infohash from raw bytes, path validation at parse time, `lh torrent info`. 14 tests. |
 | ~~**T2**~~ | ~~Layout + `--quick`~~ | **Done** — root resolution, join safety, size pre-check, missing and extra files, `lh torrent check --quick`. 11 tests. |
+| ~~**T3**~~ | ~~`lh torrent check`~~ | **Done** — piece streaming, pad-file zeros, per-file attribution, the boundary rule. 6 tests. |
 | **T1** | Parse + `lh torrent info` | Metainfo model, infohash from raw bytes, external test vector. |
 | **T2** | Layout + `--quick` | Root resolution, path validation, size pre-check, missing and extra files. |
 | **T3** | `lh torrent check` | Piece streaming, pad files, per-file attribution, the boundary rule. |

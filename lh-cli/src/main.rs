@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::model::AudioFile;
-use lh_core::torrent::{FileStatus, Metainfo, Verdict, check_sizes};
+use lh_core::torrent::{FileStatus, Metainfo, Verdict, check, check_sizes};
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -353,17 +353,13 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
 }
 
 fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
-    if !quick {
-        // Principle 5: say what is missing and what to do instead.
-        anyhow::bail!(
-            "full piece verification is not implemented yet (milestone T3); \
-             re-run with --quick to compare file sizes"
-        );
-    }
-
     let meta = Metainfo::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let report = check_sizes(&meta, file, path)
-        .with_context(|| format!("checking against {}", path.display()))?;
+    let report = if quick {
+        check_sizes(&meta, file, path)
+    } else {
+        check(&meta, file, path)
+    }
+    .with_context(|| format!("checking against {}", path.display()))?;
 
     println!("{}", report.name);
     println!(
@@ -380,15 +376,33 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
             continue;
         }
         let name = meta.files[outcome.index].display_path();
+        let label = outcome.status.label();
         match &outcome.status {
-            FileStatus::WrongSize { expected, actual } => println!(
-                "{:<11} {name}  (expected {expected} bytes, found {actual})",
-                outcome.status.label()
-            ),
-            FileStatus::Unreadable { reason } => {
-                println!("{:<11} {name}  ({reason})", outcome.status.label())
+            FileStatus::WrongSize { expected, actual } => {
+                println!("{label:<11} {name}  (expected {expected} bytes, found {actual})")
             }
-            status => println!("{:<11} {name}", status.label()),
+            FileStatus::Unreadable { reason } => println!("{label:<11} {name}  ({reason})"),
+            FileStatus::Corrupt { bad_pieces } => {
+                println!("{label:<11} {name}  ({})", pieces_phrase(bad_pieces))
+            }
+            FileStatus::Suspect { piece, shared_with } => {
+                let others: Vec<String> = shared_with
+                    .iter()
+                    .map(|i| meta.files[*i].display_path())
+                    .collect();
+                println!(
+                    "{label:<11} {name}  (piece {piece} is shared with {}; either could be at fault)",
+                    others.join(", ")
+                );
+            }
+            FileStatus::Partial {
+                verified,
+                unverifiable,
+            } => println!(
+                "{label:<11} {name}  ({verified} pieces verified, {unverifiable} unreadable \
+                 because a neighbouring file is bad)"
+            ),
+            _ => println!("{label:<11} {name}"),
         }
     }
     for extra in &report.extra_local {
@@ -398,12 +412,35 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
 
     println!();
     let total = meta.real_files().count();
-    let failed = report.failures().count();
+    if let Some(p) = report.pieces {
+        print!("{} of {} pieces verified", p.ok, p.total);
+        if p.failed > 0 {
+            print!(", {} failed", p.failed);
+        }
+        if p.unverifiable > 0 {
+            print!(", {} unverifiable", p.unverifiable);
+        }
+        println!();
+    }
     match report.verdict() {
-        Verdict::Incomplete => println!("{failed} of {total} files failed the size check"),
-        _ => println!("all {total} files match by size (contents not read)"),
+        Verdict::Incomplete => {
+            let n = report.needs_attention().count();
+            let plural = if n == 1 { "file needs" } else { "files need" };
+            println!("{n} of {total} {plural} attention");
+        }
+        Verdict::SizesMatch => println!("all {total} files match by size (contents not read)"),
+        Verdict::Complete => println!("all {total} files verified"),
     }
     Ok(report.verdict() != Verdict::Incomplete)
+}
+
+fn pieces_phrase(pieces: &[u32]) -> String {
+    if pieces.len() == 1 {
+        format!("piece {}", pieces[0])
+    } else {
+        let list: Vec<String> = pieces.iter().map(u32::to_string).collect();
+        format!("pieces {}", list.join(", "))
+    }
 }
 
 fn format_bytes(n: u64) -> String {

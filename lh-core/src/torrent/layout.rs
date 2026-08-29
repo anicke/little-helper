@@ -136,6 +136,7 @@ pub fn check_sizes(meta: &Metainfo, torrent_path: &Path, given: &Path) -> Result
         root,
         files,
         quick: true,
+        pieces: None,
     })
 }
 

@@ -131,6 +131,63 @@ def main():
         },
     })
 
+    # --- torrents with real piece hashes, plus the payload they describe ---
+    #
+    # Everything above carries dummy digests because T1/T2 only parse. Verification needs
+    # hashes actually computed over bytes, so these ship with the files themselves.
+    payload = OUT / "payload"
+
+    def content(tag, n):
+        """Deterministic, non-repeating bytes, so corruption is actually detectable."""
+        out = bytearray()
+        i = 0
+        while len(out) < n:
+            out += hashlib.sha256(b"%s-%d" % (tag.encode(), i)).digest()
+            i += 1
+        return bytes(out[:n])
+
+    def real_torrent(name, root, entries, piece_length):
+        """entries: [(relative path parts, length or None for a pad file)]"""
+        stream = b""
+        files = []
+        for parts, length, pad in entries:
+            if pad:
+                stream += b"\x00" * length
+                files.append(f(length, *parts, attr="p"))
+            else:
+                data = content("/".join(parts), length)
+                stream += data
+                target = payload / root / pathlib.Path(*parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                files.append(f(length, *parts))
+        pieces = b"".join(
+            hashlib.sha1(stream[i:i + piece_length]).digest()
+            for i in range(0, len(stream), piece_length)
+        )
+        info = {
+            b"files": files,
+            b"name": root,
+            b"piece length": piece_length,
+            b"pieces": pieces,
+        }
+        write(name, {b"info": info})
+
+    # 500 bytes over 128-byte pieces. Piece 0 spans d1t01/d1t02 and piece 2 spans
+    # d1t02/d1t03, which is what makes boundary attribution testable.
+    real_torrent("verify-multi.torrent", "verified", [
+        (["d1t01.flac"], 100, False),
+        (["d1t02.flac"], 250, False),
+        (["d1t03.flac"], 150, False),
+    ], 128)
+
+    # Padding aligns d1t02 to a piece boundary: 100 + 28 = 128.
+    real_torrent("verify-padded.torrent", "padded", [
+        (["d1t01.flac"], 100, False),
+        ([".pad", "28"], 28, True),
+        (["d1t02.flac"], 256, False),
+    ], 128)
+
     print(f"\n  wrote to {OUT}")
 
 
