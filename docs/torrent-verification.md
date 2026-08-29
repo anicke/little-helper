@@ -72,6 +72,23 @@ Two things the real torrents taught us:
 A pure v2 torrent is detected before the missing-key checks run, so it reports
 &ldquo;this is a BitTorrent v2 torrent&rdquo; rather than the useless &ldquo;info dictionary has no pieces&rdquo;.
 
+### T2 notes
+
+Root resolution works from either side of the show folder, as §5 specified. Two decisions
+the implementation forced:
+
+* **Single-file torrents report no extras.** The containing directory is the user's own —
+  listing everything else in their downloads folder would be noise, not information. Extras
+  are only meaningful for multi-file torrents, where the folder belongs to the show.
+* **`join_checked` is the second line of defence, not the first.** Components are already
+  validated at parse time, so its real job is the platform rule that only matters once a
+  path exists: Windows reserved device names, matched on the stem so `NUL.txt` is caught
+  too. The containment check after joining should be unreachable; if it ever fires, parse-time
+  validation has a hole.
+
+`lh torrent check` without `--quick` fails with the specific message that piece verification
+is milestone T3, rather than silently doing something less than asked.
+
 ---
 
 ## 1. What a `.torrent` actually is
@@ -348,6 +365,7 @@ Then, with generated fixtures:
 |---|---|---|
 | ~~**T0**~~ | ~~bendy spike~~ | **Done** — bendy adopted, infohash mechanism verified against six real torrents. See §0. |
 | ~~**T1**~~ | ~~Parse + `lh torrent info`~~ | **Done** — `Metainfo`, infohash from raw bytes, path validation at parse time, `lh torrent info`. 14 tests. |
+| ~~**T2**~~ | ~~Layout + `--quick`~~ | **Done** — root resolution, join safety, size pre-check, missing and extra files, `lh torrent check --quick`. 11 tests. |
 | **T1** | Parse + `lh torrent info` | Metainfo model, infohash from raw bytes, external test vector. |
 | **T2** | Layout + `--quick` | Root resolution, path validation, size pre-check, missing and extra files. |
 | **T3** | `lh torrent check` | Piece streaming, pad files, per-file attribution, the boundary rule. |

@@ -21,3 +21,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 hex = "0.4"
+tempfile = "3"

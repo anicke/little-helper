@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::model::AudioFile;
-use lh_core::torrent::Metainfo;
+use lh_core::torrent::{FileStatus, Metainfo, Verdict, check_sizes};
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -59,6 +59,18 @@ enum TorrentCommand {
         #[arg(long)]
         no_files: bool,
     },
+    /// Check local files against a .torrent.
+    Check {
+        /// The .torrent file.
+        file: PathBuf,
+        /// Where the files are. Either the folder containing the show or the show
+        /// folder itself; both work.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Compare sizes only, without reading file contents.
+        #[arg(long)]
+        quick: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -104,6 +116,7 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Check { file } => cmd_check(&file),
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
+            TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),
         },
     }
 }
@@ -337,6 +350,60 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
+    if !quick {
+        // Principle 5: say what is missing and what to do instead.
+        anyhow::bail!(
+            "full piece verification is not implemented yet (milestone T3); \
+             re-run with --quick to compare file sizes"
+        );
+    }
+
+    let meta = Metainfo::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let report = check_sizes(&meta, file, path)
+        .with_context(|| format!("checking against {}", path.display()))?;
+
+    println!("{}", report.name);
+    println!(
+        "  {}  {} files  {}",
+        hex::encode(report.info_hash),
+        meta.real_files().count(),
+        format_bytes(meta.total_length)
+    );
+    println!("  root {}", report.root.display());
+    println!();
+
+    for outcome in &report.files {
+        if outcome.status == FileStatus::Padding {
+            continue;
+        }
+        let name = meta.files[outcome.index].display_path();
+        match &outcome.status {
+            FileStatus::WrongSize { expected, actual } => println!(
+                "{:<11} {name}  (expected {expected} bytes, found {actual})",
+                outcome.status.label()
+            ),
+            FileStatus::Unreadable { reason } => {
+                println!("{:<11} {name}  ({reason})", outcome.status.label())
+            }
+            status => println!("{:<11} {name}", status.label()),
+        }
+    }
+    for extra in &report.extra_local {
+        let shown = extra.strip_prefix(&report.root).unwrap_or(extra);
+        println!("{:<11} {}", "EXTRA", shown.display());
+    }
+
+    println!();
+    let total = meta.real_files().count();
+    let failed = report.failures().count();
+    match report.verdict() {
+        Verdict::Incomplete => println!("{failed} of {total} files failed the size check"),
+        _ => println!("all {total} files match by size (contents not read)"),
+    }
+    Ok(report.verdict() != Verdict::Incomplete)
 }
 
 fn format_bytes(n: u64) -> String {
