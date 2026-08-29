@@ -39,6 +39,20 @@ pub enum Error {
         source: metaflac::Error,
     },
 
+    #[error("{path}: not valid bencode: {source}")]
+    Bencode {
+        path: PathBuf,
+        #[source]
+        source: bendy::decoding::Error,
+    },
+
+    #[error("{path}: not a usable torrent: {detail}")]
+    Torrent { path: PathBuf, detail: String },
+
+    /// Torrent paths are attacker-controlled; this is the zip-slip class of bug.
+    #[error("{path}: refusing unsafe path in torrent: {detail}")]
+    UnsafeTorrentPath { path: PathBuf, detail: String },
+
     #[error("{path}:{line}: malformed {kind} entry: {detail}")]
     ChecksumSyntax {
         path: PathBuf,
@@ -57,6 +71,18 @@ impl Error {
     }
     pub fn malformed(path: impl Into<PathBuf>, detail: impl Into<String>) -> Self {
         Error::Malformed {
+            path: path.into(),
+            detail: detail.into(),
+        }
+    }
+    pub fn torrent(path: impl Into<PathBuf>, detail: impl Into<String>) -> Self {
+        Error::Torrent {
+            path: path.into(),
+            detail: detail.into(),
+        }
+    }
+    pub fn unsafe_path(path: impl Into<PathBuf>, detail: impl Into<String>) -> Self {
+        Error::UnsafeTorrentPath {
             path: path.into(),
             detail: detail.into(),
         }

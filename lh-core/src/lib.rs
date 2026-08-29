@@ -16,6 +16,7 @@ pub mod error;
 pub mod format;
 pub mod model;
 pub mod scan;
+pub mod torrent;
 
 pub use error::{Error, Result};
 pub use model::{AudioFile, AudioFormat, StreamInfo};

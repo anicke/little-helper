@@ -54,3 +54,26 @@ fn ffp_output_matches_the_reference() {
         .success()
         .stdout(predicates::str::contains(line));
 }
+
+#[test]
+fn torrent_info_reports_the_infohash() {
+    lh().arg("torrent")
+        .arg("info")
+        .arg(fixtures().join("torrents/debian-13.6.0-amd64-netinst.iso.torrent"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "481b6e3617be4c88f96cb25e47c9d8272130071e",
+        ))
+        .stdout(predicates::str::contains("debian-13.6.0-amd64-netinst.iso"));
+}
+
+#[test]
+fn torrent_info_on_a_non_torrent_is_a_command_failure() {
+    lh().arg("torrent")
+        .arg("info")
+        .arg(fixtures().join("cdda-aligned.flac"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("not valid bencode"));
+}

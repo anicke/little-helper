@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::model::AudioFile;
+use lh_core::torrent::Metainfo;
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -36,10 +37,27 @@ enum Command {
     Md5(ChecksumArgs),
     /// Write or print ST5 checksums (audio data only).
     St5(ChecksumArgs),
+    /// Work with .torrent files.
+    Torrent {
+        #[command(subcommand)]
+        command: TorrentCommand,
+    },
     /// Check files against an existing .ffp, .md5 or .st5 file.
     Check {
         /// The checksum file. Its kind is taken from the extension.
         file: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum TorrentCommand {
+    /// Show what a .torrent contains: infohash, trackers, pieces and file list.
+    Info {
+        /// The .torrent file.
+        file: PathBuf,
+        /// Suppress the file listing.
+        #[arg(long)]
+        no_files: bool,
     },
 }
 
@@ -84,6 +102,9 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Md5(a) => cmd_checksum(ChecksumKind::Md5, &a),
         Command::St5(a) => cmd_checksum(ChecksumKind::St5, &a),
         Command::Check { file } => cmd_check(&file),
+        Command::Torrent { command } => match command {
+            TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
+        },
     }
 }
 
@@ -271,6 +292,91 @@ fn cmd_check(file: &Path) -> Result<bool> {
 
 /// `m:ss.mmm`, the layout shntool uses — sub-second precision matters when the question
 /// is whether a track sits on a sector boundary.
+fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
+    let t = Metainfo::read(file).with_context(|| format!("reading {}", file.display()))?;
+
+    println!("{}", t.name);
+    println!("  infohash     {}", t.info_hash_hex());
+    println!(
+        "  pieces       {} x {}",
+        t.pieces.len(),
+        format_bytes(t.piece_length)
+    );
+    println!(
+        "  total        {} ({} bytes)",
+        format_bytes(t.total_length),
+        t.total_length
+    );
+    let real = t.real_files().count();
+    let pad = t.files.len() - real;
+    if pad > 0 {
+        println!("  files        {real} ({pad} padding)");
+    } else {
+        println!("  files        {real}");
+    }
+    if let Some(v) = &t.created_by {
+        println!("  created by   {v}");
+    }
+    if let Some(ts) = t.creation_date {
+        println!("  created      {}", format_date(ts));
+    }
+    if let Some(v) = &t.comment {
+        // Trackers write multi-line comments; keep the column alignment intact.
+        for (i, line) in v.lines().enumerate() {
+            println!("  {:<12} {line}", if i == 0 { "comment" } else { "" });
+        }
+    }
+    for (i, tracker) in t.announce.iter().enumerate() {
+        println!("  {:<12} {tracker}", if i == 0 { "trackers" } else { "" });
+    }
+
+    if list_files {
+        println!();
+        for f in t.real_files() {
+            println!("  {:>12}  {}", format_bytes(f.length), f.display_path());
+        }
+    }
+    Ok(true)
+}
+
+fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
+}
+
+/// Torrent creation dates matter for identifying an old seed, so show a date rather than
+/// an epoch. Civil-from-days, so this needs no date library.
+fn format_date(epoch_secs: i64) -> String {
+    let days = epoch_secs.div_euclid(86_400);
+    let secs = epoch_secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
 fn format_duration(secs: f64) -> String {
     let millis = (secs * 1000.0).round() as u64;
     let (m, rem) = (millis / 60_000, millis % 60_000);

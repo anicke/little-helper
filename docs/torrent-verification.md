@@ -17,7 +17,7 @@ exactly the sense Principle 2 means.
 
 ## 0. T0 result — bendy is adopted
 
-*Spike run 2026-08-29.*
+*Spike run 2026-08-29. T1 landed the same day.*
 
 **Both T0 questions are answered, and the strictness worry was overstated.**
 
@@ -52,6 +52,25 @@ refused torrent can be explained rather than merely denied.
 real data. No sample from a 2005-era desktop client (µTorrent, Azureus) either. The residual
 risk is low but not zero; if a legitimate torrent is ever refused, revisit then rather than
 pre-building a lenient path nobody needs.
+
+### T1 notes
+
+Path components are validated at **parse time**, not at join time as §5 originally implied,
+so an unsafe `TorrentFile` can never be constructed at all. Root resolution and the
+containment check still belong to T2; Windows reserved device names are checked there, where
+the join actually happens.
+
+Two things the real torrents taught us:
+
+* **Archive.org's boilerplate comment mentions a &ldquo;pad file directory&rdquo;** even when the torrent
+  has none. Padding detection now accepts BEP 47's authoritative `attr` flag plus two older
+  naming conventions (`.pad/…` and `_____padding_file…`), because treating padding as a
+  missing file would report a good download as broken.
+* **Multi-line comments** are normal — archive.org writes five lines — so `lh torrent info`
+  indents continuation lines rather than breaking its own column alignment.
+
+A pure v2 torrent is detected before the missing-key checks run, so it reports
+&ldquo;this is a BitTorrent v2 torrent&rdquo; rather than the useless &ldquo;info dictionary has no pieces&rdquo;.
 
 ---
 
@@ -328,6 +347,7 @@ Then, with generated fixtures:
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**T0**~~ | ~~bendy spike~~ | **Done** — bendy adopted, infohash mechanism verified against six real torrents. See §0. |
+| ~~**T1**~~ | ~~Parse + `lh torrent info`~~ | **Done** — `Metainfo`, infohash from raw bytes, path validation at parse time, `lh torrent info`. 14 tests. |
 | **T1** | Parse + `lh torrent info` | Metainfo model, infohash from raw bytes, external test vector. |
 | **T2** | Layout + `--quick` | Root resolution, path validation, size pre-check, missing and extra files. |
 | **T3** | `lh torrent check` | Piece streaming, pad files, per-file attribution, the boundary rule. |

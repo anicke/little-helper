@@ -14,7 +14,9 @@ authors = ["Little Helper contributors"]
 lh-core = { path = "lh-core", version = "0.1.0" }
 claxon = "0.4"
 metaflac = "0.2"
-md-5 = "0.10"
+md-5 = "0.11"
+sha1 = "0.11"
+bendy = "0.6"
 hex = "0.4"
 thiserror = "2"
 anyhow = "1"
