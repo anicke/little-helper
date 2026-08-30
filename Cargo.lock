@@ -302,6 +302,7 @@ dependencies = [
  "hex",
  "lh-core",
  "predicates",
+ "tempfile",
 ]
 
 [[package]]

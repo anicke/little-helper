@@ -2,11 +2,24 @@ use crate::error::{Error, Result};
 use crate::model::StreamInfo;
 use md5::{Digest, Md5};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const WAVE_FORMAT_PCM: u16 = 0x0001;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+
+/// `KSDATAFORMAT_SUBTYPE_PCM`, the only subtype we write.
+const SUBTYPE_PCM: [u8; 16] = [
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+];
+
+/// Channel masks for `WAVE_FORMAT_EXTENSIBLE`, indexed by channel count - 1. These are
+/// the values `flac -d` actually writes, read out of its output rather than inferred from
+/// a specification — matching the reference decoder is the requirement.
+const CHANNEL_MASKS: [u32; 8] = [0x4, 0x3, 0x7, 0x33, 0x37, 0x3F, 0x70F, 0x63F];
+
+/// WAV is a 32-bit format: every length field is a `u32`.
+const MAX_WAV_DATA: u64 = u32::MAX as u64;
 
 #[derive(Debug, Clone)]
 pub struct WavLayout {
@@ -135,4 +148,143 @@ pub fn audio_md5(path: &Path) -> Result<[u8; 16]> {
         remaining -= want as u64;
     }
     Ok(hasher.finalize().into())
+}
+
+/// Streams PCM into a canonical RIFF/WAVE file.
+///
+/// The target is byte-for-byte what `flac -d` writes, because that is the file traders
+/// already have: legacy 16-byte `fmt ` below 17 bits and 3 channels, and
+/// `WAVE_FORMAT_EXTENSIBLE` above. The corpus tests pin that equality.
+pub struct WavWriter<W: Write + Seek> {
+    inner: W,
+    bits_per_sample: u8,
+    header_len: u64,
+    data_len: u64,
+    scratch: Vec<u8>,
+}
+
+impl<W: Write + Seek> WavWriter<W> {
+    /// Writes the header straight away, with placeholder lengths that [`finish`] patches.
+    /// We cannot know the length up front: a FLAC that does not declare its own total
+    /// sample count is a real thing, and buffering a whole show in memory is not an option.
+    ///
+    /// [`finish`]: WavWriter::finish
+    pub fn new(mut inner: W, si: &StreamInfo) -> io::Result<Self> {
+        if si.channels == 0 || si.sample_rate == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot write a WAV with no channels or no sample rate",
+            ));
+        }
+        if !matches!(si.bits_per_sample, 8 | 16 | 24) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot write a {}-bit WAV; only 8, 16 and 24 bits are supported",
+                    si.bits_per_sample
+                ),
+            ));
+        }
+
+        let extensible = si.bits_per_sample > 16 || si.channels > 2;
+        let block_align = si.bytes_per_frame() as u16;
+        let byte_rate = si.sample_rate * si.bytes_per_frame();
+        let fmt_len: u32 = if extensible { 40 } else { 16 };
+
+        let mut header = Vec::with_capacity(12 + 8 + fmt_len as usize + 8);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&0u32.to_le_bytes()); // patched by finish
+        header.extend_from_slice(b"WAVE");
+        header.extend_from_slice(b"fmt ");
+        header.extend_from_slice(&fmt_len.to_le_bytes());
+        header.extend_from_slice(
+            &if extensible {
+                WAVE_FORMAT_EXTENSIBLE
+            } else {
+                WAVE_FORMAT_PCM
+            }
+            .to_le_bytes(),
+        );
+        header.extend_from_slice(&u16::from(si.channels).to_le_bytes());
+        header.extend_from_slice(&si.sample_rate.to_le_bytes());
+        header.extend_from_slice(&byte_rate.to_le_bytes());
+        header.extend_from_slice(&block_align.to_le_bytes());
+        header.extend_from_slice(&u16::from(si.bits_per_sample).to_le_bytes());
+        if extensible {
+            header.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+            header.extend_from_slice(&u16::from(si.bits_per_sample).to_le_bytes()); // valid bits
+            header.extend_from_slice(&channel_mask(si.channels).to_le_bytes());
+            header.extend_from_slice(&SUBTYPE_PCM);
+        }
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&0u32.to_le_bytes()); // patched by finish
+
+        inner.write_all(&header)?;
+        Ok(Self {
+            inner,
+            bits_per_sample: si.bits_per_sample,
+            header_len: header.len() as u64,
+            data_len: 0,
+            scratch: Vec::new(),
+        })
+    }
+
+    /// Append interleaved samples, as the decoder hands them over.
+    ///
+    /// 8-bit is the one place WAV and FLAC disagree: WAV stores it unsigned, FLAC signed,
+    /// so the bias is applied here and nowhere else.
+    pub fn write_samples(&mut self, samples: &[i32]) -> io::Result<()> {
+        let width = usize::from(self.bits_per_sample) / 8;
+        self.scratch.clear();
+        self.scratch.reserve(samples.len() * width);
+        for &s in samples {
+            match self.bits_per_sample {
+                8 => self.scratch.push((s + 128) as u8),
+                16 => self.scratch.extend_from_slice(&(s as i16).to_le_bytes()),
+                _ => self.scratch.extend_from_slice(&s.to_le_bytes()[..3]),
+            }
+        }
+        let written = self.scratch.len() as u64;
+        if self.data_len + written > MAX_WAV_DATA {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "audio exceeds the 4 GiB a WAV file can address",
+            ));
+        }
+        self.inner.write_all(&self.scratch)?;
+        self.data_len += written;
+        Ok(())
+    }
+
+    /// Patch the two length fields and return the `data` payload length.
+    pub fn finish(mut self) -> io::Result<u64> {
+        // RIFF chunks are word-aligned. `flac` counts the pad byte in the RIFF size;
+        // so do we.
+        if self.data_len % 2 == 1 {
+            self.inner.write_all(&[0])?;
+        }
+        let padded = self.data_len + (self.data_len & 1);
+        let riff_len = self.header_len - 8 + padded;
+        if riff_len > MAX_WAV_DATA {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "audio exceeds the 4 GiB a WAV file can address",
+            ));
+        }
+
+        self.inner.seek(SeekFrom::Start(4))?;
+        self.inner.write_all(&(riff_len as u32).to_le_bytes())?;
+        self.inner.seek(SeekFrom::Start(self.header_len - 4))?;
+        self.inner
+            .write_all(&(self.data_len as u32).to_le_bytes())?;
+        self.inner.flush()?;
+        Ok(self.data_len)
+    }
+}
+
+fn channel_mask(channels: u8) -> u32 {
+    CHANNEL_MASKS
+        .get(usize::from(channels) - 1)
+        .copied()
+        .unwrap_or(0)
 }

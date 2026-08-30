@@ -90,3 +90,72 @@ fn tools_reports_a_configured_flac_that_is_absent() {
         .stdout(predicates::str::contains("LH_FLAC"))
         .stdout(predicates::str::contains("flac is required"));
 }
+
+/// Conversion writes new files and never touches the source, so the test asserts the
+/// input is still there and still byte-for-byte itself.
+#[test]
+fn convert_writes_a_wav_and_leaves_the_flac_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("cdda-aligned.flac");
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), &src).unwrap();
+    let before = std::fs::read(&src).unwrap();
+
+    lh().arg("convert")
+        .arg(dir.path())
+        .args(["--to", "wav"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("WROTE     cdda-aligned.wav"));
+
+    assert!(dir.path().join("cdda-aligned.wav").exists());
+    assert_eq!(std::fs::read(&src).unwrap(), before);
+}
+
+/// An output that already exists is a file failure, not a command failure: the rest of
+/// the batch still runs, and the exit code says something needs attention.
+#[test]
+fn convert_refuses_to_overwrite_an_existing_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("cdda-aligned.flac"),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("cdda-aligned.wav"), b"mine").unwrap();
+
+    lh().arg("convert")
+        .arg(dir.path())
+        .args(["--to", "wav"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("already exists"));
+
+    assert_eq!(
+        std::fs::read(dir.path().join("cdda-aligned.wav")).unwrap(),
+        b"mine"
+    );
+}
+
+/// Encoding without the reference encoder is a command failure, and it is reported before
+/// any file is touched rather than halfway through a show.
+#[test]
+fn convert_to_flac_without_the_encoder_is_a_command_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.wav"),
+        dir.path().join("cdda-aligned.wav"),
+    )
+    .unwrap();
+
+    lh().arg("convert")
+        .arg(dir.path())
+        .args(["--to", "flac"])
+        .env("LH_FLAC", dir.path().join("no-such-flac"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "encoding WAV to FLAC requires flac",
+        ));
+
+    assert!(!dir.path().join("cdda-aligned.flac").exists());
+}

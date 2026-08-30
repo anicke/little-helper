@@ -12,6 +12,7 @@
 
 pub mod analysis;
 pub mod checksum;
+pub mod convert;
 pub mod error;
 pub mod format;
 pub mod model;

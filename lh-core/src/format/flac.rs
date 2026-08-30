@@ -1,6 +1,8 @@
 use crate::error::{Error, Result};
+use crate::format::wav::WavWriter;
 use crate::model::StreamInfo;
 use md5::{Digest, Md5};
+use std::io::{Seek, Write};
 use std::path::Path;
 
 /// Read STREAMINFO and the vendor string. Header reads only — no decode, so this is
@@ -58,6 +60,64 @@ pub fn audio_md5(path: &Path) -> Result<[u8; 16]> {
         })?;
         buf.copy_from_slice(&sample.to_le_bytes());
         hasher.update(&buf[..bytes_per_sample]);
+    }
+
+    Ok(hasher.finalize().into())
+}
+
+/// Decode a FLAC into `out`, returning the MD5 of the audio we actually produced.
+///
+/// Lossless decoding is deterministic and bit-identical, so this is the in-process path
+/// (Principle 3): the reference decoder and ours cannot disagree about the samples, only
+/// about the container, and the corpus tests pin the container too.
+///
+/// The MD5 follows FLAC's own convention — signed, little-endian, `bits_per_sample`
+/// rounded up to whole bytes — so the caller can compare it against STREAMINFO without
+/// a second pass over the file.
+/// `dst` is used only to attribute write errors to the file they happened on.
+pub fn decode_to_wav<W: Write + Seek>(
+    path: &Path,
+    dst: &Path,
+    out: &mut WavWriter<W>,
+) -> Result<[u8; 16]> {
+    let mut reader = claxon::FlacReader::open(path).map_err(|source| Error::Flac {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let bytes_per_sample = (reader.streaminfo().bits_per_sample as usize).div_ceil(8);
+
+    let mut hasher = Md5::new();
+    let mut frames = reader.blocks();
+    let mut block_buf = Vec::new();
+    let mut interleaved: Vec<i32> = Vec::new();
+    let mut digest_buf: Vec<u8> = Vec::new();
+
+    loop {
+        let block = match frames.read_next_or_eof(block_buf) {
+            Ok(Some(block)) => block,
+            Ok(None) => break,
+            Err(source) => {
+                return Err(Error::Flac {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+
+        interleaved.clear();
+        digest_buf.clear();
+        for i in 0..block.duration() {
+            for ch in 0..block.channels() {
+                let sample = block.sample(ch, i);
+                interleaved.push(sample);
+                digest_buf.extend_from_slice(&sample.to_le_bytes()[..bytes_per_sample]);
+            }
+        }
+        hasher.update(&digest_buf);
+        out.write_samples(&interleaved)
+            .map_err(|e| Error::io(dst, e))?;
+
+        block_buf = block.into_buffer();
     }
 
     Ok(hasher.finalize().into())

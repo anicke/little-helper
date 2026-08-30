@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
-use lh_core::model::AudioFile;
+use lh_core::convert::{Conversion, EncodeOpts, to_flac, to_wav};
+use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{FileStatus, Metainfo, Verdict, check, check_sizes};
 use lh_core::{format, scan};
@@ -38,6 +39,8 @@ enum Command {
     Md5(ChecksumArgs),
     /// Write or print ST5 checksums (audio data only).
     St5(ChecksumArgs),
+    /// Decode FLAC to WAV, or encode WAV to FLAC with the reference encoder.
+    Convert(ConvertArgs),
     /// Show the reference binaries we found, with versions and hashes.
     Tools,
     /// Work with .torrent files.
@@ -86,6 +89,33 @@ struct Paths {
     recursive: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Target {
+    Wav,
+    Flac,
+}
+
+#[derive(clap::Args)]
+struct ConvertArgs {
+    #[command(flatten)]
+    paths: Paths,
+    /// What to produce. Files already in that format are left alone.
+    #[arg(long, value_enum)]
+    to: Target,
+    /// Write outputs here instead of beside their sources.
+    #[arg(long)]
+    out_dir: Option<PathBuf>,
+    /// flac's compression level, 0 to 8. Only used when encoding.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(0..=8))]
+    level: u8,
+    /// Overwrite outputs that already exist. Sources are never touched either way.
+    #[arg(long)]
+    force: bool,
+    /// Print the full provenance record for every file written.
+    #[arg(long)]
+    provenance: bool,
+}
+
 #[derive(clap::Args)]
 struct ChecksumArgs {
     #[command(flatten)]
@@ -117,6 +147,7 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Md5(a) => cmd_checksum(ChecksumKind::Md5, &a),
         Command::St5(a) => cmd_checksum(ChecksumKind::St5, &a),
         Command::Check { file } => cmd_check(&file),
+        Command::Convert(a) => cmd_convert(&a),
         Command::Tools => cmd_tools(),
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
@@ -436,6 +467,109 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
         Verdict::Complete => println!("all {total} files verified"),
     }
     Ok(report.verdict() != Verdict::Incomplete)
+}
+
+/// The one command that produces files people will trade, so it says exactly what
+/// produced each one. Sources are never modified and never deleted (Principle 1).
+fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
+    let (files, mut ok) = collect(&args.paths)?;
+
+    // Discovered once, before any work: if the encoder is missing, say so now rather
+    // than after converting half a show.
+    let encoder = match args.to {
+        Target::Flac => Some(
+            Registry::discover_one(ToolId::Flac)
+                .require(ToolId::Flac)
+                .cloned()?,
+        ),
+        Target::Wav => None,
+    };
+    let opts = EncodeOpts {
+        compression_level: args.level,
+        ..EncodeOpts::default()
+    };
+
+    let (want, extension) = match args.to {
+        Target::Wav => (AudioFormat::Wav, "wav"),
+        Target::Flac => (AudioFormat::Flac, "flac"),
+    };
+
+    let mut written = 0usize;
+    for f in &files {
+        if f.format == want {
+            println!("SKIPPED   {} (already {want})", f.file_name());
+            continue;
+        }
+        let dst = match destination(f, extension, args.out_dir.as_deref()) {
+            Some(d) => d,
+            None => {
+                ok = false;
+                println!(
+                    "FAILED    {} (has no file name to work from)",
+                    f.path.display()
+                );
+                continue;
+            }
+        };
+
+        let result = match args.to {
+            Target::Wav => to_wav(&f.path, &dst, args.force),
+            Target::Flac => to_flac(
+                &f.path,
+                &dst,
+                encoder.as_ref().expect("discovered above"),
+                &opts,
+                args.force,
+            ),
+        };
+        match result {
+            Ok(done) => {
+                written += 1;
+                report_conversion(&done, args.provenance);
+            }
+            Err(e) => {
+                ok = false;
+                println!("FAILED    {}: {e}", f.file_name());
+            }
+        }
+    }
+
+    println!("{written} of {} files converted", files.len());
+    Ok(ok)
+}
+
+fn report_conversion(done: &Conversion, show_provenance: bool) {
+    let name = done
+        .output
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| done.output.display().to_string());
+    if done.checked_against_source {
+        println!("WROTE     {name}");
+    } else {
+        // A weaker result than the usual one, and it says so rather than looking the same.
+        println!("WROTE     {name}  (unchecked: nothing in the source to compare against)");
+    }
+    if show_provenance {
+        for line in done.provenance.render().lines() {
+            println!("          {line}");
+        }
+    }
+}
+
+/// Same stem, new extension, beside the source unless told otherwise.
+///
+/// Built as an `OsString` rather than through `with_extension`, which would eat everything
+/// after the last dot of a name like `gd77-05-08.d1t01.flac` — and non-UTF-8 names are in
+/// the fixture corpus for a reason.
+fn destination(f: &AudioFile, extension: &str, out_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = out_dir
+        .map(Path::to_path_buf)
+        .or_else(|| f.path.parent().map(Path::to_path_buf))?;
+    let mut name = f.path.file_stem()?.to_os_string();
+    name.push(".");
+    name.push(extension);
+    Some(dir.join(name))
 }
 
 /// The Tools panel, headless. Every operation that shells out logs the same facts this

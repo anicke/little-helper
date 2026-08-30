@@ -12,18 +12,22 @@ for the live-music trading community: verify, checksum and convert lossless audi
 
 ## 0. Status
 
-*Updated 2026-08-29.*
+*Updated 2026-08-30.*
 
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan done; tool registry and job queue not started |
-| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check` all work |
+| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion done; job queue not started |
+| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools` all work |
 | M3 `lh-gui` | not started (placeholder crate) |
 | M4 Packaging | not started |
 
-25 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
-on the fixture corpus.
+73 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
+the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
+
+Every v0.1 operation in §2 is now implemented. What remains for v0.1 is the job queue, the
+GUI, and packaging.
 
 **Known limitations to close before v0.1:**
 
@@ -39,6 +43,10 @@ on the fixture corpus.
    24-bit WAVs use the latter, and `flac` warns about ours. Extend the generator.
 4. **`.md5` is written md5sum-style** (`hash  name`). Confirm against what TLH actually
    writes before traders compare files.
+5. **Encoding drops foreign RIFF chunks.** `flac` only preserves a WAV's `LIST`/`INFO`
+   chunks under `--keep-foreign-metadata`, which we do not pass, so `wav → flac → wav` is
+   byte-identical only for a canonical WAV. Taper metadata in a source WAV does not survive
+   the trip. Decide whether to pass the flag before anyone converts an archive with it.
 
 ---
 
@@ -119,6 +127,7 @@ little-helper/            cargo workspace
 │   ├── format/           FLAC (claxon, metaflac), WAV reader/writer
 │   ├── checksum/         ffp, md5, st5 — compute, parse, write
 │   ├── analysis/         sbe, verify, info
+│   ├── convert/          flac→wav in-process, wav→flac via reference flac
 │   ├── tools/            registry: discovery, version capture, argv, process runner
 │   ├── job/              queue, worker pool, progress events, cancellation
 │   ├── report/           structured results + provenance/audit trail
@@ -131,15 +140,22 @@ little-helper/            cargo workspace
 
 Promoted from implementation detail to headline feature, because it is the traceability story.
 
+*Implemented in `lh-core/src/tools/`, surfaced as `lh tools`.*
+
 - Discovers `flac`, later `metaflac` / `shntool`, in this order: user-configured path →
-  bundled sidecar directory → `PATH` (via `which`).
+  bundled sidecar directory → `PATH` (via `which`). A configured path is the *whole* search:
+  if the binary the user named is absent we fail rather than quietly running a different
+  one, which would make the provenance record a lie. Until the config module exists, the
+  user-configured path is `LH_FLAC` / `LH_METAFLAC` / `LH_SHNTOOL`.
 - Captures each tool's `--version` at startup and displays it.
 - Shows the SHA-256 of every bundled binary, and lets the user point at their own build.
 - Logs tool + version + exact argv for every operation performed.
 
 ### Codec abstraction
 
-Keeps SHN/APE/TTA addable later without rearchitecting:
+Keeps SHN/APE/TTA addable later without rearchitecting. **Not built yet:** `convert`
+dispatches on `AudioFormat` the way `format::probe` already does, because one implementor
+is not an abstraction. The trait earns its place when SHN arrives and there are two.
 
 ```rust
 pub trait Codec {
