@@ -206,7 +206,7 @@ closes it there rather than leaving the queue to sit beside the code it was mean
 |---|---|---|
 | ~~**J1**~~ | ~~Core queue~~ | **Done** — `CancelToken`, `JobId`, `Progress<T>`, `Event<T>`, `Queue<T>` on a bounded rayon pool. Wired into `lh verify`/`sbe`/`ffp`/`md5`/`st5`/`convert` for multi-file batches; `Ctrl-C` cancels cleanly via `ctrlc`. Torrent create runs as a single queued job reusing its existing progress callback. 5 tests in `lh-core/tests/job.rs`. See §7. |
 | ~~**J2**~~ | ~~Fine-grained + killable~~ | **Done, with one sketch item cut on evidence** — frame-level progress for FLAC → WAV (in-process); `run()` grows `run_cancellable`, a `spawn()` + `kill()` variant, so a WAV → FLAC job actually stops mid-`flac`. Byte-level progress *from `flac`'s own stderr* is not implemented — §8 found it is not available at all over a pipe. See §8. |
-| **J3** | GUI adapter | Iced `Subscription` wrapping `Queue<T>::events()` for the job-queue panel in PLAN.md §4. Needs M3 to exist first. |
+| **J3** | GUI adapter | Iced `Subscription` wrapping `Queue<T>::events()` for the job-queue panel in PLAN.md §4. Planned in [docs/gui.md](docs/gui.md) (§G0 spike done; G2 is where this lands). |
 
 ---
 
@@ -217,10 +217,10 @@ closes it there rather than leaving the queue to sit beside the code it was mean
    interactive UI than it does for a CLI invocation that has the machine to itself.
 2. **A `--jobs N` CLI flag now, or wait for someone to ask?** Nothing in §0's evidence says
    anyone has hit the default's limits yet.
-3. **One `Queue` per batch command, or one long-lived queue for the whole process?** J1 does
-   the former — simplest, and a CLI invocation is one command anyway. A GUI wants the latter,
-   a single pool and panel across every operation the user starts; revisit when M3 exists
-   rather than guessing at its needs now.
+3. ~~**One `Queue` per batch command, or one long-lived queue for the whole process?**~~
+   **Resolved in [docs/gui.md](docs/gui.md) §1/§2**: the GUI uses one long-lived
+   `Queue<JobOutcome>` for the process's life, which breaks `JobId::index()`'s dense-index
+   assumption from §7 below — see gui.md §5 open question 2.
 4. **Does `Progress::report`'s (done, total) shape generalize past pieces?** It is exactly
    what `hash_pieces` already produces. J2's byte-level convert progress may want (bytes,
    total_bytes) instead — same shape, different unit — or may want to report elapsed time too.

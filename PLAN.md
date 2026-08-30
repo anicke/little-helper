@@ -19,7 +19,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
 | M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; see [docs/job-queue.md](docs/job-queue.md) |
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
-| M3 `lh-gui` | not started (placeholder crate) |
+| M3 `lh-gui` | **planned** — see [docs/gui.md](docs/gui.md); G0 spike done, G1 (scaffold) not started |
 | M4 Packaging | not started |
 
 130 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
@@ -32,6 +32,9 @@ progress and `Ctrl-C` cancellation. `convert`'s FLAC → WAV direction also repo
 progress, and its WAV → FLAC direction can be killed mid-`flac`, not just between files
 (J2; see [docs/job-queue.md](docs/job-queue.md) §8 for why `flac`'s own progress display
 turned out not to be usable at all). What remains for v0.1 is the GUI and packaging.
+[docs/gui.md](docs/gui.md) plans M3: a spike (G0) confirmed the Iced 0.14 `Subscription`
+bridge over `job::Queue`'s event channel works as `docs/job-queue.md` hoped, and that
+window-level drag-and-drop is available.
 
 **Known limitations to close before v0.1:**
 
