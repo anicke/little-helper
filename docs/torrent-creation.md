@@ -505,6 +505,17 @@ Exit codes follow the contract: `0` written, `1` the fileset has something wrong
 
 ## 7. Pre-flight — the reason this is not a shell script around mktorrent
 
+> **Postponed 2026-08-30.** This section describes a feature the original never had, and
+> that is the problem with it. TLH's changelog introduces torrent creation in 1.1.0.89
+> (2006-09-15) as "select a tracker from a default tracker list, add a comment, set the
+> piece size and exclude .db files", and in fourteen years of releases nothing was ever
+> added to check a show before making a torrent of it — the `Verify` and `Create torrent`
+> pages stayed separate for the life of the program. So the claim below that this is "the
+> feature" is an argument, not an observation, and no user has yet asked for it. C4 waits
+> until someone does, or until the GUI makes the joined-up flow obvious. Nothing else in
+> this document depends on it: `create` writes torrents today, and adding a check before
+> the write is additive whenever it happens.
+
 `mktorrent` hashes bytes. We already know what the bytes *are*.
 
 Before writing, by default:
@@ -608,7 +619,7 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 | ~~**C1**~~ | ~~Bencode out~~ | **Done** — canonical encoder, `info` encoded once and hashed from that buffer, the debian vector re-encoded to its published infohash. Tiered `announce`, `private` and `source` in `Metainfo` and `lh torrent info`. 9 tests. See §0. |
 | ~~**C2**~~ | ~~Folder → torrent~~ | **Done** — collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. mktorrent equality live on Linux and committed for every platform. 16 tests. See §0. |
 | ~~**C3**~~ | ~~The tracker list~~ | **Done** — TLH's eleven, re-checked by announce GET rather than DNS, each with what we saw and when. `Health` gates what may be written; user list in TLH's format from the config directory, `--tracker` by id or URL, passkeys, one tier per tracker, `--private`, `--source`, `lh torrent trackers`. 20 tests. See §0. |
-| **C4** | Pre-flight | Verify/FFP/SBE checks before writing, `--no-check`, `--write-ffp`. |
+| **C4** | Pre-flight | **Postponed 2026-08-30** — a feature TLH never had and nobody has asked for. Verify/FFP/SBE checks before writing, `--no-check`, `--write-ffp`. See §7. |
 | **C5** | GUI panel | Folder → trackers → pre-flight → create, with piece progress. Needs the job queue. |
 | — | later | v2 and hybrid creation, alongside T5. Creating hybrid torrents is worth more than parsing them — a hybrid seeds to both swarms — but it is still last. |
 
@@ -616,9 +627,10 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 
 ## 11. Open questions
 
-1. **Refuse or warn when the show fails pre-flight?** Refusing is the safer default and the
-   whole point of §7, but a taper re-seeding a known-imperfect historical show will hit it.
-   Is `--no-check` enough of an escape hatch, or does that case deserve its own words?
+1. ~~**Refuse or warn when the show fails pre-flight?**~~ **Moot while C4 is postponed.**
+   Refusing is the safer default and the whole point of §7, but a taper re-seeding a
+   known-imperfect historical show will hit it, and `--no-check` may not be enough of an
+   escape hatch for that case. Worth answering before any of §7 is built, not now.
 2. ~~**Should choosing a private tracker set `private: 1` automatically?**~~ **Settled: yes.**
    A tracker entry marked `private` sets the flag. Getting it wrong wastes an upload, and the
    user's intent when they name a private site is not ambiguous. Because it is an invisible
