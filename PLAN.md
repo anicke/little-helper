@@ -97,7 +97,11 @@ MP3 export, cue split & join, 24-bit→16-bit resample, batch rename.
 
 Torrent verification — checking a local fileset against a `.torrent` — is planned separately
 in [docs/torrent-verification.md](docs/torrent-verification.md). It is read-only and pure
-Rust, so it could land earlier than the rest of this list.
+Rust, so it could land earlier than the rest of this list, and T1–T3 already have.
+
+Torrent *creation* — making a `.torrent` for a show, with the trackers traders use — is
+planned in [docs/torrent-creation.md](docs/torrent-creation.md). It reuses the verification
+walk and is the natural place to refuse to seed a show that does not verify.
 
 SHN is legacy — nothing has been created in it in twenty years, and circulating material has
 been reseeded as FLAC. Since v0.1 already shells out to reference tools, adding `shntool`

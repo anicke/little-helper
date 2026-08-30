@@ -110,7 +110,13 @@ marked unverifiable rather than being hashed into garbage that would convict its
 verification fixtures carry real SHA-1 piece hashes, but over payload our own script
 generated. No independent torrent creator (`mktorrent`, `transmission-create`) is installed
 here, and archive.org's own torrents are unsuitable as a vector because they warn that the
-files behind them change over time. Worth closing on a machine that has `mktorrent`.
+files behind them change over time.
+
+> **Closed by the creation plan.** `mktorrent` turns out to be packaged for Ubuntu, so CI can
+> install it the way it now installs `flac`. A mktorrent-made torrent over our fixture
+> payload, verified by `lh torrent check`, is exactly the missing run — see
+> [torrent-creation.md §8](torrent-creation.md#8-testing--and-this-time-there-is-a-real-oracle),
+> which needs the same thing for its own oracle.
 
 ---
 
@@ -413,4 +419,5 @@ verification is exact and the boundary ambiguity in §2 disappears entirely.** K
 2. Does `--quick` (sizes only) deserve to be the default, with full hashing behind a flag?
    Sizes answer "did it finish" instantly; hashing answers "is it intact" in seconds.
 3. Should a verified torrent be able to *emit* an `.ffp`/`.md5` for the same fileset, so a
-   torrent-sourced show enters the normal checksum workflow in one step?
+   torrent-sourced show enters the normal checksum workflow in one step? (The creation plan
+   wants the same thing from the other side, as `lh torrent create --write-ffp`.)
