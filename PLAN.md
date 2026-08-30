@@ -17,7 +17,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list done; job queue not started |
+| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list done; job queue planned, see [docs/job-queue.md](docs/job-queue.md) |
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
 | M3 `lh-gui` | not started (placeholder crate) |
 | M4 Packaging | not started |
@@ -152,7 +152,7 @@ little-helper/            cargo workspace
 │   ├── convert/          flac→wav in-process, wav→flac via reference flac
 │   ├── tools/            registry: discovery, version capture, argv, process runner
 │   ├── torrent/          metainfo, verify, create, encode, tracker list
-│   ├── job/              queue, worker pool, progress events, cancellation
+│   ├── job/              queue, worker pool, progress events, cancellation (docs/job-queue.md)
 │   ├── report/           structured results + provenance/audit trail
 │   └── config.rs         where config files live (LH_CONFIG_DIR, then the platform's)
 ├── lh-cli/               headless batch (clap)
