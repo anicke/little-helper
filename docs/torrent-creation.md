@@ -73,6 +73,32 @@ torrents with a tier editor, excluding `.db` and `.torrent` files from the file 
 default output location of the *parent* of the source folder — with a confirmation prompt if
 you try to write the `.torrent` inside the folder it describes.
 
+### C1 notes
+
+*Landed 2026-08-30.*
+
+The free oracle in §8 turned out to be better than expected. Every torrent in the fixture
+corpus uses **only** the `info` keys we model — `length`/`files`, `name`, `piece length`,
+`pieces`, plus `attr` on padding — so re-encoding is not limited to the debian vector. Six
+torrents from three generators now go parse → `Draft` → encode → SHA-1 and come back with
+the infohash they arrived with, and the debian one matches the absolute value two
+independent implementations agreed on during T0.
+
+Two things the implementation forced:
+
+* **bendy cannot splice pre-encoded bytes into a dictionary it is building.** The `info`
+  dictionary is bendy's throughout, but the outer dictionary is assembled in `RawDict`,
+  because §1's rule requires `info` to go in as the exact bytes that were hashed and there
+  is no `emit_raw`. `RawDict` still *sorts* its keys rather than trusting the author to
+  write them in order, which is the property that mattered about `emit_and_sort_dict`.
+* **`announce` is not simply the first entry of `announce-list`.** BEP 12 says it should
+  also appear there and real torrents comply, so the parser only promotes it to a tier of
+  its own when it is genuinely absent — otherwise a well-formed torrent grows a duplicate
+  tracker every time it is read.
+
+`Draft.creation_date` is documented as epoch seconds UTC at the field, because the type
+cannot stop us repeating the bug TLH shipped.
+
 ### What we already have
 
 * `Metainfo`, path validation at parse time, and the infohash-from-raw-bytes rule (T1).
@@ -375,6 +401,11 @@ of the committed `debian-13.6.0-amd64-netinst.iso.torrent`** from what our parse
 assert the infohash is still `481b6e3617be4c88f96cb25e47c9d8272130071e`. It needs no payload
 and no external tool, and it tests our encoder against a real canonical torrent from outside.
 
+> **Done in C1, and it generalised.** Every fixture uses only the `info` keys we model, so
+> six torrents from three generators re-encode to their own infohashes, not just the debian
+> one. That is why `mktorrent` is not in CI yet: there is nothing it would catch until C2
+> introduces a folder walk and a file ordering for it to disagree with.
+
 Then the fixtures — three of which are the bugs TLH shipped:
 
 * a file ending **exactly** on a piece boundary;
@@ -406,7 +437,7 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 
 | # | Milestone | Contents |
 |---|---|---|
-| **C1** | Bencode out | Canonical encoder, `info` encoded once and hashed from that buffer, re-encode the debian vector and match its infohash. Tiered `announce` in `Metainfo`; `private` and `source` read and shown by `lh torrent info`. |
+| ~~**C1**~~ | ~~Bencode out~~ | **Done** — canonical encoder, `info` encoded once and hashed from that buffer, the debian vector re-encoded to its published infohash. Tiered `announce`, `private` and `source` in `Metainfo` and `lh torrent info`. 9 tests. See §0. |
 | **C2** | Folder → torrent | Collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. The mktorrent equality test in CI. |
 | **C3** | The tracker list | Bundled list with `confirmed` dates, user list in TLH's format, `--tracker` by id, passkeys, tiers, `--private`, `--source`, `lh torrent trackers`. |
 | **C4** | Pre-flight | Verify/FFP/SBE checks before writing, `--no-check`, `--write-ffp`. |
@@ -420,14 +451,18 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 1. **Refuse or warn when the show fails pre-flight?** Refusing is the safer default and the
    whole point of §7, but a taper re-seeding a known-imperfect historical show will hit it.
    Is `--no-check` enough of an escape hatch, or does that case deserve its own words?
-2. **Should choosing a private tracker set `private: 1` automatically?** It is what the user
-   means, and getting it wrong wastes an upload — but it is also an invisible change to the
-   infohash driven by a table we ship.
+2. ~~**Should choosing a private tracker set `private: 1` automatically?**~~ **Settled: yes.**
+   A tracker entry marked `private` sets the flag. Getting it wrong wastes an upload, and the
+   user's intent when they name a private site is not ambiguous. Because it is an invisible
+   change to the infohash driven by a table we ship, `create` must *say* it set the flag, and
+   `lh torrent trackers` must show which entries carry it.
 3. **How is the bundled list maintained?** A date on each entry is honest but static. Do we
    re-check at release time, let the community PR it, or eventually fetch it — and if we
    fetch, what happens offline, which is the case the bundling was for?
-4. **Is infohash equality with `mktorrent` a requirement or a test?** If a future mktorrent
-   changes its ordering, do we follow it or hold our rule and drop the assertion?
+4. ~~**Is infohash equality with `mktorrent` a requirement or a test?**~~ **Settled for now: a
+   test, and not yet.** C1 needed no external tool — re-encoding real torrents already pins
+   the encoding — so mktorrent stays out of CI until C2 has a folder walk for it to disagree
+   with. Revisit the requirement-or-test question then, when there is something to compare.
 5. **Padding files (BEP 47): never, or opt-in?** They help modern clients dedupe; the trading
    community's tooling is old and some of it may not cope. Default off is obvious; the
    question is whether opt-in is worth building at all.

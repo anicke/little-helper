@@ -362,6 +362,14 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
     } else {
         println!("  files        {real}");
     }
+    // A private torrent cannot be reseeded anywhere else, and the flag is inside the
+    // infohash, so a trader is entitled to see it before they plan around this file.
+    if t.private {
+        println!("  private      yes (BEP 27; part of the infohash)");
+    }
+    if let Some(v) = &t.source {
+        println!("  source       {v}");
+    }
     if let Some(v) = &t.created_by {
         println!("  created by   {v}");
     }
@@ -374,7 +382,7 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
             println!("  {:<12} {line}", if i == 0 { "comment" } else { "" });
         }
     }
-    for (i, tracker) in t.announce.iter().enumerate() {
+    for (i, tracker) in t.trackers().enumerate() {
         println!("  {:<12} {tracker}", if i == 0 { "trackers" } else { "" });
     }
 

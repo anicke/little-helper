@@ -45,7 +45,7 @@ fn external_vector_fields_are_read_correctly() {
     assert_eq!(t.created_by.as_deref(), Some("mktorrent 1.1"));
     assert_eq!(
         t.announce,
-        vec!["http://bttracker.debian.org:6969/announce"]
+        vec![vec!["http://bttracker.debian.org:6969/announce"]]
     );
 }
 

@@ -36,7 +36,14 @@ pub struct Metainfo {
     pub total_length: u64,
     /// Single-file torrents have no root directory; `name` is the file itself.
     pub is_single_file: bool,
-    pub announce: Vec<String>,
+    /// BEP 27. Lives inside `info`, so it is part of the infohash: a torrent cannot be
+    /// made private after the fact, only made into a different torrent.
+    pub private: bool,
+    /// Some private sites require this to make the infohash uniquely theirs.
+    pub source: Option<String>,
+    /// Tracker tiers (BEP 12). Clients choose at random within a tier and fall through
+    /// between tiers, so the nesting carries meaning and is kept rather than flattened.
+    pub announce: Vec<Vec<String>>,
     pub comment: Option<String>,
     pub created_by: Option<String>,
     pub creation_date: Option<i64>,
@@ -57,6 +64,11 @@ impl Metainfo {
         self.files.iter().filter(|f| !f.is_pad)
     }
 
+    /// Every tracker, tiers flattened, for callers that only want to list them.
+    pub fn trackers(&self) -> impl Iterator<Item = &str> {
+        self.announce.iter().flatten().map(String::as_str)
+    }
+
     pub fn from_bytes(bytes: &[u8], origin: &Path) -> Result<Self> {
         let mut decoder = Decoder::new(bytes);
         let object = decoder
@@ -73,7 +85,8 @@ impl Metainfo {
                 source,
             })?;
 
-        let mut announce = Vec::new();
+        let mut announce: Option<String> = None;
+        let mut tiers: Vec<Vec<String>> = Vec::new();
         let mut comment = None;
         let mut created_by = None;
         let mut creation_date = None;
@@ -84,14 +97,14 @@ impl Metainfo {
             source,
         })? {
             match key {
-                b"announce" => add_tracker(&mut announce, text(value, origin)?),
+                b"announce" => announce = Some(text(value, origin)?),
                 b"announce-list" => {
-                    // list of tiers, each a list of URLs
-                    let mut tiers = value.try_into_list().map_err(|source| Error::Bencode {
+                    // A list of tiers, each a list of URLs.
+                    let mut list = value.try_into_list().map_err(|source| Error::Bencode {
                         path: origin.into(),
                         source,
                     })?;
-                    while let Some(tier) = tiers.next_object().map_err(|source| Error::Bencode {
+                    while let Some(tier) = list.next_object().map_err(|source| Error::Bencode {
                         path: origin.into(),
                         source,
                     })? {
@@ -99,13 +112,17 @@ impl Metainfo {
                             path: origin.into(),
                             source,
                         })?;
+                        let mut group = Vec::new();
                         while let Some(url) =
                             urls.next_object().map_err(|source| Error::Bencode {
                                 path: origin.into(),
                                 source,
                             })?
                         {
-                            add_tracker(&mut announce, text(url, origin)?);
+                            add_tracker(&mut group, text(url, origin)?);
+                        }
+                        if !group.is_empty() {
+                            tiers.push(group);
                         }
                     }
                 }
@@ -118,6 +135,16 @@ impl Metainfo {
         }
 
         let info = info.ok_or_else(|| Error::torrent(origin, "no info dictionary"))?;
+
+        // BEP 12 says `announce` should also appear in `announce-list`, and real torrents
+        // put it there. Only prepend it as its own tier when it is genuinely absent, so a
+        // well-formed torrent does not grow a duplicate tracker on the way in.
+        if let Some(url) = announce.filter(|u| !u.is_empty())
+            && !tiers.iter().flatten().any(|t| *t == url)
+        {
+            tiers.insert(0, vec![url]);
+        }
+
         Ok(Self {
             info_hash: info.info_hash,
             name: info.name,
@@ -126,7 +153,9 @@ impl Metainfo {
             files: info.files,
             total_length: info.total_length,
             is_single_file: info.is_single_file,
-            announce,
+            private: info.private,
+            source: info.source,
+            announce: tiers,
             comment,
             created_by,
             creation_date,
@@ -148,6 +177,8 @@ struct InfoParts {
     files: Vec<TorrentFile>,
     total_length: u64,
     is_single_file: bool,
+    private: bool,
+    source: Option<String>,
 }
 
 fn parse_info(value: Object<'_, '_>, origin: &Path) -> Result<InfoParts> {
@@ -164,6 +195,8 @@ fn parse_info(value: Object<'_, '_>, origin: &Path) -> Result<InfoParts> {
     let mut single_length: Option<u64> = None;
     let mut files: Option<Vec<TorrentFile>> = None;
     let mut meta_version: Option<i64> = None;
+    let mut private = false;
+    let mut source = None;
 
     while let Some((key, value)) = dict.next_pair().map_err(|source| Error::Bencode {
         path: origin.into(),
@@ -183,6 +216,9 @@ fn parse_info(value: Object<'_, '_>, origin: &Path) -> Result<InfoParts> {
             b"length" => single_length = Some(unsigned(value, origin, "length")?),
             b"files" => files = Some(parse_files(value, origin)?),
             b"meta version" => meta_version = Some(integer(value, origin, "meta version")?),
+            // BEP 27 writes 1; treat any non-zero as private rather than only the literal.
+            b"private" => private = integer(value, origin, "private")? != 0,
+            b"source" => source = Some(text(value, origin)?),
             _ => {}
         }
     }
@@ -288,6 +324,8 @@ fn parse_info(value: Object<'_, '_>, origin: &Path) -> Result<InfoParts> {
         files,
         total_length,
         is_single_file,
+        private,
+        source,
     })
 }
 

@@ -49,6 +49,10 @@ pub enum Error {
     #[error("{path}: not a usable torrent: {detail}")]
     Torrent { path: PathBuf, detail: String },
 
+    /// Encoding has no file to blame yet — the torrent does not exist until it succeeds.
+    #[error("cannot write a torrent: {detail}")]
+    TorrentEncode { detail: String },
+
     /// Torrent paths are attacker-controlled; this is the zip-slip class of bug.
     #[error("{path}: refusing unsafe path in torrent: {detail}")]
     UnsafeTorrentPath { path: PathBuf, detail: String },
