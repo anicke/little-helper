@@ -428,7 +428,7 @@ signature has been read.
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**S1**~~ | ~~The shell~~ | **Done** — `Area`, the rail, the global path bar, the area pane, the dock with its `Jobs \| Log` toggle. Every existing panel moved into its area unchanged; `run_operation` takes its operation as an argument; `overwrite` split into `convert_overwrite`/`torrent_overwrite`; the window gained a 900×600 minimum size. **No behaviour change** — the existing 14 tests kept passing, five of them with a one-line edit each (§5). See §9 notes. |
-| **S2** | Selection | The checkbox column, select-all in the header, `App::selected`, `run_operation` over the ticked rows, and Torrent → Create explicitly *not* filtered by it (§4). A test that an unticked file gets no job, and one that torrent create ignores ticking entirely. |
+| ~~**S2**~~ | ~~Selection~~ | **Done** — `App::selected: HashSet<PathBuf>`, filled on every `scan`; a select-all checkbox in the file table's header, one per row wired to `Message::FileToggled`; `run_operation` skips any file not in `selected` before its existing per-operation checks. Torrent → Create still reads `working_root` alone. Two new tests: an unticked file gets no job, and clearing the selection entirely does not change what `run_torrent_create` writes. See §9 notes. |
 | **S3** | The checksum areas | Checksum → Create (kind picker, output path, `ChecksumFile::write` after the digests land) and Checksum → Check (`ChecksumFile::read`, one job per entry, per-file results table reusing G4's `JobUpdate` boundary). Tests through the real queue against the fixture corpus and the committed `reference.ffp`/`reference.st5` goldens. |
 | **S4** | The table widget | Replace the hand-rolled file table with `iced::widget::table`; give Files the wide column set including the encoder vendor string. |
 
@@ -475,6 +475,26 @@ What it did not anticipate:
   G-milestone hit) — nobody has clicked a rail row, toggled the dock tab, or watched an area
   switch. The 14 tests are evidence the *logic* moved correctly; the rail's layout itself is
   unverified.
+
+### S2 notes
+
+Landed as planned, no surprises. Two things worth stating plainly rather than leaving
+implicit:
+
+* **Select-all is derived, not stored.** No separate `select_all: bool` field — the header
+  checkbox's own state is computed each `view()` as "every file in `working_set` is in
+  `selected`." That means unticking one row among many un-checks the header on the next
+  render without any code that says so explicitly, and there is no way for the header and
+  the rows to disagree, which a stored flag would have to be kept in sync to guarantee.
+* **The selection gate sits before the per-operation skip, not after.** `run_operation`'s
+  loop now checks `self.selected.contains(&file.path)` first and the convert-target check
+  (§5's original "already in target format" skip) second — an unticked file that also
+  happens to already be in the target format still takes the "no job, not even considered"
+  path rather than being reachable through two different `continue`s that happen to agree.
+* Real evidence, same bar as S1: `cargo test -p lh-gui` (16 tests, the 14 from S1 plus the
+  two this milestone added) and a 6-second `DISPLAY=:0 timeout 6 ./target/debug/little-helper`
+  run with no panic. The same screenshot-tool gap S1 hit means the checkbox column's on-screen
+  alignment is unverified beyond the fixed 24px width both the header and each row share.
 
 ---
 

@@ -35,7 +35,7 @@ use lh_core::torrent::{
     CreateOpts, Metainfo, Passkeys, TrackerList, check_sizes, check_with_progress,
     create_with_progress, default_output, resolve,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// One of the operations `lh-cli` already exposes. G2 wired verify/checksum/sbe, which
@@ -160,6 +160,15 @@ struct App {
     /// (`lh_core::scan::WorkingSet` doc). `None` after a failed scan, same as
     /// `working_set`.
     working_root: Option<PathBuf>,
+    /// The file table's checkbox column (`docs/gui-shell.md` §5, S2) — which of
+    /// `working_set`'s files `run_operation` submits jobs for. Filled with every path on
+    /// each `scan` (scanning selects all — the common case is "do this to the show").
+    /// Path-keyed rather than an index or a parallel `Vec<bool>` because
+    /// `App::latest_job_by_path` already keys the table's other per-row state by path, and
+    /// one convention beats two. GUI state only: `lh_core::scan::WorkingSet` gains no
+    /// `selected` field (Principle 4). Torrent → Create reads `working_root`, not this — it
+    /// makes a torrent for the whole folder on disk, never a filtered subset (§4).
+    selected: HashSet<PathBuf>,
     tools: Registry,
     error: Option<String>,
     queue: Queue<JobOutcome>,
@@ -221,6 +230,8 @@ enum Message {
     FolderPicked(Option<PathBuf>),
     ScanPressed,
     PathDropped(PathBuf),
+    FileToggled(PathBuf, bool),
+    SelectAllToggled(bool),
     AreaSelected(Area),
     ConvertTargetSelected(ConvertTarget),
     ChecksumKindSelected(ChecksumKind),
@@ -253,6 +264,7 @@ impl App {
                 path_input: String::new(),
                 working_set: None,
                 working_root: None,
+                selected: HashSet::new(),
                 tools: Registry::discover(),
                 error: None,
                 queue: Queue::new(),
@@ -294,6 +306,9 @@ impl App {
         match scan::scan(root, true) {
             Ok(set) => {
                 self.error = None;
+                // Scanning selects all (§5) — the common case is "do this to the show",
+                // and a fresh scan replaces whatever selection the previous working set had.
+                self.selected = set.files.iter().map(|f| f.path.clone()).collect();
                 self.working_set = Some(set);
                 self.working_root = Some(root.to_path_buf());
             }
@@ -301,6 +316,7 @@ impl App {
                 self.error = Some(e.to_string());
                 self.working_set = None;
                 self.working_root = None;
+                self.selected.clear();
             }
         }
     }
@@ -488,6 +504,12 @@ impl App {
             _ => None,
         };
         for file in &set.files {
+            // Working-set areas act on the ticked rows only (`docs/gui-shell.md` §4, S2) —
+            // an unticked file gets no job at all, not a skipped one, same treatment as the
+            // already-in-target-format check right below.
+            if !self.selected.contains(&file.path) {
+                continue;
+            }
             // A file already in the target format is a silent no-op in `lh-cli`'s own
             // `cmd_convert` (`ConvertOutcome::Skipped`, printed `SKIPPED ... (already
             // {want})`), not a failure — matched here by not submitting a job for it at
@@ -653,6 +675,22 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             } else {
                 app.path_input = path.display().to_string();
                 app.scan(&path);
+            }
+        }
+        Message::FileToggled(path, checked) => {
+            if checked {
+                app.selected.insert(path);
+            } else {
+                app.selected.remove(&path);
+            }
+        }
+        Message::SelectAllToggled(checked) => {
+            if checked {
+                if let Some(set) = &app.working_set {
+                    app.selected = set.files.iter().map(|f| f.path.clone()).collect();
+                }
+            } else {
+                app.selected.clear();
             }
         }
         Message::AreaSelected(area) => app.area = area,
@@ -946,12 +984,23 @@ fn dock_tab_button(label: &str, tab: DockTab, selected: bool) -> Element<'_, Mes
         .into()
 }
 
+/// The checkbox column width, shared by the select-all header and every row's own
+/// checkbox so the two line up.
+const SELECT_COLUMN: Length = Length::Fixed(24.0);
+
 fn file_table(app: &App) -> Element<'_, Message> {
     let Some(set) = app.working_set.as_ref() else {
         return text("Drop a folder here, or use Browse / Scan.").into();
     };
 
+    // Select-all reflects the current selection rather than being remembered separately
+    // (S2, `docs/gui-shell.md` §9): checked only once every file is, so toggling it off
+    // after a partial selection clears the rest instead of leaving it stuck checked.
+    let all_selected =
+        !set.files.is_empty() && set.files.iter().all(|f| app.selected.contains(&f.path));
     let header = row![
+        container(checkbox(all_selected).on_toggle(Message::SelectAllToggled))
+            .width(SELECT_COLUMN),
         text("Name").width(Length::FillPortion(4)),
         text("Format").width(Length::FillPortion(1)),
         text("Duration").width(Length::FillPortion(1)),
@@ -970,8 +1019,12 @@ fn file_table(app: &App) -> Element<'_, Message> {
             .and_then(|id| app.jobs.get(id))
             .map(|entry| status_label(&entry.status))
             .unwrap_or_else(|| "—".to_string());
+        let path = file.path.clone();
+        let ticked = checkbox(app.selected.contains(&file.path))
+            .on_toggle(move |checked| Message::FileToggled(path.clone(), checked));
         rows = rows.push(
             row![
+                container(ticked).width(SELECT_COLUMN),
                 text(file.file_name()).width(Length::FillPortion(4)),
                 text(file.format.name()).width(Length::FillPortion(1)),
                 text(format_duration(info.duration_secs())).width(Length::FillPortion(1)),
@@ -1477,6 +1530,45 @@ mod tests {
         );
     }
 
+    /// S2's core behaviour change (`docs/gui-shell.md` §9): `run_operation` reads
+    /// `App::selected`, not every file in the working set. Untick one fixture, run Sbe
+    /// (cheap, needs no external tool) over the rest, and confirm the unticked file never
+    /// got a job at all — not a skipped one, the same "no job" treatment as a file already
+    /// in a convert's target format.
+    #[test]
+    fn run_operation_submits_no_job_for_an_unticked_file() {
+        let (mut app, _) = App::boot();
+        app.scan(&fixtures_dir());
+
+        let untick = app
+            .working_set
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .find(|f| f.file_name() == "cdda-aligned.flac")
+            .expect("cdda-aligned.flac must be in the fixture corpus")
+            .path
+            .clone();
+        app.selected.remove(&untick);
+
+        let total_selected = app.selected.len();
+        app.run_operation(Operation::Sbe);
+
+        let rx = app.queue.events();
+        drain(&mut app, &rx, total_selected);
+
+        assert!(
+            !app.latest_job_by_path.contains_key(&untick),
+            "cdda-aligned.flac was unticked and should not have gotten a job"
+        );
+        assert!(
+            app.latest_job_by_path.len() == total_selected,
+            "expected exactly one job per ticked file, got {}",
+            app.latest_job_by_path.len()
+        );
+    }
+
     #[test]
     fn tool_discovery_renders_every_id_one_line_each() {
         let tools = Registry::discover();
@@ -1540,6 +1632,30 @@ mod tests {
             torrent_path.exists(),
             "expected a .torrent written at {}",
             torrent_path.display()
+        );
+    }
+
+    /// S2's other half (`docs/gui-shell.md` §4, §9): Torrent → Create describes the folder
+    /// as it exists on disk and must ignore the selection entirely — filtering by ticked
+    /// rows would produce a `.torrent` whose file list did not match its directory, which is
+    /// a broken torrent, not a subset. Deselect everything and confirm the torrent still
+    /// names all real files.
+    #[test]
+    fn run_torrent_create_ignores_the_selection_entirely() {
+        let dir = torrent_source_dir();
+
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        app.selected.clear();
+        app.run_torrent_create();
+
+        let rx = app.queue.events();
+        drain(&mut app, &rx, 1);
+
+        let status = status_label(&app.jobs.values().next().unwrap().status);
+        assert!(
+            status.starts_with("WROTE") && status.contains("2 files"),
+            "torrent create should have used every file on disk regardless of ticking, got {status:?}"
         );
     }
 
