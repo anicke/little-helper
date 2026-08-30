@@ -96,6 +96,18 @@ impl Created {
     }
 }
 
+/// Where a torrent goes when nobody names a destination: beside the source, named after
+/// it. Not cosmetic — writing the `.torrent` *inside* the folder it describes would add a
+/// file to that folder, so re-creating it later produces a different infohash
+/// (`docs/torrent-creation.md` §6). Both front ends need exactly this, so it lives here
+/// rather than being duplicated the way `convert::destination` was before G3.
+pub fn default_output(source: &Path) -> Option<PathBuf> {
+    let parent = source.parent()?;
+    let mut name = source.file_name()?.to_os_string();
+    name.push(".torrent");
+    Some(parent.join(name))
+}
+
 /// A file that will go into the torrent.
 struct SourceFile {
     /// Path components relative to the torrent root.

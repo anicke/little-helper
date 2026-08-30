@@ -14,7 +14,7 @@ use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
     Chosen, CreateOpts, Created, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList,
-    Verdict, check, check_sizes, create_with_progress, resolve,
+    Verdict, check, check_sizes, create_with_progress, default_output, resolve,
 };
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
@@ -557,7 +557,12 @@ fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
 
     let dst = match &args.output {
         Some(o) => o.clone(),
-        None => default_output(&source)?,
+        None => default_output(&source).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} has no parent directory to write a torrent beside",
+                source.display()
+            )
+        })?,
     };
     // Writing the .torrent inside the folder it describes adds a file to that folder, so
     // re-creating it later would produce a different infohash.
@@ -727,19 +732,6 @@ fn cmd_torrent_trackers() -> Result<bool> {
         None => {}
     }
     Ok(true)
-}
-
-/// Beside the source, not inside it.
-fn default_output(source: &Path) -> Result<PathBuf> {
-    let parent = source.parent().ok_or_else(|| {
-        anyhow::anyhow!("{} has no parent directory to write into", source.display())
-    })?;
-    let stem = source
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("{} has no name", source.display()))?;
-    let mut name = stem.to_os_string();
-    name.push(".torrent");
-    Ok(parent.join(name))
 }
 
 fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {

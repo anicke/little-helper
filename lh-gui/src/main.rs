@@ -10,6 +10,12 @@
 //! real cancel — J2) and the log/audit pane: every finished job that produced a
 //! `Provenance` (today, only convert) appends its rendered text to `App::log`, exportable
 //! to a text file via `Message::ExportLogPressed`.
+//!
+//! G4 adds the torrent panels (`docs/torrent-creation.md` C5, `docs/torrent-verification.md`
+//! T4): create submits one job for the whole working-set folder, through the same queue and
+//! real piece progress; check parses a `.torrent` immediately (Browse or drop) and, on
+//! Check, submits a job whose finished `TorrentReport` fills a per-file results table —
+//! the first `JobUpdate::Finished` payload beyond a single status line.
 
 mod job;
 
@@ -25,14 +31,20 @@ use lh_core::job::{JobId, Queue};
 use lh_core::model::AudioFormat;
 use lh_core::scan::{self, WorkingSet};
 use lh_core::tools::{Discovery, Registry, ToolId};
+use lh_core::torrent::{
+    CreateOpts, Metainfo, Passkeys, TrackerList, check_sizes, check_with_progress,
+    create_with_progress, default_output, resolve,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// One of the operations `lh-cli` already exposes. G2 wired verify/checksum/sbe, which
 /// need no per-run options beyond the file itself; G3 adds convert, which needs a
 /// direction (`ConvertTarget`) and reads `App::overwrite`, the one option it does need.
-/// The torrent panels need a tracker list, so they still wait for G4 rather than growing
-/// this into a catch-all now.
+/// Torrent create and check (G4) stay out of this enum: they act on a whole folder or a
+/// dropped `.torrent`, not on the working set's per-file selection this enum drives, so
+/// `run_torrent_create`/`run_torrent_check` are their own methods with their own panels
+/// rather than two more variants that would not fit `run_operation`'s per-file loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Verify,
@@ -105,13 +117,19 @@ fn status_label(status: &JobStatus) -> String {
 struct App {
     path_input: String,
     working_set: Option<WorkingSet>,
+    /// The folder (or file) `working_set` was scanned from — G4's torrent-create panel
+    /// makes a torrent *for* this, since a `WorkingSet` itself carries no root
+    /// (`lh_core::scan::WorkingSet` doc). `None` after a failed scan, same as
+    /// `working_set`.
+    working_root: Option<PathBuf>,
     tools: Registry,
     error: Option<String>,
     queue: Queue<JobOutcome>,
     operation: Operation,
     /// Convert's one option (`lh-cli`'s `--force`) — whether to overwrite an output that
-    /// already exists. Read only by `Operation::Convert`; harmless while any other
-    /// operation is selected.
+    /// already exists. Also read by the torrent-create panel: both are "an output file
+    /// already exists" the same way, so G4 reuses this one checkbox rather than adding a
+    /// second with identical meaning.
     overwrite: bool,
     jobs: BTreeMap<JobId, JobEntry>,
     latest_job_by_path: HashMap<PathBuf, JobId>,
@@ -120,6 +138,31 @@ struct App {
     /// as "the rendered strings from every finished job, in order," no new `report/`
     /// module).
     log: Vec<String>,
+    /// `TrackerList::load()` and `Passkeys::load()`, read once at boot like `tools`
+    /// (`Registry::discover()`) — the create panel's tracker picker is a read of this, no
+    /// new plumbing, same shape as the Tools panel (`docs/gui.md` §2).
+    trackers: TrackerList,
+    passkeys: Passkeys,
+    /// Comma-separated ids (from `trackers`, shown for reference) or bare announce URLs —
+    /// `lh-cli`'s repeated `--tracker ID|URL` as one field, since Iced 0.14 has no built-in
+    /// multi-line text input and a scrollable list of per-tracker checkboxes buys nothing
+    /// a comma list does not already give a v0.1 user (`docs/gui.md` §2's "no new regions
+    /// invented" principle applied to a widget, not just a layout).
+    torrent_tracker_input: String,
+    torrent_private: bool,
+    torrent_source: String,
+    torrent_comment: String,
+    /// Set by Browse or a `.torrent` drop (`Message::PathDropped` routes by extension);
+    /// parsed immediately via `App::pick_torrent` so the panel shows name/infohash/counts
+    /// before Check ever runs, the same information `lh torrent info` prints.
+    torrent_check_path: Option<PathBuf>,
+    torrent_check_meta: Option<Metainfo>,
+    torrent_check_against: String,
+    torrent_check_quick: bool,
+    /// The last finished check's per-file rows (`docs/torrent-verification.md` T4's file
+    /// table). Replaced wholesale on each `JobUpdate::Finished` that carries one; not
+    /// cleared between runs otherwise, same convention as `jobs` and `log`.
+    torrent_check_rows: Vec<job::TorrentFileRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +179,18 @@ enum Message {
     Job(job::JobUpdate),
     ExportLogPressed,
     LogExportPathPicked(Option<PathBuf>),
+    TorrentTrackerInputChanged(String),
+    TorrentPrivateToggled(bool),
+    TorrentSourceChanged(String),
+    TorrentCommentChanged(String),
+    TorrentCreatePressed,
+    TorrentCheckBrowsePressed,
+    TorrentFilePicked(Option<PathBuf>),
+    TorrentCheckAgainstChanged(String),
+    TorrentCheckAgainstBrowsePressed,
+    TorrentCheckAgainstPicked(Option<PathBuf>),
+    TorrentCheckQuickToggled(bool),
+    TorrentCheckPressed,
 }
 
 impl App {
@@ -144,6 +199,7 @@ impl App {
             App {
                 path_input: String::new(),
                 working_set: None,
+                working_root: None,
                 tools: Registry::discover(),
                 error: None,
                 queue: Queue::new(),
@@ -152,6 +208,21 @@ impl App {
                 jobs: BTreeMap::new(),
                 latest_job_by_path: HashMap::new(),
                 log: Vec::new(),
+                // A malformed user tracker list falls back to the bundled one rather than
+                // failing boot outright — `lh-cli` can afford to exit 2 on this, a GUI
+                // that never opens for a bad `tracker.lst` cannot (`PLAN.md` §1 Principle 1
+                // is about outputs, not about refusing to start over one bad input file).
+                trackers: TrackerList::load().unwrap_or_else(|_| TrackerList::bundled()),
+                passkeys: Passkeys::load().unwrap_or_default(),
+                torrent_tracker_input: String::new(),
+                torrent_private: false,
+                torrent_source: String::new(),
+                torrent_comment: String::new(),
+                torrent_check_path: None,
+                torrent_check_meta: None,
+                torrent_check_against: ".".to_string(),
+                torrent_check_quick: false,
+                torrent_check_rows: Vec::new(),
             },
             Task::none(),
         )
@@ -167,12 +238,160 @@ impl App {
             Ok(set) => {
                 self.error = None;
                 self.working_set = Some(set);
+                self.working_root = Some(root.to_path_buf());
             }
             Err(e) => {
                 self.error = Some(e.to_string());
                 self.working_set = None;
+                self.working_root = None;
             }
         }
+    }
+
+    /// A `.torrent` chosen via Browse or dropped on the window — parsed immediately so the
+    /// check panel can show name/infohash/counts before Check ever runs, the same
+    /// information `lh torrent info` prints. Does not touch `torrent_check_rows`: those
+    /// belong to the *previous* torrent's check, if any, and clearing them on a mere pick
+    /// would lose a result the user has not asked to discard.
+    fn pick_torrent(&mut self, path: PathBuf) {
+        match Metainfo::read(&path) {
+            Ok(meta) => {
+                self.error = None;
+                self.torrent_check_meta = Some(meta);
+            }
+            Err(e) => {
+                self.error = Some(e.to_string());
+                self.torrent_check_meta = None;
+            }
+        }
+        self.torrent_check_path = Some(path);
+    }
+
+    /// Submits one job to the shared queue that makes a torrent for `working_root`
+    /// (`docs/torrent-creation.md` C5) — a single job, like `lh torrent create`'s own
+    /// queue-of-one (`lh-cli`'s `cmd_torrent_create`), not one per file: the payload is
+    /// hashed as one sequential stream regardless of how many files it spans.
+    ///
+    /// Resolving trackers can fail (an unknown id, a tracker `lh-core` knows is broken) —
+    /// checked here, synchronously, before anything is submitted, exactly where `lh-cli`
+    /// checks it, so a bad tracker spec never becomes a job the queue has to fail instead.
+    fn run_torrent_create(&mut self) {
+        let Some(root) = self.working_root.clone() else {
+            self.error = Some("scan a folder first".to_string());
+            return;
+        };
+        let source = match root.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                self.error = Some(format!("{}: {e}", root.display()));
+                return;
+            }
+        };
+        let specs: Vec<String> = self
+            .torrent_tracker_input
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let chosen = match resolve(&specs, &self.trackers, &self.passkeys) {
+            Ok(c) => c,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                return;
+            }
+        };
+        for warning in &chosen.warnings {
+            self.log.push(format!("warning: {warning}"));
+        }
+
+        let dst = match default_output(&source) {
+            Some(d) => d,
+            None => {
+                self.error = Some(format!(
+                    "{} has no name to write a torrent beside",
+                    source.display()
+                ));
+                return;
+            }
+        };
+        let source_tag = if self.torrent_source.trim().is_empty() {
+            chosen.source.clone()
+        } else {
+            Some(self.torrent_source.trim().to_string())
+        };
+        let comment = (!self.torrent_comment.trim().is_empty())
+            .then(|| self.torrent_comment.trim().to_string());
+        let opts = CreateOpts {
+            announce: chosen.tiers.clone(),
+            private: self.torrent_private || chosen.private,
+            source: source_tag,
+            comment,
+            overwrite: self.overwrite,
+            ..CreateOpts::default()
+        };
+
+        self.error = None;
+        self.queue.cancel_token().reset();
+        let label = format!("torrent create: {}", source.display());
+        let id = self.queue.submit(label.clone(), move |p| {
+            JobOutcome::TorrentCreate(
+                create_with_progress(&source, &dst, &opts, &mut |done, total| {
+                    p.report(done, total);
+                    !p.is_cancelled()
+                })
+                .map(Box::new),
+            )
+        });
+        self.jobs.insert(
+            id,
+            JobEntry {
+                label,
+                status: JobStatus::Running { done: 0, total: 0 },
+            },
+        );
+    }
+
+    /// Submits one job that checks `torrent_check_path` against `torrent_check_against`
+    /// (`docs/torrent-verification.md` T4). `check_with_progress`'s progress callback
+    /// (`lh-core/src/torrent/verify.rs`) has no cancellation checkpoint the way
+    /// `create_with_progress`'s does — Cancel still calls `Queue::cancel()`, but a check
+    /// already streaming pieces runs to completion; see the G4 notes.
+    fn run_torrent_check(&mut self) {
+        let Some(torrent_path) = self.torrent_check_path.clone() else {
+            self.error = Some("choose a .torrent file first".to_string());
+            return;
+        };
+        let meta = match Metainfo::read(&torrent_path) {
+            Ok(m) => m,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                return;
+            }
+        };
+        let against = PathBuf::from(self.torrent_check_against.trim());
+        let quick = self.torrent_check_quick;
+
+        self.error = None;
+        self.queue.cancel_token().reset();
+        let label = format!("torrent check: {}", meta.name);
+        let id = self.queue.submit(label.clone(), move |p| {
+            let result = if quick {
+                check_sizes(&meta, &torrent_path, &against)
+            } else {
+                check_with_progress(&meta, &torrent_path, &against, &mut |done, total| {
+                    p.report(done, total);
+                })
+            };
+            JobOutcome::TorrentCheck(result.map(Box::new))
+        });
+        self.jobs.insert(
+            id,
+            JobEntry {
+                label,
+                status: JobStatus::Running { done: 0, total: 0 },
+            },
+        );
     }
 
     /// Submits one job per file in the working set for the selected operation. Resets the
@@ -279,6 +498,7 @@ impl App {
                 id,
                 result,
                 provenance,
+                torrent_check,
             } => {
                 if let Some(entry) = self.jobs.get_mut(&id) {
                     entry.status = match result {
@@ -288,6 +508,9 @@ impl App {
                 }
                 if let Some(text) = provenance {
                     self.log.push(text);
+                }
+                if let Some(rows) = torrent_check {
+                    self.torrent_check_rows = rows;
                 }
             }
             job::JobUpdate::Cancelled { id } => {
@@ -361,8 +584,18 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.scan(&path);
         }
         Message::PathDropped(path) => {
-            app.path_input = path.display().to_string();
-            app.scan(&path);
+            // A dropped `.torrent` goes to the check panel; anything else is a folder (or
+            // file) to scan, same as Browse/Scan — the window has one drop target, not one
+            // per panel (`docs/gui.md` §G0's window-wide drag-and-drop).
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+            {
+                app.pick_torrent(path);
+            } else {
+                app.path_input = path.display().to_string();
+                app.scan(&path);
+            }
         }
         Message::OperationSelected(op) => app.operation = op,
         Message::OverwriteToggled(v) => app.overwrite = v,
@@ -383,6 +616,37 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::LogExportPathPicked(None) => {}
+        Message::TorrentTrackerInputChanged(s) => app.torrent_tracker_input = s,
+        Message::TorrentPrivateToggled(v) => app.torrent_private = v,
+        Message::TorrentSourceChanged(s) => app.torrent_source = s,
+        Message::TorrentCommentChanged(s) => app.torrent_comment = s,
+        Message::TorrentCreatePressed => app.run_torrent_create(),
+        Message::TorrentCheckBrowsePressed => {
+            return Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("torrent", &["torrent"])
+                        .pick_file()
+                        .await
+                },
+                |handle| Message::TorrentFilePicked(handle.map(|h| h.path().to_path_buf())),
+            );
+        }
+        Message::TorrentFilePicked(Some(path)) => app.pick_torrent(path),
+        Message::TorrentFilePicked(None) => {}
+        Message::TorrentCheckAgainstChanged(s) => app.torrent_check_against = s,
+        Message::TorrentCheckAgainstBrowsePressed => {
+            return Task::perform(
+                async { rfd::AsyncFileDialog::new().pick_folder().await },
+                |handle| Message::TorrentCheckAgainstPicked(handle.map(|h| h.path().to_path_buf())),
+            );
+        }
+        Message::TorrentCheckAgainstPicked(Some(path)) => {
+            app.torrent_check_against = path.display().to_string();
+        }
+        Message::TorrentCheckAgainstPicked(None) => {}
+        Message::TorrentCheckQuickToggled(v) => app.torrent_check_quick = v,
+        Message::TorrentCheckPressed => app.run_torrent_check(),
     }
     Task::none()
 }
@@ -401,6 +665,9 @@ fn view(app: &App) -> Element<'_, Message> {
 
     let table = file_table(app);
     let operations = operation_panel(app);
+    let torrent_create = torrent_create_panel(app);
+    let torrent_check = torrent_check_panel(app);
+    let torrent_results = torrent_check_results_panel(&app.torrent_check_rows);
     let jobs_panel = job_queue_panel(&app.jobs);
     let log = log_panel(&app.log);
     let tools_panel = tools_panel(&app.tools);
@@ -411,6 +678,9 @@ fn view(app: &App) -> Element<'_, Message> {
             error,
             table,
             operations,
+            torrent_create,
+            torrent_check,
+            torrent_results,
             jobs_panel,
             log,
             tools_panel
@@ -486,6 +756,110 @@ fn operation_panel(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// `docs/torrent-creation.md` C5: folder (`App::working_root`, already scanned above) →
+/// trackers → create, with piece progress through the same job-queue panel every other
+/// operation uses. Pre-flight (C4) is postponed there and stays out of this panel too.
+fn torrent_create_panel(app: &App) -> Element<'_, Message> {
+    let mut known = Column::new()
+        .spacing(2)
+        .push(text("Known trackers (id, name, health):"));
+    for t in app.trackers.all() {
+        known = known.push(text(format!("{}  {}  {}", t.id, t.name, t.health.label())));
+    }
+
+    let tracker_input = text_input(
+        "Tracker ids or URLs, comma-separated (blank = trackerless)",
+        &app.torrent_tracker_input,
+    )
+    .on_input(Message::TorrentTrackerInputChanged);
+    let private = checkbox(app.torrent_private)
+        .label("Private (BEP 27)")
+        .on_toggle(Message::TorrentPrivateToggled);
+    let source = text_input("Source tag (optional)", &app.torrent_source)
+        .on_input(Message::TorrentSourceChanged);
+    let comment = text_input("Comment (optional)", &app.torrent_comment)
+        .on_input(Message::TorrentCommentChanged);
+    let create = button("Create torrent").on_press_maybe(
+        app.working_root
+            .is_some()
+            .then_some(Message::TorrentCreatePressed),
+    );
+
+    column![
+        text("Create torrent"),
+        scrollable(known).height(Length::Fixed(80.0)),
+        tracker_input,
+        row![private, source, comment, create].spacing(8),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// `docs/torrent-verification.md` T4: drop or Browse a `.torrent`, see what
+/// `App::pick_torrent` parsed from it, then Check against a folder. The per-file table is
+/// [`torrent_check_results_panel`], not here — it needs a finished job's rows, not just
+/// the metainfo this panel already has before Check is ever pressed.
+fn torrent_check_panel(app: &App) -> Element<'_, Message> {
+    let torrent_label = match &app.torrent_check_path {
+        Some(p) => p.display().to_string(),
+        None => "No .torrent chosen — Browse or drop one on the window.".to_string(),
+    };
+    let browse = button("Browse .torrent...").on_press(Message::TorrentCheckBrowsePressed);
+
+    let info: Element<'_, Message> = match &app.torrent_check_meta {
+        Some(meta) => text(format!(
+            "{}  {}  {} files  {} pieces of {}",
+            meta.name,
+            meta.info_hash_hex(),
+            meta.real_files().count(),
+            meta.pieces.len(),
+            format_bytes(meta.piece_length),
+        ))
+        .into(),
+        None => text("").into(),
+    };
+
+    let against = text_input("Folder to check against", &app.torrent_check_against)
+        .on_input(Message::TorrentCheckAgainstChanged);
+    let against_browse =
+        button("Browse folder...").on_press(Message::TorrentCheckAgainstBrowsePressed);
+    let quick = checkbox(app.torrent_check_quick)
+        .label("Quick (sizes only)")
+        .on_toggle(Message::TorrentCheckQuickToggled);
+    let run = button("Check").on_press_maybe(
+        app.torrent_check_path
+            .is_some()
+            .then_some(Message::TorrentCheckPressed),
+    );
+
+    column![
+        text("Check torrent"),
+        row![text(torrent_label), browse].spacing(8),
+        info,
+        row![against, against_browse, quick, run].spacing(8),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// The last finished check's per-file status — `docs/torrent-verification.md` T4's "file
+/// table with status". Empty until a check has actually finished once.
+fn torrent_check_results_panel(rows: &[job::TorrentFileRow]) -> Element<'_, Message> {
+    if rows.is_empty() {
+        return text("").into();
+    }
+    let mut list = Column::new().spacing(4).push(text("Torrent check results"));
+    for r in rows {
+        let line = if r.detail.is_empty() {
+            format!("{:<11} {}", r.label, r.path)
+        } else {
+            format!("{:<11} {}  ({})", r.label, r.path, r.detail)
+        };
+        list = list.push(text(line));
+    }
+    scrollable(list).height(Length::FillPortion(2)).into()
+}
+
 /// The log/audit pane — `Provenance::render()` text from every finished job that produced
 /// one, oldest first, plus an Export button that writes them to a text file the user
 /// picks (`docs/gui.md` §2). Not cleared between runs, same as the job-queue panel.
@@ -551,6 +925,25 @@ fn tool_line(id: ToolId, discovery: &Discovery) -> String {
         Discovery::Unusable { path, reason } => {
             format!("{}: {} — unusable: {reason}", id.name(), path.display())
         }
+    }
+}
+
+/// Duplicated from `lh-cli`'s own `format_bytes` rather than lifted into `lh-core`: pure
+/// display formatting, not a correctness-sensitive detail like `convert::destination` or
+/// `torrent::default_output` — `format_duration` right below is already the same kind of
+/// duplicate.
+pub(crate) fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
     }
 }
 
@@ -858,5 +1251,126 @@ mod tests {
                 id.name()
             );
         }
+    }
+
+    #[test]
+    fn format_bytes_matches_kib_mib() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(16 * 1024), "16.0 KiB");
+        assert_eq!(format_bytes(16 * 1024 * 1024), "16.0 MiB");
+    }
+
+    /// A folder with a couple of small synthetic files, not the read-only audio fixture
+    /// corpus — torrent create/check do not care what the bytes are, and a real write
+    /// (the `.torrent` itself) must not touch the checked-in corpus, same reasoning G3's
+    /// convert tests already established.
+    fn torrent_source_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("track1.bin"), vec![1u8; 40_000]).unwrap();
+        std::fs::write(dir.path().join("track2.bin"), vec![2u8; 20_000]).unwrap();
+        dir
+    }
+
+    /// G4's real evidence for C5: `App::run_torrent_create` moves a real folder through
+    /// `create_with_progress` and back into `App` state, producing an actual `.torrent`
+    /// beside the source with the piece count/length the payload implies.
+    #[test]
+    fn running_torrent_create_through_the_real_queue_writes_a_torrent() {
+        let dir = torrent_source_dir();
+
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        assert_eq!(
+            app.working_root.as_deref(),
+            Some(dir.path()),
+            "scanning must record the root torrent create builds from"
+        );
+        app.run_torrent_create();
+
+        let rx = app.queue.events();
+        drain(&mut app, &rx, 1);
+
+        assert_eq!(app.jobs.len(), 1);
+        let status = status_label(&app.jobs.values().next().unwrap().status);
+        assert!(
+            status.starts_with("WROTE") && status.contains("2 files"),
+            "got {status:?}"
+        );
+        let source = dir.path().canonicalize().unwrap();
+        let torrent_path = lh_core::torrent::default_output(&source).unwrap();
+        assert!(
+            torrent_path.exists(),
+            "expected a .torrent written at {}",
+            torrent_path.display()
+        );
+    }
+
+    /// G4's real evidence for T4: create a real torrent, then check it against its own
+    /// source folder through `App::run_torrent_check` and the real queue — `Verdict::Complete`
+    /// end to end, plus the per-file table `torrent_check_rows` feeds the results panel.
+    #[test]
+    fn running_torrent_check_through_the_real_queue_reports_complete_and_fills_the_table() {
+        let dir = torrent_source_dir();
+        let source = dir.path().canonicalize().unwrap();
+        let torrent_path = lh_core::torrent::default_output(&source).unwrap();
+
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        app.run_torrent_create();
+        let rx = app.queue.events();
+        drain(&mut app, &rx, 1);
+        assert!(
+            torrent_path.exists(),
+            "setup: torrent create should have written {}",
+            torrent_path.display()
+        );
+
+        app.torrent_check_path = Some(torrent_path);
+        app.torrent_check_against = dir.path().display().to_string();
+        app.run_torrent_check();
+        drain(&mut app, &rx, 1);
+
+        let check_status = status_label(&app.jobs.values().nth(1).unwrap().status);
+        assert_eq!(check_status, "OK", "got {check_status:?}");
+        assert_eq!(app.torrent_check_rows.len(), 2, "one row per real file");
+        for row in &app.torrent_check_rows {
+            assert_eq!(row.label, "OK", "{}: {}", row.path, row.detail);
+        }
+    }
+
+    /// The synchronous check `run_torrent_create` does before submitting anything: an
+    /// unresolvable tracker spec must fail up front, exactly like `lh-cli`'s own
+    /// `cmd_torrent_create`, not become a job the queue has to fail instead.
+    #[test]
+    fn an_unresolvable_tracker_spec_is_rejected_before_any_job_is_submitted() {
+        let dir = torrent_source_dir();
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        app.torrent_tracker_input = "not-a-real-tracker-id".to_string();
+        app.run_torrent_create();
+
+        assert!(app.error.is_some(), "expected an error, got none");
+        assert!(
+            app.jobs.is_empty(),
+            "no job should have been submitted for an unresolvable tracker"
+        );
+    }
+
+    /// `Message::PathDropped` routes by extension (`update`'s own match arm) — a dropped
+    /// `.torrent` must reach the check panel, not be handed to `App::scan` as though it
+    /// were an audio folder.
+    #[test]
+    fn dropping_a_dot_torrent_file_is_routed_to_the_check_panel() {
+        let torrent_path = PathBuf::from("/tmp/does-not-need-to-exist/show.torrent");
+        let (mut app, _) = App::boot();
+        // `pick_torrent` will fail to read it and set `app.error`; the routing itself is
+        // what this test checks, not a successful parse.
+        let _ = update(&mut app, Message::PathDropped(torrent_path.clone()));
+
+        assert_eq!(app.torrent_check_path, Some(torrent_path));
+        assert!(
+            app.working_set.is_none(),
+            "must not have been treated as a folder to scan"
+        );
     }
 }

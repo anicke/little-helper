@@ -13,7 +13,7 @@ mod stream;
 pub mod trackers;
 pub mod verify;
 
-pub use create::{CreateOpts, Created, Skipped, create, create_with_progress};
+pub use create::{CreateOpts, Created, Skipped, create, create_with_progress, default_output};
 pub use encode::{Content, Draft, Encoded, encode, info_bytes};
 pub use layout::{check_sizes, join_checked, resolve_root};
 pub use metainfo::{Metainfo, TorrentFile};

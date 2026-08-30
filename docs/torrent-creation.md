@@ -620,7 +620,7 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 | ~~**C2**~~ | ~~Folder → torrent~~ | **Done** — collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. mktorrent equality live on Linux and committed for every platform. 16 tests. See §0. |
 | ~~**C3**~~ | ~~The tracker list~~ | **Done** — TLH's eleven, re-checked by announce GET rather than DNS, each with what we saw and when. `Health` gates what may be written; user list in TLH's format from the config directory, `--tracker` by id or URL, passkeys, one tier per tracker, `--private`, `--source`, `lh torrent trackers`. 20 tests. See §0. |
 | **C4** | Pre-flight | **Postponed 2026-08-30** — a feature TLH never had and nobody has asked for. Verify/FFP/SBE checks before writing, `--no-check`, `--write-ffp`. See §7. |
-| **C5** | GUI panel | Folder → trackers → pre-flight → create, with piece progress. Needs the job queue. |
+| ~~**C5**~~ | ~~GUI panel~~ | **Done** — folder (from the working set already scanned) → trackers (comma-separated ids/URLs, resolved the same way `lh torrent create` does) → create, with real piece progress through `lh-gui`'s job queue. Pre-flight is still C4, still postponed. See `docs/gui.md` §G4 notes. |
 | — | later | v2 and hybrid creation, alongside T5. Creating hybrid torrents is worth more than parsing them — a hybrid seeds to both swarms — but it is still last. |
 
 ---

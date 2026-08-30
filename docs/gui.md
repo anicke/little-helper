@@ -244,7 +244,7 @@ already covers.
 | ~~**G1**~~ | ~~Scaffold + file table~~ | **Done** — `iced` + `rfd` in the workspace, path bar (text input, Browse via `rfd::AsyncFileDialog`, Scan), window-wide drag-and-drop, `WorkingSet` → file table (name, format, duration, rate/bits/channels, SBE), Tools panel off `Registry::entries()`. Read-only: no queue yet. 4 tests in `lh-gui/src/main.rs`. See §G1 notes. |
 | ~~**G2**~~ | ~~Job queue wired~~ | **Done** — one long-lived `Queue<JobOutcome>`, the subscription adapter, an operation panel (verify / ffp / md5 / st5 / sbe) that runs every file in the working set, per-row status via `App::latest_job_by_path`, an aggregate `N of M done` and per-job job-queue panel, and a working Cancel button. 2 new tests against the real fixture corpus and a real `Queue`, plus a real (non-interactive) run under X11. See §G2 notes. |
 | ~~**G3**~~ | ~~Convert + log pane~~ | **Done** — convert (both directions) joins the operation panel with a direction picker and an Overwrite checkbox, through the same queue, with real per-file progress (`to_wav_with_progress`) and a real mid-run cancel (`to_flac_cancellable`, J2). A file already in the target format submits no job at all rather than showing FAILED for a no-op. A log/audit pane renders `Provenance::render()` for every finished job that produced one, with an Export button. 4 new tests: two through the real queue (WAV write + FLAC write via the real reference `flac` binary), one proving the already-in-format skip submits nothing, none against a mocked queue. See §G3 notes. |
-| **G4** | Torrent panels | Create and check, per `docs/torrent-creation.md` C5 and `docs/torrent-verification.md` T4 — both already named the job queue as their dependency; it now exists. |
+| ~~**G4**~~ | ~~Torrent panels~~ | **Done** — a Create-torrent panel (folder from the already-scanned working set, comma-separated tracker ids/URLs, private/source/comment, one job with real piece progress) and a Check-torrent panel (Browse or drop a `.torrent`, parsed immediately for name/infohash/counts; Check against a folder, quick or full, through the same queue). The check panel gets its own per-file results table, the first `JobUpdate::Finished` payload beyond one status line. 6 new tests: two through the real queue (a real `.torrent` written and read back, and a create → check round trip reporting `Complete`), one proving an unresolvable tracker spec is rejected before any job is submitted, one proving drag-and-drop routes a `.torrent` to the check panel instead of `App::scan`, plus `format_bytes`. See §G4 notes. |
 
 ---
 
@@ -269,6 +269,21 @@ already covers.
    (Export button, the per-line scroll, a real multi-operation session mixing verify and
    convert) needed more structure than that. Revisit only if a real caller needs to filter,
    sort, or re-render the log some other way than "read top to bottom" — none has yet.
+5. **The tracker picker is a comma-separated text field, not a checkbox list.** Iced 0.14
+   has no built-in multi-line text input, and building a scrollable list of one checkbox
+   per `TrackerList` entry (bundled plus user) is real work for a v0.1 convenience nobody
+   has asked for yet — the known-trackers list above the field already shows every id to
+   copy. Revisit if a real user finds typing ids by hand painful.
+6. **Piece length, `--include-all`, and a custom output path are not exposed.** The create
+   panel always auto-sizes pieces and excludes the same noise `lh-cli` does by default,
+   matching `docs/torrent-creation.md` C5's own scope ("Folder → trackers → ... → create"
+   names none of these). `lh-cli`'s flags still cover the case where one is needed.
+7. **`check_with_progress` has no cancellation checkpoint** (`lh-core/src/torrent/verify.rs`
+   — its `progress: &mut dyn FnMut(u32, u32)` returns nothing to poll, unlike
+   `create_with_progress`'s bool-returning one). Cancel still calls `Queue::cancel()` for a
+   running check, but a check already streaming pieces runs to completion regardless — an
+   existing `lh-core` gap (T3 never needed cancellation because `lh torrent check` is a
+   single blocking call), not something G4 added or hid.
 
 ---
 
@@ -432,3 +447,64 @@ and already does. Same unchecked gap as G1/G2: nobody clicked the real Convert b
 Overwrite checkbox, or Export in a running window — no input-automation tool exists here
 for a native window, only for a Chrome tab. The compiled binary was run for real under X11
 (`timeout 6 ./target/debug/little-helper`, exit 124, no panic) as the same smoke check.
+
+---
+
+## G4 notes
+
+*Landed 2026-08-30.*
+
+* **`lh_core::torrent::default_output` was lifted out of `lh-cli`, the same move G3 made
+  for `convert::destination`.** Both front ends need "beside the source, named after it"
+  (`docs/torrent-creation.md` §6 — writing the `.torrent` inside the folder it describes
+  would change what re-creating it later hashes to), and `lh-cli`'s own version already
+  existed as a private fn. `lh-cli/src/main.rs`'s `cmd_torrent_create` now calls it too; no
+  behavior changed, confirmed by the existing `lh-cli` and `torrent_create` suites passing
+  unmodified.
+* **`Created` carries no `Provenance`, so torrent create adds nothing to the log pane.**
+  §2's `JobOutcome` sketch did not say either way. `lh_core::tools::Provenance` exists for
+  operations that ran (or explicitly did not run) an external tool (Principle 2); torrent
+  creation is pure in-process bencoding with no `Agent` attached to `Created` at all. Adding
+  one would be new `lh-core` domain logic for a GUI milestone that "adds no domain logic of
+  its own" (§0) — left alone, and named as a real gap rather than routed around. The create
+  panel's one-line job-queue status (`WROTE <name> (N files, M pieces of SIZE)`) is what a
+  finished create gets instead.
+* **The check panel needed a table `JobUpdate` had no room for.** Every operation before G4
+  fit in one rendered status line (`render()` in `job.rs`). `docs/torrent-verification.md`
+  T4 explicitly asks for a per-file table, which needs the full `TorrentReport`, not a
+  string — and `TorrentReport` cannot cross into `Message` directly (same `Message: Clone`
+  constraint G2 hit: nothing in it derives `Clone`, and shouldn't just to satisfy Iced).
+  `JobUpdate::Finished` grew a fourth field, `torrent_check: Option<Vec<TorrentFileRow>>`,
+  filled by a new `report_rows()` at the same conversion boundary `render()` and
+  `provenance_of()` already use — the boundary this doc's G2 notes established stays the
+  one place a raw `JobOutcome` is ever inspected.
+* **The tracker list falls back to `TrackerList::bundled()` on a load error instead of
+  failing `App::boot`.** `lh-cli` can afford `TrackerList::load()?` because a bad
+  `tracker.lst` should stop one command with a clear exit code; a GUI that refuses to open
+  its window over the same bad file is a worse failure for the same input, so `App::boot`
+  degrades to the bundled list and surfaces nothing on that path today — no test forces a
+  malformed user list here specifically, since `lh-core`'s own `trackers.rs` suite already
+  covers `parse_list`'s error cases and this is only a call-site fallback choice, not new
+  parsing.
+* **Resolving trackers happens synchronously in `App::run_torrent_create`, before
+  `queue.submit`**, exactly where `lh-cli`'s `cmd_torrent_create` calls `resolve()` — an
+  unknown id or a tracker `lh-core` knows is broken is a "did not run" error, not a
+  "ran and failed" one, matching how `Operation::Convert(ConvertTarget::Flac)`'s missing-tool
+  check already works in `run_operation` (checked before `run_operation` submits anything).
+
+**What this did and did not check.** Two tests run the real create and check paths against
+the real queue: `running_torrent_create_through_the_real_queue_writes_a_torrent` writes an
+actual `.torrent` beside a temp folder and reads its job-queue status back;
+`running_torrent_check_through_the_real_queue_reports_complete_and_fills_the_table` creates
+one, then checks it against its own source folder, asserting both the one-line `OK` status
+and that `torrent_check_rows` has one `OK` row per real file — the create → check round
+trip `docs/torrent-creation.md` §8 already recommends as evidence, run here through the GUI's
+own queue instead of `lh-cli`. A third test proves an unresolvable tracker id is rejected
+before `app.jobs` gains an entry; a fourth proves `Message::PathDropped` routes a `.torrent`
+to the check panel by extension rather than into `App::scan`. What is still unchecked, same
+gap every milestone here has named: nobody clicked Browse, Create, or Check in a running
+window, dropped a real `.torrent` on it, or looked at the rendered tracker list or results
+table — no input-automation or screenshot tool exists in this sandbox for a native window
+(checked again this milestone: `import`/`scrot`/`xwd`/`gnome-screenshot` are all absent).
+The compiled binary was run for real under X11 (`timeout 6 ./target/debug/little-helper`,
+exit 124, no panic) as the same smoke check every prior milestone used.
