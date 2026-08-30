@@ -204,7 +204,7 @@ closes it there rather than leaving the queue to sit beside the code it was mean
 
 | # | Milestone | Contents |
 |---|---|---|
-| **J1** | Core queue | `CancelToken`, `JobId`, `Progress<T>`, `Event<T>`, `Queue<T>` on a bounded rayon pool. Wired into `lh verify`/`sbe`/`ffp`/`md5`/`st5`/`convert` for multi-file batches; `Ctrl-C` cancels cleanly via `ctrlc`. Torrent create runs as a single queued job reusing its existing progress callback. |
+| ~~**J1**~~ | ~~Core queue~~ | **Done** — `CancelToken`, `JobId`, `Progress<T>`, `Event<T>`, `Queue<T>` on a bounded rayon pool. Wired into `lh verify`/`sbe`/`ffp`/`md5`/`st5`/`convert` for multi-file batches; `Ctrl-C` cancels cleanly via `ctrlc`. Torrent create runs as a single queued job reusing its existing progress callback. 5 tests in `lh-core/tests/job.rs`. See §7. |
 | **J2** | Fine-grained + killable | Byte-level progress for convert (progress-aware WAV writer; incremental read of `flac`'s stderr); `run()` grows a cancel-aware variant using `spawn()` + `kill()` so a WAV → FLAC job can actually be stopped mid-run. |
 | **J3** | GUI adapter | Iced `Subscription` wrapping `Queue<T>::events()` for the job-queue panel in PLAN.md §4. Needs M3 to exist first. |
 
@@ -226,3 +226,17 @@ closes it there rather than leaving the queue to sit beside the code it was mean
    total_bytes) instead — same shape, different unit — or may want to report elapsed time too.
    Leave it alone until J2 has a second real caller to check it against, the way C2's span
    walk was only generalized once creation needed it too.
+
+---
+
+## 7. J1 notes
+
+*Landed 2026-08-30.*
+
+Four things the implementation forced, none of them visible from the sketch in §2:
+
+* **`Progress<'a, T>` could not stay borrowed.** `Queue::submit` requires `job: impl FnOnce(&Progress<T>) -> T + Send + 'static` because rayon's `spawn` needs a `'static` closure, and nothing borrowed from `&self` can cross into one. `Progress<T>` ended up owning a cloned `Sender` and a cloned `CancelToken` instead of borrowing them — both are cheap to clone by design (an `Arc` and a channel handle), so this cost nothing but the lifetime parameter.
+* **`wait()` needed its own bookkeeping, not a rayon trick.** `ThreadPool::broadcast` runs a closure on every worker thread, but it does not wait for work already sitting in rayon's own injector queue — a `spawn`'d job can still be pending when a `broadcast` closure runs on the thread that would have picked it up next. `Queue` instead carries a plain `Mutex<u64>` + `Condvar` outstanding-job counter, incremented in `submit` and decremented when a job's terminal event is sent. Correct, and it is what `wait()` in the CLI's `run_batch` never actually needed to call — draining `events()` for as many terminal events as jobs submitted already implies "done" without a second synchronization primitive, which is what `run_batch` does. `wait()` exists for a caller that wants completion without watching progress.
+* **§3's "streams results as they land" oversold the CLI change, and got corrected here.** A script piping `lh verify`'s stdout must see the same file order on every run; printing in completion order — the literal reading of that sentence — makes the output nondeterministic across runs on a multi-file batch, since worker threads finish in whatever order the OS schedules them. `run_batch` keeps per-file report lines in submission order, buffered until every job has a terminal event, and only the *progress counter* ("N of M done") streams live, to stderr, where a script is not reading anyway. Real, visible feedback during a long batch; unchanged, reproducible stdout.
+* **The cancellation checkpoint inside `hash_pieces` needed the existing callback to grow a return value, not a second parameter.** `create_with_progress`'s `progress: &mut dyn FnMut(u32, u32)` became `FnMut(u32, u32) -> bool`, where `false` stops the walk. That keeps `torrent::create` free of any dependency on the `job` module, exactly as §2 requires — the CLI's job closure is the only place that knows both types, forwarding `Progress::report` in and `Progress::is_cancelled` out through the one function `hash_pieces` already called every piece. A stopped walk returns the new `Error::Cancelled` rather than a partial `Created`, matching Principle 1.
+* **`JobId::index()` is honest about leaning on a design choice from open question 3, not a general property.** It only maps to "position in the file list" because each CLI batch command builds one fresh `Queue` and submits every file in one dense, ordered pass — true today, and it would silently stop being true the moment two batches ever shared one `Queue`. Worth remembering if J3's GUI adapter reaches for a single long-lived queue across operations, per that same open question.

@@ -107,15 +107,20 @@ struct SourceFile {
 
 /// Build a torrent for `source` — a folder, or a single file — and write it to `dst`.
 pub fn create(source: &Path, dst: &Path, opts: &CreateOpts) -> Result<Created> {
-    create_with_progress(source, dst, opts, &mut |_, _| {})
+    create_with_progress(source, dst, opts, &mut |_, _| true)
 }
 
-/// `progress` is called with (pieces done, pieces total) as the payload is walked.
+/// `progress` is called with (pieces done, pieces total) as the payload is walked. It
+/// returns whether to keep going — `false` stops the walk and the call returns
+/// `Err(Error::Cancelled)` rather than a partial `Created`, matching Principle 1: nothing
+/// half-done is ever handed back as though it were a result. This is `job`'s cancellation
+/// checkpoint (docs/job-queue.md §2); `create.rs` has no dependency on the `job` module
+/// itself, only on this bool.
 pub fn create_with_progress(
     source: &Path,
     dst: &Path,
     opts: &CreateOpts,
-    progress: &mut dyn FnMut(u32, u32),
+    progress: &mut dyn FnMut(u32, u32) -> bool,
 ) -> Result<Created> {
     let name = torrent_name(source)?;
     let meta = std::fs::metadata(source).map_err(|e| Error::io(source, e))?;
@@ -376,7 +381,7 @@ fn hash_pieces(
     files: &[SourceFile],
     piece_length: u64,
     total_length: u64,
-    progress: &mut dyn FnMut(u32, u32),
+    progress: &mut dyn FnMut(u32, u32) -> bool,
 ) -> Result<Vec<[u8; 20]>> {
     let spans = build_spans(files.iter().map(|f| f.length));
     let count = total_length.div_ceil(piece_length);
@@ -410,7 +415,9 @@ fn hash_pieces(
             )?;
         }
         pieces.push(hasher.finalize().into());
-        progress(index as u32 + 1, total_pieces);
+        if !progress(index as u32 + 1, total_pieces) {
+            return Err(Error::Cancelled);
+        }
     }
     Ok(pieces)
 }

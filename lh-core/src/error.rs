@@ -97,6 +97,12 @@ pub enum Error {
         kind: &'static str,
         detail: String,
     },
+
+    /// A job (see `job` module) was asked to stop before it produced anything durable.
+    /// Not a bug — the caller asked for this — but distinct from every other failure so
+    /// it can be told apart rather than reported as though something went wrong.
+    #[error("cancelled before it finished")]
+    Cancelled,
 }
 
 impl Error {

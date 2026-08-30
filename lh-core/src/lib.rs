@@ -16,6 +16,7 @@ pub mod config;
 pub mod convert;
 pub mod error;
 pub mod format;
+pub mod job;
 pub mod model;
 pub mod output;
 pub mod scan;

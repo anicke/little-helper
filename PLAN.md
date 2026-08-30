@@ -17,17 +17,18 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list done; job queue planned, see [docs/job-queue.md](docs/job-queue.md) |
+| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1) done; see [docs/job-queue.md](docs/job-queue.md) |
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
 | M3 `lh-gui` | not started (placeholder crate) |
 | M4 Packaging | not started |
 
-122 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+127 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 
-Every v0.1 operation in §2 is now implemented. What remains for v0.1 is the job queue, the
-GUI, and packaging.
+Every v0.1 operation in §2 is now implemented, and multi-file CLI batches (`verify`, `sbe`,
+`ffp`/`md5`/`st5`, `convert`) and `torrent create` run through the job queue for parallelism,
+progress and `Ctrl-C` cancellation. What remains for v0.1 is the GUI and packaging.
 
 **Known limitations to close before v0.1:**
 

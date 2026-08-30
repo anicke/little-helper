@@ -7,15 +7,68 @@ use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::convert::{Conversion, EncodeOpts, to_flac, to_wav};
+use lh_core::job::{Event, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
-    Chosen, CreateOpts, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList, Verdict,
-    check, check_sizes, create, resolve,
+    Chosen, CreateOpts, Created, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList,
+    Verdict, check, check_sizes, create_with_progress, resolve,
 };
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+/// Run one job per file on a bounded worker pool if there is more than one file — a
+/// single file just runs directly, since spinning up a pool and a channel for one job is
+/// pure overhead with nothing to show for it (docs/job-queue.md §3). `Ctrl-C` cancels: a
+/// file already being worked on finishes normally, nothing queued behind it starts.
+///
+/// Results come back paired with their file in submission order, not completion order —
+/// a script piping our stdout should see the same thing on every run, even though the
+/// work itself now happens in parallel. `None` means the file's job never ran because the
+/// batch was cancelled first.
+fn run_batch<T: Send + 'static>(
+    files: &[AudioFile],
+    job: impl Fn(&AudioFile) -> T + Send + Sync + 'static,
+) -> Vec<(AudioFile, Option<T>)> {
+    if files.len() <= 1 {
+        return files.iter().map(|f| (f.clone(), Some(job(f)))).collect();
+    }
+
+    let job = std::sync::Arc::new(job);
+    let queue: Queue<T> = Queue::new();
+    let cancel = queue.cancel_token();
+    // Only one batch runs per process invocation, so this is the only call site.
+    let _ = ctrlc::set_handler(move || cancel.cancel());
+
+    for f in files {
+        let f = f.clone();
+        let job = job.clone();
+        queue.submit(f.file_name(), move |_progress| job(&f));
+    }
+
+    let total = files.len();
+    let mut results: Vec<Option<T>> = (0..total).map(|_| None).collect();
+    let mut done = 0usize;
+    while done < total {
+        match queue
+            .events()
+            .recv()
+            .expect("queue closed with jobs still outstanding")
+        {
+            Event::Finished { id, output, .. } => {
+                results[id.index()] = Some(output);
+                done += 1;
+            }
+            Event::Cancelled { .. } => done += 1,
+            Event::Started { .. } | Event::Progress { .. } => continue,
+        }
+        eprint!("\r{done} of {total} done");
+    }
+    eprintln!();
+
+    files.iter().cloned().zip(results).collect()
+}
 
 #[derive(Parser)]
 #[command(
@@ -258,10 +311,11 @@ fn cmd_info(p: &Paths) -> Result<bool> {
 
 fn cmd_verify(p: &Paths) -> Result<bool> {
     let (files, mut ok) = collect(p)?;
-    for f in &files {
-        match verify(&f.path) {
-            Ok(Verification::Ok) => println!("OK        {}", f.file_name()),
-            Ok(Verification::Md5Mismatch { stored, computed }) => {
+    let results = run_batch(&files, |f| verify(&f.path));
+    for (f, result) in &results {
+        match result {
+            Some(Ok(Verification::Ok)) => println!("OK        {}", f.file_name()),
+            Some(Ok(Verification::Md5Mismatch { stored, computed })) => {
                 ok = false;
                 println!(
                     "MISMATCH  {}\n            stored   {}\n            computed {}",
@@ -270,15 +324,19 @@ fn cmd_verify(p: &Paths) -> Result<bool> {
                     hex::encode(computed)
                 );
             }
-            Ok(Verification::NoStoredMd5 { .. }) => {
+            Some(Ok(Verification::NoStoredMd5 { .. })) => {
                 println!(
                     "NO MD5    {} (decoded cleanly, nothing to compare)",
                     f.file_name()
                 )
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 ok = false;
                 println!("FAILED    {}: {e}", f.file_name());
+            }
+            None => {
+                ok = false;
+                println!("CANCELLED {}", f.file_name());
             }
         }
     }
@@ -287,14 +345,21 @@ fn cmd_verify(p: &Paths) -> Result<bool> {
 
 fn cmd_sbe(p: &Paths) -> Result<bool> {
     let (files, mut ok) = collect(p)?;
-    for f in &files {
-        match sbe(&f.stream_info) {
-            Sbe::Aligned => println!("ALIGNED   {}", f.file_name()),
-            Sbe::Misaligned { remainder_frames } => {
+    let results = run_batch(&files, |f| sbe(&f.stream_info));
+    for (f, result) in &results {
+        match result {
+            Some(Sbe::Aligned) => println!("ALIGNED   {}", f.file_name()),
+            Some(Sbe::Misaligned { remainder_frames }) => {
                 ok = false;
                 println!("SBE       {} (+{remainder_frames} frames)", f.file_name());
             }
-            Sbe::NotApplicable { reason } => println!("N/A       {} ({reason})", f.file_name()),
+            Some(Sbe::NotApplicable { reason }) => {
+                println!("N/A       {} ({reason})", f.file_name())
+            }
+            None => {
+                ok = false;
+                println!("CANCELLED {}", f.file_name());
+            }
         }
     }
     Ok(ok)
@@ -303,15 +368,20 @@ fn cmd_sbe(p: &Paths) -> Result<bool> {
 fn cmd_checksum(kind: ChecksumKind, args: &ChecksumArgs) -> Result<bool> {
     let (files, mut ok) = collect(&args.paths)?;
     let mut out = ChecksumFile::new(kind);
-    for f in &files {
-        match compute(kind, &f.path) {
-            Ok(digest) => out.entries.push(Entry {
+    let results = run_batch(&files, move |f| compute(kind, &f.path));
+    for (f, result) in &results {
+        match result {
+            Some(Ok(digest)) => out.entries.push(Entry {
                 file_name: f.file_name(),
-                digest,
+                digest: *digest,
             }),
-            Err(e) => {
+            Some(Err(e)) => {
                 ok = false;
                 eprintln!("{}: {e}", f.file_name());
+            }
+            None => {
+                ok = false;
+                eprintln!("{}: cancelled", f.file_name());
             }
         }
     }
@@ -483,8 +553,43 @@ fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
         );
     }
 
-    let made = create(&source, &dst, &opts)
-        .with_context(|| format!("creating a torrent for {}", source.display()))?;
+    // One job on a queue of one, so a large show's piece-hashing walk shows progress and
+    // Ctrl-C can stop it between pieces (docs/job-queue.md §3) instead of only between
+    // files, which is all a batch of independent files has to offer.
+    let queue: Queue<lh_core::Result<Created>> = Queue::with_workers(1);
+    let cancel = queue.cancel_token();
+    let _ = ctrlc::set_handler(move || cancel.cancel());
+
+    let job_source = source.clone();
+    let job_dst = dst.clone();
+    let job_opts = opts.clone();
+    queue.submit("torrent create", move |progress| {
+        create_with_progress(&job_source, &job_dst, &job_opts, &mut |done, total| {
+            progress.report(done, total);
+            !progress.is_cancelled()
+        })
+    });
+
+    let outcome = loop {
+        match queue.events().recv().expect("queue closed unexpectedly") {
+            Event::Progress { done, total, .. } => {
+                eprint!("\r  hashing piece {done} of {total}");
+            }
+            Event::Finished { output, .. } => break Some(output),
+            Event::Cancelled { .. } => break None,
+            Event::Started { .. } => {}
+        }
+    };
+    eprintln!();
+    let made = match outcome {
+        Some(result) => {
+            result.with_context(|| format!("creating a torrent for {}", source.display()))?
+        }
+        None => {
+            println!("cancelled before writing a torrent");
+            return Ok(false);
+        }
+    };
 
     println!("{}", made.name);
     println!(
@@ -728,48 +833,73 @@ fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
         Target::Flac => (AudioFormat::Flac, "flac"),
     };
 
-    let mut written = 0usize;
-    for f in &files {
+    let to = args.to;
+    let force = args.force;
+    let out_dir = args.out_dir.clone();
+    let results = run_batch(&files, move |f| -> ConvertOutcome {
         if f.format == want {
-            println!("SKIPPED   {} (already {want})", f.file_name());
-            continue;
+            return ConvertOutcome::Skipped;
         }
-        let dst = match destination(f, extension, args.out_dir.as_deref()) {
+        let dst = match destination(f, extension, out_dir.as_deref()) {
             Some(d) => d,
-            None => {
-                ok = false;
-                println!(
-                    "FAILED    {} (has no file name to work from)",
-                    f.path.display()
-                );
-                continue;
-            }
+            None => return ConvertOutcome::NoFileName,
         };
-
-        let result = match args.to {
-            Target::Wav => to_wav(&f.path, &dst, args.force),
+        let result = match to {
+            Target::Wav => to_wav(&f.path, &dst, force),
             Target::Flac => to_flac(
                 &f.path,
                 &dst,
                 encoder.as_ref().expect("discovered above"),
                 &opts,
-                args.force,
+                force,
             ),
         };
         match result {
-            Ok(done) => {
-                written += 1;
-                report_conversion(&done, args.provenance);
+            Ok(done) => ConvertOutcome::Done(Box::new(done)),
+            Err(e) => ConvertOutcome::Failed(e),
+        }
+    });
+
+    let mut written = 0usize;
+    for (f, outcome) in &results {
+        match outcome {
+            Some(ConvertOutcome::Skipped) => {
+                println!("SKIPPED   {} (already {want})", f.file_name())
             }
-            Err(e) => {
+            Some(ConvertOutcome::NoFileName) => {
+                ok = false;
+                println!(
+                    "FAILED    {} (has no file name to work from)",
+                    f.path.display()
+                );
+            }
+            Some(ConvertOutcome::Done(done)) => {
+                written += 1;
+                report_conversion(done, args.provenance);
+            }
+            Some(ConvertOutcome::Failed(e)) => {
                 ok = false;
                 println!("FAILED    {}: {e}", f.file_name());
+            }
+            None => {
+                ok = false;
+                println!("CANCELLED {}", f.file_name());
             }
         }
     }
 
     println!("{written} of {} files converted", files.len());
     Ok(ok)
+}
+
+/// What became of one file's conversion. `Conversion` is boxed only to keep this enum
+/// small relative to its rarest, biggest variant — it is moved through the job queue's
+/// channel once per file.
+enum ConvertOutcome {
+    Skipped,
+    NoFileName,
+    Done(Box<Conversion>),
+    Failed(lh_core::Error),
 }
 
 fn report_conversion(done: &Conversion, show_provenance: bool) {
