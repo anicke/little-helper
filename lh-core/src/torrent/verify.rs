@@ -9,13 +9,10 @@
 use super::layout;
 use super::metainfo::Metainfo;
 use super::report::{FileStatus, PieceCounts, TorrentReport};
-use crate::error::{Error, Result};
+use super::stream::{READ_BUF, Span, SpanReader, build_spans, feed_zeros, spans_overlapping};
+use crate::error::Result;
 use sha1::{Digest, Sha1};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-
-const READ_BUF: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PieceOutcome {
@@ -24,13 +21,6 @@ enum PieceOutcome {
     /// A file this piece covers is missing or the wrong size, so there is nothing to hash.
     /// This is not the same as failing, and must never be reported as corruption.
     Unverifiable,
-}
-
-/// Where a file sits in the concatenated stream.
-struct Span {
-    index: usize,
-    start: u64,
-    end: u64,
 }
 
 pub fn check(meta: &Metainfo, torrent_path: &Path, given: &Path) -> Result<TorrentReport> {
@@ -49,7 +39,7 @@ pub fn check_with_progress(
     // reading garbage and calling neighbouring files corrupt.
     let mut report = layout::check_sizes(meta, torrent_path, given)?;
 
-    let spans = build_spans(meta);
+    let spans = build_spans(meta.files.iter().map(|f| f.length));
     let readable: Vec<bool> = report
         .files
         .iter()
@@ -132,71 +122,6 @@ pub fn check_with_progress(
     report.pieces = Some(counts);
     report.quick = false;
     Ok(report)
-}
-
-fn build_spans(meta: &Metainfo) -> Vec<Span> {
-    let mut offset = 0u64;
-    meta.files
-        .iter()
-        .enumerate()
-        .map(|(index, f)| {
-            let span = Span {
-                index,
-                start: offset,
-                end: offset + f.length,
-            };
-            offset += f.length;
-            span
-        })
-        .collect()
-}
-
-fn spans_overlapping(spans: &[Span], start: u64, end: u64) -> impl Iterator<Item = &Span> {
-    spans.iter().filter(move |s| s.start < end && s.end > start)
-}
-
-fn feed_zeros(hasher: &mut Sha1, mut len: u64, buf: &mut [u8]) {
-    buf.fill(0);
-    while len > 0 {
-        let n = len.min(buf.len() as u64) as usize;
-        hasher.update(&buf[..n]);
-        len -= n as u64;
-    }
-}
-
-/// Keeps the current file open. Pieces and their segments are walked in stream order, so
-/// one handle is all we ever need.
-#[derive(Default)]
-struct SpanReader {
-    open: Option<(usize, File)>,
-}
-
-impl SpanReader {
-    fn read_into(
-        &mut self,
-        hasher: &mut Sha1,
-        index: usize,
-        path: &Path,
-        offset: u64,
-        mut len: u64,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        if self.open.as_ref().map(|(i, _)| *i) != Some(index) {
-            let file = File::open(path).map_err(|e| Error::io(path, e))?;
-            self.open = Some((index, file));
-        }
-        let (_, file) = self.open.as_mut().expect("just set");
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| Error::io(path, e))?;
-        while len > 0 {
-            let want = len.min(buf.len() as u64) as usize;
-            file.read_exact(&mut buf[..want])
-                .map_err(|e| Error::io(path, e))?;
-            hasher.update(&buf[..want]);
-            len -= want as u64;
-        }
-        Ok(())
-    }
 }
 
 /// Turn per-piece results into per-file status.

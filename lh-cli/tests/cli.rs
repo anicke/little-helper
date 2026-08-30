@@ -159,3 +159,66 @@ fn convert_to_flac_without_the_encoder_is_a_command_failure() {
 
     assert!(!dir.path().join("cdda-aligned.flac").exists());
 }
+
+/// Creating a torrent writes one new file beside the show and touches nothing inside it.
+#[test]
+fn torrent_create_writes_beside_the_show_and_reads_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("gd1977-05-08");
+    std::fs::create_dir_all(show.join("d1")).unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        show.join("d1/t01.flac"),
+    )
+    .unwrap();
+    std::fs::write(show.join("Thumbs.db"), b"noise").unwrap();
+    let before = std::fs::read(show.join("d1/t01.flac")).unwrap();
+
+    lh().arg("torrent")
+        .arg("create")
+        .arg(&show)
+        .args(["--tracker", "http://tracker.etree.org:6969/announce"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Thumbs.db (not part of the recording)",
+        ))
+        .stdout(predicates::str::contains("infohash"));
+
+    let torrent = dir.path().join("gd1977-05-08.torrent");
+    assert!(
+        torrent.exists(),
+        "the torrent goes beside the show, not inside it"
+    );
+    assert!(!show.join("gd1977-05-08.torrent").exists());
+    assert_eq!(std::fs::read(show.join("d1/t01.flac")).unwrap(), before);
+
+    // And it describes the show it was made from.
+    lh().arg("torrent")
+        .arg("check")
+        .arg(&torrent)
+        .args(["--path"])
+        .arg(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("all 1 files verified"));
+}
+
+/// A piece length clients would reject is a command failure, and nothing is written.
+#[test]
+fn torrent_create_refuses_a_piece_length_clients_would_reject() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("show");
+    std::fs::create_dir_all(&show).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), show.join("t01.flac")).unwrap();
+
+    lh().arg("torrent")
+        .arg("create")
+        .arg(&show)
+        .args(["--piece-length", "100000"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("power of two"));
+
+    assert!(!dir.path().join("show.torrent").exists());
+}

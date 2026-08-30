@@ -4,12 +4,15 @@
 //! pieces do not align with files. Everything is concatenated into a single stream before
 //! being cut into pieces, so per-file status is derived rather than measured.
 
+pub mod create;
 pub mod encode;
 pub mod layout;
 pub mod metainfo;
 pub mod report;
+mod stream;
 pub mod verify;
 
+pub use create::{CreateOpts, Created, Skipped, create, create_with_progress};
 pub use encode::{Content, Draft, Encoded, encode, info_bytes};
 pub use layout::{check_sizes, join_checked, resolve_root};
 pub use metainfo::{Metainfo, TorrentFile};

@@ -9,7 +9,7 @@ use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::convert::{Conversion, EncodeOpts, to_flac, to_wav};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
-use lh_core::torrent::{FileStatus, Metainfo, Verdict, check, check_sizes};
+use lh_core::torrent::{CreateOpts, FileStatus, Metainfo, Verdict, check, check_sizes, create};
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -65,6 +65,8 @@ enum TorrentCommand {
         #[arg(long)]
         no_files: bool,
     },
+    /// Make a .torrent for a show.
+    Create(TorrentCreateArgs),
     /// Check local files against a .torrent.
     Check {
         /// The .torrent file.
@@ -77,6 +79,38 @@ enum TorrentCommand {
         #[arg(long)]
         quick: bool,
     },
+}
+
+#[derive(clap::Args)]
+struct TorrentCreateArgs {
+    /// The folder to make a torrent for, or a single file.
+    path: PathBuf,
+    /// Where to write the .torrent. Defaults to beside the source folder — writing it
+    /// inside the folder would add a file to what the torrent describes.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// A tracker's announce URL. Repeat it for more; each one becomes its own tier.
+    #[arg(long = "tracker", value_name = "URL")]
+    trackers: Vec<String>,
+    /// Piece length in bytes: a power of two from 16384 to 16777216. Chosen from the
+    /// payload size when omitted.
+    #[arg(long, value_name = "BYTES")]
+    piece_length: Option<u64>,
+    /// Mark the torrent private (BEP 27). This is part of the infohash, so it cannot be
+    /// added or removed afterwards — it makes a different torrent.
+    #[arg(long)]
+    private: bool,
+    /// The source tag some private trackers require. Also part of the infohash.
+    #[arg(long, value_name = "TAG")]
+    source: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    comment: Option<String>,
+    /// Include files normally left out: Thumbs.db, .DS_Store, other .torrent files.
+    #[arg(long)]
+    include_all: bool,
+    /// Overwrite an existing .torrent. The payload is never touched either way.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(clap::Args)]
@@ -152,6 +186,7 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
             TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),
+            TorrentCommand::Create(a) => cmd_torrent_create(&a),
         },
     }
 }
@@ -393,6 +428,85 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
+    let source = args
+        .path
+        .canonicalize()
+        .with_context(|| format!("reading {}", args.path.display()))?;
+
+    // Each --tracker is its own tier: clients pick at random within a tier and fall through
+    // between them, so putting unrelated sites in one tier is a coin flip over who hears
+    // about the seed.
+    let announce: Vec<Vec<String>> = args.trackers.iter().map(|t| vec![t.clone()]).collect();
+
+    let opts = CreateOpts {
+        announce,
+        piece_length: args.piece_length,
+        private: args.private,
+        source: args.source.clone(),
+        comment: args.comment.clone(),
+        include_all: args.include_all,
+        overwrite: args.force,
+        ..CreateOpts::default()
+    };
+
+    let dst = match &args.output {
+        Some(o) => o.clone(),
+        None => default_output(&source)?,
+    };
+    // Writing the .torrent inside the folder it describes adds a file to that folder, so
+    // re-creating it later would produce a different infohash.
+    if source.is_dir() && dst.parent().is_some_and(|p| p.starts_with(&source)) {
+        eprintln!(
+            "warning: writing the torrent inside {} means re-creating it later will not \
+             produce the same infohash",
+            source.display()
+        );
+    }
+
+    let made = create(&source, &dst, &opts)
+        .with_context(|| format!("creating a torrent for {}", source.display()))?;
+
+    println!("{}", made.name);
+    println!(
+        "  {} files   {}   {} {} of {}",
+        made.files.len(),
+        format_bytes(made.total_length),
+        made.pieces,
+        if made.pieces == 1 { "piece" } else { "pieces" },
+        format_bytes(made.piece_length),
+    );
+    for (path, why) in &made.excluded {
+        let shown = path.strip_prefix(&source).unwrap_or(path);
+        println!("  excluded   {} ({})", shown.display(), why.reason());
+    }
+    println!("  infohash   {}", made.info_hash_hex());
+    if args.private {
+        println!("  private    yes (BEP 27; part of the infohash)");
+    }
+    for (i, tracker) in args.trackers.iter().enumerate() {
+        println!("  {:<10} {tracker}", if i == 0 { "tracker" } else { "" });
+    }
+    if args.trackers.is_empty() {
+        println!("  tracker    none (a trackerless torrent)");
+    }
+    println!("  wrote      {}", made.path.display());
+    Ok(true)
+}
+
+/// Beside the source, not inside it.
+fn default_output(source: &Path) -> Result<PathBuf> {
+    let parent = source.parent().ok_or_else(|| {
+        anyhow::anyhow!("{} has no parent directory to write into", source.display())
+    })?;
+    let stem = source
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no name", source.display()))?;
+    let mut name = stem.to_os_string();
+    name.push(".torrent");
+    Ok(parent.join(name))
 }
 
 fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {

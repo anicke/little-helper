@@ -16,6 +16,7 @@ pub mod convert;
 pub mod error;
 pub mod format;
 pub mod model;
+pub mod output;
 pub mod scan;
 pub mod tools;
 pub mod torrent;

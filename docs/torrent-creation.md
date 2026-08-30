@@ -99,6 +99,32 @@ Two things the implementation forced:
 `Draft.creation_date` is documented as epoch seconds UTC at the field, because the type
 cannot stop us repeating the bug TLH shipped.
 
+### C2 notes
+
+*Landed 2026-08-30.*
+
+**The oracle earned its keep on the first run.** §2's ordering rule was wrong as written —
+component-wise instead of joined-path — and nothing but `mktorrent` would have caught it,
+because our torrents were perfectly self-consistent and verified against their own payload.
+The corrected rule is in §2, and the fixture that discriminates the two (`d1.txt` beside a
+`d1/` directory) is in the test on purpose; without it the test passes either way, which was
+checked by deliberately reverting the sort.
+
+Three things the implementation forced:
+
+* **`mktorrent 1.1` cannot express our smallest piece length.** It accepts exponents 15–28,
+  so 32 KiB to 256 MiB, while our floor is 16 KiB. The equality test therefore covers 32 KiB
+  and up; the 16 KiB case — which `auto_piece_length` picks for anything under about 32 MB —
+  is pinned only by our own round trip. That is a real gap in the oracle, not a rounding
+  error, and it is the reason to keep the self-check in §5 step 8.
+* **The span walk is now shared** (`torrent/stream.rs`). Verification's copy was entangled
+  with its own per-file status machinery; what actually generalised was `Span`,
+  `build_spans`, `spans_overlapping`, `SpanReader` and `feed_zeros`. Creation needs none of
+  the status logic — every file is present by construction — so extracting the walk was the
+  right size of sharing, and `build_spans` now takes lengths rather than a `Metainfo`.
+* **`TempOutput` moved to `lh-core/src/output.rs`.** Conversion and creation both need
+  Principle 1's stage-then-rename, and it was private to `convert`.
+
 ### What we already have
 
 * `Metainfo`, path validation at parse time, and the infohash-from-raw-bytes rule (T1).
@@ -177,12 +203,16 @@ drop them.
 
 The order of `files` *is* the byte stream. It must be deterministic, and it should agree with
 what every other tool produces for the same folder, or our torrent will not deduplicate or
-cross-seed against theirs. The rule: byte-wise lexicographic over path components, compared
-component by component, with a shorter path sorting before a longer one that extends it.
+cross-seed against theirs. The rule: **byte-wise over the joined path**, `/` and all.
 
-Writing that rule down is not what makes it right, though. What makes it right is the
-mktorrent equality test in §8, which pins the ordering against a tool the world already
-agrees with.
+> **Corrected in C2.** This section first said "lexicographic over path *components*", which
+> is the obvious reading and is wrong. The two rules differ whenever a directory name is a
+> prefix of a sibling file's name: component-wise puts `d1/t01.flac` before `d1.txt`, because
+> it compares `d1` against `d1.txt`; joined-path puts `d1.txt` first, because `.` (0x2E)
+> sorts before `/` (0x2F). `mktorrent` does the latter. We follow it.
+
+Writing the rule down is not what makes it right, which is exactly the point: the rule got
+written down wrong and the mktorrent equality test in §8 is what caught it.
 
 ### Piece length
 
@@ -438,7 +468,7 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**C1**~~ | ~~Bencode out~~ | **Done** — canonical encoder, `info` encoded once and hashed from that buffer, the debian vector re-encoded to its published infohash. Tiered `announce`, `private` and `source` in `Metainfo` and `lh torrent info`. 9 tests. See §0. |
-| **C2** | Folder → torrent | Collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. The mktorrent equality test in CI. |
+| ~~**C2**~~ | ~~Folder → torrent~~ | **Done** — collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. mktorrent equality in CI. 13 tests. See §0. |
 | **C3** | The tracker list | Bundled list with `confirmed` dates, user list in TLH's format, `--tracker` by id, passkeys, tiers, `--private`, `--source`, `lh torrent trackers`. |
 | **C4** | Pre-flight | Verify/FFP/SBE checks before writing, `--no-check`, `--write-ffp`. |
 | **C5** | GUI panel | Folder → trackers → pre-flight → create, with piece progress. Needs the job queue. |
@@ -459,10 +489,12 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 3. **How is the bundled list maintained?** A date on each entry is honest but static. Do we
    re-check at release time, let the community PR it, or eventually fetch it — and if we
    fetch, what happens offline, which is the case the bundling was for?
-4. ~~**Is infohash equality with `mktorrent` a requirement or a test?**~~ **Settled for now: a
-   test, and not yet.** C1 needed no external tool — re-encoding real torrents already pins
-   the encoding — so mktorrent stays out of CI until C2 has a folder walk for it to disagree
-   with. Revisit the requirement-or-test question then, when there is something to compare.
+4. **Is infohash equality with `mktorrent` a requirement or a test?** It is a test, in CI
+   since C2, and it has already paid for itself by catching the file-ordering rule (§2). Open
+   part: mktorrent cannot make 16 KiB pieces, so it cannot check our smallest piece length at
+   all — and if a future mktorrent changed its ordering, would we follow it or hold our rule
+   and drop the assertion? Following it silently changes the infohash of every torrent we
+   make, which is not a thing to do quietly.
 5. **Padding files (BEP 47): never, or opt-in?** They help modern clients dedupe; the trading
    community's tooling is old and some of it may not cope. Default off is obvious; the
    question is whether opt-in is worth building at all.
