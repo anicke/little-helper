@@ -73,3 +73,66 @@ fn syntax_errors_name_the_line() {
 fn short_digests_are_rejected() {
     assert!(ChecksumFile::parse(ChecksumKind::Md5, "abcd  x.flac\n", Path::new("t")).is_err());
 }
+
+/// A `.st5` is `shntool hash -m` output verbatim, tag and all — not an md5sum-style file
+/// with a different extension. TLH's reader splits each line on this exact literal and
+/// carries no other separator, so a tagless `.st5` is one it cannot parse at all.
+#[test]
+fn st5_is_written_the_way_shntool_writes_it() {
+    let mut file = ChecksumFile::new(ChecksumKind::St5);
+    file.entries.push(lh_core::checksum::Entry {
+        file_name: "gd77-05-08d1t01.flac".into(),
+        digest: hex_digest("81e1447c2e9989a2ece5b94b4ccf2958"),
+    });
+    assert_eq!(
+        file.render(),
+        "81e1447c2e9989a2ece5b94b4ccf2958  [shntool]  gd77-05-08d1t01.flac\n"
+    );
+    assert_eq!(
+        parse(ChecksumKind::St5, &file.render()).entries,
+        file.entries
+    );
+}
+
+/// Real shntool output, and the shapes that predate us writing the tag. All four have to
+/// read, because what circulates is not ours to choose.
+#[test]
+fn st5_reads_tagged_and_untagged_lines_alike() {
+    let expected = hex_digest("81e1447c2e9989a2ece5b94b4ccf2958");
+    for line in [
+        "81e1447c2e9989a2ece5b94b4ccf2958  [shntool]  t01.flac",
+        "81e1447c2e9989a2ece5b94b4ccf2958  t01.flac",
+        "81e1447c2e9989a2ece5b94b4ccf2958 *t01.flac",
+        "81e1447c2e9989a2ece5b94b4ccf2958  [shntool]  t01.flac\r",
+    ] {
+        let parsed = parse(ChecksumKind::St5, &format!("{line}\n"));
+        assert_eq!(parsed.entries.len(), 1, "{line}");
+        assert_eq!(parsed.entries[0].file_name, "t01.flac", "{line}");
+        assert_eq!(parsed.entries[0].digest, expected, "{line}");
+    }
+}
+
+/// The tag is matched as a whole literal, not as "a bracketed word", because a trader
+/// filename that starts with a bracket is ordinary.
+#[test]
+fn a_filename_starting_with_a_bracket_survives() {
+    let parsed = parse(
+        ChecksumKind::St5,
+        "81e1447c2e9989a2ece5b94b4ccf2958  [shntool]  [2007-05-08] set 1.flac\n",
+    );
+    assert_eq!(parsed.entries[0].file_name, "[2007-05-08] set 1.flac");
+
+    let md5sum_style = parse(
+        ChecksumKind::Md5,
+        "81e1447c2e9989a2ece5b94b4ccf2958  [2007-05-08] set 1.flac\n",
+    );
+    assert_eq!(md5sum_style.entries[0].file_name, "[2007-05-08] set 1.flac");
+}
+
+fn hex_digest(s: &str) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    out
+}

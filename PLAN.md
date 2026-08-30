@@ -22,7 +22,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M3 `lh-gui` | not started (placeholder crate) |
 | M4 Packaging | not started |
 
-118 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+122 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 
@@ -31,18 +31,36 @@ GUI, and packaging.
 
 **Known limitations to close before v0.1:**
 
-1. **ST5 has not been checked against real shntool.** shntool was not installed on the
-   development machine, so `.st5` output follows md5sum conventions by assumption. The
-   plan's own rule stands: generate golden `.st5` files with real shntool and match them
-   exactly before shipping.
+1. ~~**ST5 has not been checked against real shntool.**~~ **Closed 2026-08-30**, and the
+   assumption was wrong. Trader's Little Helper bundles `shntool.exe` 3.0.4 in
+   `CmdlineApps/`, which runs under Wine, so the oracle was on the machine all along.
+   Golden `reference.st5` is now committed (`scripts/gen-st5-oracle.py`).
+   * The **digests** were right: six fixtures, WAV and FLAC, match shntool exactly.
+   * The **layout** was not. A `.st5` is `shntool hash -m` output *verbatim*, which puts a
+     `  [shntool]  ` tag between the digest and the name — TLH runs
+     `shntool.exe hash -m -- "%s"` and its `.st5` reader splits each line on that exact
+     literal, carrying no other separator. Our md5sum-style lines would have been rejected
+     by TLH wholesale, and our reader took `[shntool]  name` as the filename, so we could
+     not read a genuine `.st5` either. Both fixed; the reader still accepts untagged lines.
 2. **SBE is a header-derived check.** It reads the declared frame count, so a truncated file
    whose header still claims a full length reports as aligned. `lh verify` catches that case;
    `lh sbe` alone does not. Decide whether `sbe` should cross-check the declared length
    against the actual data.
 3. **The 24-bit WAV fixture uses legacy format tag 1**, not `WAVE_FORMAT_EXTENSIBLE`; real
-   24-bit WAVs use the latter, and `flac` warns about ours. Extend the generator.
-4. **`.md5` is written md5sum-style** (`hash  name`). Confirm against what TLH actually
-   writes before traders compare files.
+   24-bit WAVs use the latter, and `flac` warns about ours. Extend the generator. Related
+   find from the ST5 work: shntool 3.0.4 *refuses* `WAVE_FORMAT_EXTENSIBLE` outright
+   ("unsupported format 0xfffe"), so it cannot ST5 a 24-bit FLAC at all — where we can, and
+   our answer for `hires-24bit.flac` equals shntool's for `hires-24bit.wav`, which is what
+   ST5 is supposed to mean. `reference.st5` therefore has no 24-bit entry to check us with.
+4. **`.md5` is written md5sum-style** (`hash  name`) — *reading* is now confirmed, writing
+   is not. TLH's `.md5` reader carries exactly two separator constants, `' '` and `'*'`, so
+   it accepts md5sum's text (`hash  name`) and binary (`hash *name`) forms and nothing else;
+   we already write one of those and read both. Which of the two TLH itself *writes* is
+   still unestablished: it is GUI-only, has no create-MD5 code path with a separator
+   constant to read off, and screen capture is blocked on this machine, so the GUI could not
+   be driven to produce a sample. The remaining risk is cosmetic — either form parses
+   everywhere — but it is not evidence, and it should be settled from a real TLH-written
+   `.md5` when one is to hand.
 5. **Encoding drops foreign RIFF chunks.** `flac` only preserves a WAV's `LIST`/`INFO`
    chunks under `--keep-foreign-metadata`, which we do not pass, so `wav → flac → wav` is
    byte-identical only for a canonical WAV. Taper metadata in a source WAV does not survive
