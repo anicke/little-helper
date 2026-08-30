@@ -427,13 +427,54 @@ signature has been read.
 
 | # | Milestone | Contents |
 |---|---|---|
-| **S1** | The shell | `Area`, the rail, the global path bar, the area pane, the dock with its `Jobs \| Log` toggle. Every existing panel moves into its area unchanged; `run_operation` takes its operation as an argument; `overwrite` splits; the window gains a minimum size. **No behaviour change** — the existing 14 tests keep passing, five of them with a one-line edit each (§5). |
+| ~~**S1**~~ | ~~The shell~~ | **Done** — `Area`, the rail, the global path bar, the area pane, the dock with its `Jobs \| Log` toggle. Every existing panel moved into its area unchanged; `run_operation` takes its operation as an argument; `overwrite` split into `convert_overwrite`/`torrent_overwrite`; the window gained a 900×600 minimum size. **No behaviour change** — the existing 14 tests kept passing, five of them with a one-line edit each (§5). See §9 notes. |
 | **S2** | Selection | The checkbox column, select-all in the header, `App::selected`, `run_operation` over the ticked rows, and Torrent → Create explicitly *not* filtered by it (§4). A test that an unticked file gets no job, and one that torrent create ignores ticking entirely. |
 | **S3** | The checksum areas | Checksum → Create (kind picker, output path, `ChecksumFile::write` after the digests land) and Checksum → Check (`ChecksumFile::read`, one job per entry, per-file results table reusing G4's `JobUpdate` boundary). Tests through the real queue against the fixture corpus and the committed `reference.ffp`/`reference.st5` goldens. |
 | **S4** | The table widget | Replace the hand-rolled file table with `iced::widget::table`; give Files the wide column set including the encoder vendor string. |
 
 S1 before everything: it is the only one that touches every existing panel, and doing it
 first means S2–S4 each land in one area instead of in a ten-panel column.
+
+### S1 notes
+
+What the plan above got right without needing a correction: `Area::RAIL` as one data table
+(group header, area, label) drives both the rail's rendering and its selected-row styling,
+and every G1–G4 panel function moved into `area_pane`'s `match` with its own signature
+completely unchanged, exactly as §5 predicted.
+
+What it did not anticipate:
+
+* **`ChecksumKind` (`lh_core::checksum`) has no `Display`, and the orphan rule blocks adding
+  one from `lh-gui`** (`std::fmt::Display` is foreign, `ChecksumKind` is foreign). The old
+  `Operation` `pick_list` sidestepped this because `Operation` itself was local. The
+  Checksum → Create kind picker is therefore three plain buttons (`kind_button`, styled
+  selected/unselected like a rail row) rather than a `pick_list`, with a free
+  `checksum_kind_label` function standing in for `Display`. `ConvertTarget` (already local)
+  keeps its `pick_list`, now with a real `Display` impl instead of the old shared
+  `Operation::Display`.
+* **The dock's two bodies each used to carry their own header line** (`job_queue_panel`'s
+  `Jobs: N of M done`, `log_panel`'s `Log` label). Both moved up into `dock`'s
+  always-visible header — `job_queue_panel` and `log_panel` now render only their list,
+  which is the change that makes the aggregate line survive switching to the Log tab, the
+  behaviour §4 asked for.
+* **Torrent → Create needed a checkbox it never had.** The old single-column layout let it
+  read `App::overwrite` off the checkbox `operation_panel` drew for Convert, visible in the
+  same screen at the same time — exactly the "a second identical checkbox looked absurd"
+  state decision §1 flagged as forced by the layout rather than the domain. Splitting the
+  field (`torrent_overwrite`) exposed that Torrent → Create had never had its own control;
+  `torrent_create_panel` now does.
+* **`iced::widget::button::secondary`/`::text` are usable directly as `.style()` closures**
+  by value (`fn(&Theme, Status) -> Style`, the exact signature `.style()` wants), so the
+  selected/unselected switch on the rail, the checksum-kind buttons and the dock tabs is
+  one `if selected { button::secondary(theme, status) } else { button::text(theme, status) }`
+  each, no custom `Style` construction needed.
+* Real evidence, same bar as G1–G4's own notes: the compiled binary was run for real under
+  this machine's X11 display (`timeout 6 ./target/debug/little-helper`, `DISPLAY=:0`) and
+  stayed up the full 6 seconds without panicking. No screenshot tool exists in this sandbox
+  for a native window (`import`/`scrot`/`xwd`/`gnome-screenshot` all absent, same wall every
+  G-milestone hit) — nobody has clicked a rail row, toggled the dock tab, or watched an area
+  switch. The 14 tests are evidence the *logic* moved correctly; the rail's layout itself is
+  unverified.
 
 ---
 

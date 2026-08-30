@@ -40,11 +40,15 @@ use std::path::{Path, PathBuf};
 
 /// One of the operations `lh-cli` already exposes. G2 wired verify/checksum/sbe, which
 /// need no per-run options beyond the file itself; G3 adds convert, which needs a
-/// direction (`ConvertTarget`) and reads `App::overwrite`, the one option it does need.
-/// Torrent create and check (G4) stay out of this enum: they act on a whole folder or a
-/// dropped `.torrent`, not on the working set's per-file selection this enum drives, so
+/// direction (`ConvertTarget`) and reads `App::convert_overwrite`, the one option it does
+/// need. Torrent create and check (G4) stay out of this enum: they act on a whole folder or
+/// a dropped `.torrent`, not on the working set's per-file selection this enum drives, so
 /// `run_torrent_create`/`run_torrent_check` are their own methods with their own panels
 /// rather than two more variants that would not fit `run_operation`'s per-file loop.
+///
+/// S1 (`docs/gui-shell.md` §5) stopped this being a user-facing `pick_list` value: it is
+/// now built from `App::area` plus area-local state (`convert_target`, `checksum_kind`)
+/// right before a Run press, and passed into `run_operation` as an argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Verify,
@@ -62,30 +66,64 @@ enum ConvertTarget {
     Flac,
 }
 
-impl Operation {
-    const ALL: [Operation; 7] = [
-        Operation::Verify,
-        Operation::Checksum(ChecksumKind::Ffp),
-        Operation::Checksum(ChecksumKind::Md5),
-        Operation::Checksum(ChecksumKind::St5),
-        Operation::Sbe,
-        Operation::Convert(ConvertTarget::Wav),
-        Operation::Convert(ConvertTarget::Flac),
+impl std::fmt::Display for ConvertTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ConvertTarget::Wav => "FLAC → WAV",
+            ConvertTarget::Flac => "WAV → FLAC",
+        })
+    }
+}
+
+/// `ChecksumKind` (`lh_core::checksum`) has no `Display` of its own and the orphan rule
+/// keeps one from being added here — a plain label function instead.
+fn checksum_kind_label(kind: ChecksumKind) -> &'static str {
+    match kind {
+        ChecksumKind::Ffp => "FFP",
+        ChecksumKind::Md5 => "MD5",
+        ChecksumKind::St5 => "ST5",
+    }
+}
+
+/// The application's areas — `docs/gui-shell.md` §3, in the original TLH menu's own order.
+/// One is visible at a time in the area pane (§4); the rail (`rail()`) lists every one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Area {
+    Files,
+    Convert,
+    ChecksumCreate,
+    ChecksumCheck,
+    TorrentCreate,
+    TorrentCheck,
+    Verify,
+    Sbe,
+    Binaries,
+    About,
+}
+
+impl Area {
+    /// The rail's rows, grouped exactly as `docs/gui-shell.md` §3 lays them out: `None`
+    /// starts a new group with the given header; `Some` continues the previous one.
+    const RAIL: &'static [(Option<&'static str>, Area, &'static str)] = &[
+        (None, Area::Files, "Files"),
+        (Some("FORMAT"), Area::Convert, "Convert"),
+        (Some("CHECKSUM"), Area::ChecksumCreate, "Create"),
+        (None, Area::ChecksumCheck, "Check"),
+        (Some("TORRENT"), Area::TorrentCreate, "Create"),
+        (None, Area::TorrentCheck, "Check"),
+        (Some("ANALYSIS"), Area::Verify, "Verify"),
+        (None, Area::Sbe, "SBE"),
+        (Some(""), Area::Binaries, "Binaries"),
+        (None, Area::About, "About"),
     ];
 }
 
-impl std::fmt::Display for Operation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Operation::Verify => "Verify",
-            Operation::Checksum(ChecksumKind::Ffp) => "FFP checksum",
-            Operation::Checksum(ChecksumKind::Md5) => "MD5 checksum",
-            Operation::Checksum(ChecksumKind::St5) => "ST5 checksum",
-            Operation::Sbe => "SBE",
-            Operation::Convert(ConvertTarget::Wav) => "Convert to WAV",
-            Operation::Convert(ConvertTarget::Flac) => "Convert to FLAC",
-        })
-    }
+/// The dock's two bodies (`docs/gui-shell.md` §4) — the header (aggregate progress, Cancel)
+/// is always shown; this picks which body fills the rest of the dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockTab {
+    Jobs,
+    Log,
 }
 
 /// A submitted job's last-known state, keyed by `JobId` in `App::jobs`. A single
@@ -125,12 +163,23 @@ struct App {
     tools: Registry,
     error: Option<String>,
     queue: Queue<JobOutcome>,
-    operation: Operation,
+    /// The rail's current selection (`docs/gui-shell.md` §5). Defaults to `Area::Files`,
+    /// the area the window opens on in place of TLH's own blank `tsNone`.
+    area: Area,
+    /// Convert's direction picker — area-local state `run_operation`'s caller reads to
+    /// build `Operation::Convert` (§5). Replaces `Operation::ALL`'s flat `pick_list`.
+    convert_target: ConvertTarget,
+    /// Checksum → Create's kind picker, same role as `convert_target` for `Operation::Checksum`.
+    checksum_kind: ChecksumKind,
     /// Convert's one option (`lh-cli`'s `--force`) — whether to overwrite an output that
-    /// already exists. Also read by the torrent-create panel: both are "an output file
-    /// already exists" the same way, so G4 reuses this one checkbox rather than adding a
-    /// second with identical meaning.
-    overwrite: bool,
+    /// already exists. Split from `torrent_overwrite` in S1: the two checkboxes were one
+    /// field only because convert and torrent-create were on screen together (G3/G4);
+    /// separate areas make the sharing a bug waiting to happen (`docs/gui-shell.md` §5).
+    convert_overwrite: bool,
+    /// Torrent → Create's "overwrite an existing `.torrent`" option — see `convert_overwrite`.
+    torrent_overwrite: bool,
+    /// Which body the dock (§4) shows below its always-visible aggregate-progress header.
+    dock_tab: DockTab,
     jobs: BTreeMap<JobId, JobEntry>,
     latest_job_by_path: HashMap<PathBuf, JobId>,
     /// The log/audit pane: `Provenance::render()` text from every finished job that
@@ -172,8 +221,12 @@ enum Message {
     FolderPicked(Option<PathBuf>),
     ScanPressed,
     PathDropped(PathBuf),
-    OperationSelected(Operation),
-    OverwriteToggled(bool),
+    AreaSelected(Area),
+    ConvertTargetSelected(ConvertTarget),
+    ChecksumKindSelected(ChecksumKind),
+    ConvertOverwriteToggled(bool),
+    TorrentOverwriteToggled(bool),
+    DockTabSelected(DockTab),
     RunPressed,
     CancelPressed,
     Job(job::JobUpdate),
@@ -203,8 +256,12 @@ impl App {
                 tools: Registry::discover(),
                 error: None,
                 queue: Queue::new(),
-                operation: Operation::Verify,
-                overwrite: false,
+                area: Area::Files,
+                convert_target: ConvertTarget::Flac,
+                checksum_kind: ChecksumKind::Ffp,
+                convert_overwrite: false,
+                torrent_overwrite: false,
+                dock_tab: DockTab::Jobs,
                 jobs: BTreeMap::new(),
                 latest_job_by_path: HashMap::new(),
                 log: Vec::new(),
@@ -327,7 +384,7 @@ impl App {
             private: self.torrent_private || chosen.private,
             source: source_tag,
             comment,
-            overwrite: self.overwrite,
+            overwrite: self.torrent_overwrite,
             ..CreateOpts::default()
         };
 
@@ -394,21 +451,23 @@ impl App {
         );
     }
 
-    /// Submits one job per file in the working set for the selected operation. Resets the
-    /// queue's `CancelToken` first: `Queue::submit` checks that same shared token for every
-    /// job for the queue's whole life (`lh-core/src/job/mod.rs`), so without a reset here, a
-    /// single Cancel press would silently stop every future Run from ever executing a job —
-    /// a gap only a long-lived queue like this one's can hit (`CancelToken::reset`'s doc,
+    /// Submits one job per file in the working set for `operation` — passed in by the
+    /// caller (each area's Run button; §5 of `docs/gui-shell.md`) rather than read off
+    /// `self`, now that no single field holds "the" operation. Resets the queue's
+    /// `CancelToken` first: `Queue::submit` checks that same shared token for every job for
+    /// the queue's whole life (`lh-core/src/job/mod.rs`), so without a reset here, a single
+    /// Cancel press would silently stop every future Run from ever executing a job — a gap
+    /// only a long-lived queue like this one's can hit (`CancelToken::reset`'s doc,
     /// `docs/gui.md`'s G2 notes).
     ///
     /// A convert to FLAC needs the reference `flac` binary; discovered once at boot
     /// (`self.tools`), not re-discovered per run. Missing it fails the whole Run up front,
     /// the same as `lh-cli`'s own `cmd_convert` — before converting half a show, not after.
-    fn run_operation(&mut self) {
+    fn run_operation(&mut self, operation: Operation) {
         let Some(set) = &self.working_set else {
             return;
         };
-        if let Operation::Convert(ConvertTarget::Flac) = self.operation
+        if let Operation::Convert(ConvertTarget::Flac) = operation
             && let Err(e) = self.tools.require(ToolId::Flac)
         {
             self.error = Some(e.to_string());
@@ -416,8 +475,7 @@ impl App {
         }
         self.error = None;
         self.queue.cancel_token().reset();
-        let operation = self.operation;
-        let overwrite = self.overwrite;
+        let overwrite = self.convert_overwrite;
         // Cloned once per Run rather than borrowed: each submitted job needs its own
         // owned `Tool` to move into its closure, and discovery already happened at boot.
         let flac_tool = match operation {
@@ -597,9 +655,22 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.scan(&path);
             }
         }
-        Message::OperationSelected(op) => app.operation = op,
-        Message::OverwriteToggled(v) => app.overwrite = v,
-        Message::RunPressed => app.run_operation(),
+        Message::AreaSelected(area) => app.area = area,
+        Message::ConvertTargetSelected(t) => app.convert_target = t,
+        Message::ChecksumKindSelected(k) => app.checksum_kind = k,
+        Message::ConvertOverwriteToggled(v) => app.convert_overwrite = v,
+        Message::TorrentOverwriteToggled(v) => app.torrent_overwrite = v,
+        Message::DockTabSelected(tab) => app.dock_tab = tab,
+        // Only the four working-set areas (§4) have a Run button; the rail can only ever
+        // select an area whose panel emitted this, so the other areas are unreachable here
+        // rather than mis-submitting an operation nobody asked for.
+        Message::RunPressed => match app.area {
+            Area::Convert => app.run_operation(Operation::Convert(app.convert_target)),
+            Area::ChecksumCreate => app.run_operation(Operation::Checksum(app.checksum_kind)),
+            Area::Verify => app.run_operation(Operation::Verify),
+            Area::Sbe => app.run_operation(Operation::Sbe),
+            _ => {}
+        },
         Message::CancelPressed => app.queue.cancel(),
         Message::Job(event) => app.handle_job_event(event),
         Message::ExportLogPressed => {
@@ -651,6 +722,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
     Task::none()
 }
 
+/// S1's shape (`docs/gui-shell.md` §4): a fixed-width rail, a content pane that is a
+/// global path bar over one area's own controls (plus the shared file table, for the
+/// working-set areas), and a dock pinned to the bottom that stays visible across every
+/// area. No panel's own logic changes here — each one just moves under `match app.area`.
 fn view(app: &App) -> Element<'_, Message> {
     let path_bar = row![
         text_input("Folder to scan...", &app.path_input)
@@ -663,32 +738,212 @@ fn view(app: &App) -> Element<'_, Message> {
 
     let error: Element<'_, Message> = text(app.error.as_deref().unwrap_or("")).into();
 
-    let table = file_table(app);
-    let operations = operation_panel(app);
-    let torrent_create = torrent_create_panel(app);
-    let torrent_check = torrent_check_panel(app);
-    let torrent_results = torrent_check_results_panel(&app.torrent_check_rows);
-    let jobs_panel = job_queue_panel(&app.jobs);
-    let log = log_panel(&app.log);
-    let tools_panel = tools_panel(&app.tools);
+    let content = column![path_bar, error, area_pane(app)]
+        .spacing(12)
+        .padding(12)
+        .height(Length::Fill);
 
-    container(
-        column![
-            path_bar,
-            error,
-            table,
-            operations,
-            torrent_create,
-            torrent_check,
-            torrent_results,
-            jobs_panel,
-            log,
-            tools_panel
+    let body = row![
+        container(rail(app)).width(Length::Fixed(140.0)).padding(8),
+        container(content).width(Length::Fill),
+    ]
+    .height(Length::FillPortion(3));
+
+    container(column![body, dock(app)]).into()
+}
+
+/// One area's controls, matching `Area` (`docs/gui-shell.md` §5). Working-set areas
+/// (Files, Convert, Checksum → Create, Verify, SBE) append the shared file table below
+/// their controls; document areas (Torrent → Check) show their own result view instead;
+/// static areas (Binaries, About) show neither.
+fn area_pane(app: &App) -> Element<'_, Message> {
+    match app.area {
+        Area::Files => file_table(app),
+        Area::Convert => column![convert_panel(app), file_table(app)]
+            .spacing(12)
+            .into(),
+        Area::ChecksumCreate => column![checksum_create_panel(app), file_table(app)]
+            .spacing(12)
+            .into(),
+        Area::ChecksumCheck => checksum_check_panel(),
+        Area::TorrentCreate => torrent_create_panel(app),
+        Area::TorrentCheck => column![
+            torrent_check_panel(app),
+            torrent_check_results_panel(&app.torrent_check_rows),
         ]
         .spacing(12)
-        .padding(12),
+        .into(),
+        Area::Verify => column![run_cancel_row(app), file_table(app)]
+            .spacing(12)
+            .into(),
+        Area::Sbe => column![run_cancel_row(app), file_table(app)]
+            .spacing(12)
+            .into(),
+        Area::Binaries => tools_panel(&app.tools),
+        Area::About => about_panel(),
+    }
+}
+
+/// The left rail — `Area::RAIL`'s group headers and rows, in TLH's own menu order
+/// (`docs/gui-shell.md` §3). Group headers are plain text, not buttons: TLH's own
+/// `&Format` opens a menu but performs nothing, and a header that looks clickable and is
+/// not is worse than one that plainly is not.
+fn rail(app: &App) -> Element<'_, Message> {
+    let mut col = Column::new().spacing(2);
+    for (header, area, label) in Area::RAIL {
+        match header {
+            Some("") => {
+                col = col.push(container(text("")).height(Length::Fixed(8.0)));
+            }
+            Some(h) => col = col.push(text(*h).size(12)),
+            None => {}
+        }
+        col = col.push(rail_row(label, *area, app.area == *area));
+    }
+    scrollable(col).into()
+}
+
+/// One rail row. The selected row is styled, not merely remembered
+/// (`docs/gui-shell.md` §4) — `button::secondary` for the current area, `button::text`
+/// (no visible chrome) for every other one.
+fn rail_row(label: &str, area: Area, selected: bool) -> Element<'_, Message> {
+    button(text(label))
+        .width(Length::Fill)
+        .on_press(Message::AreaSelected(area))
+        .style(move |theme, status| {
+            if selected {
+                button::secondary(theme, status)
+            } else {
+                button::text(theme, status)
+            }
+        })
+        .into()
+}
+
+fn run_cancel_row(app: &App) -> Element<'_, Message> {
+    let run =
+        button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
+    let cancel = button("Cancel").on_press(Message::CancelPressed);
+    row![run, cancel].spacing(8).into()
+}
+
+fn convert_panel(app: &App) -> Element<'_, Message> {
+    let direction = pick_list(
+        &[ConvertTarget::Flac, ConvertTarget::Wav][..],
+        Some(app.convert_target),
+        Message::ConvertTargetSelected,
+    );
+    let overwrite = checkbox(app.convert_overwrite)
+        .label("Overwrite existing outputs")
+        .on_toggle(Message::ConvertOverwriteToggled);
+    let run =
+        button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
+    let cancel = button("Cancel").on_press(Message::CancelPressed);
+
+    row![text("Direction:"), direction, overwrite, run, cancel]
+        .spacing(8)
+        .into()
+}
+
+/// Checksum → Create today: the digest-per-file computation `Operation::Checksum` already
+/// did in G2, with a kind picker instead of sharing the old flat operation `pick_list`.
+/// Writing a `ChecksumFile` (the actual gap `docs/gui-shell.md` §6 names) is S3, not this
+/// milestone — S1 is a pure re-layout, not new behaviour.
+fn checksum_create_panel(app: &App) -> Element<'_, Message> {
+    let kinds = row(
+        [ChecksumKind::Ffp, ChecksumKind::Md5, ChecksumKind::St5]
+            .into_iter()
+            .map(|k| kind_button(k, app.checksum_kind == k)),
+    )
+    .spacing(4);
+    let run =
+        button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
+    let cancel = button("Cancel").on_press(Message::CancelPressed);
+
+    column![
+        text("Computes a digest per file below (status column). Writing a .ffp/.md5/.st5 \
+              file is planned in docs/gui-shell.md S3."),
+        row![text("Kind:"), kinds, run, cancel].spacing(8),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn kind_button(kind: ChecksumKind, selected: bool) -> Element<'static, Message> {
+    button(text(checksum_kind_label(kind)))
+        .on_press(Message::ChecksumKindSelected(kind))
+        .style(move |theme, status| {
+            if selected {
+                button::secondary(theme, status)
+            } else {
+                button::text(theme, status)
+            }
+        })
+        .into()
+}
+
+/// Checksum → Check has no functionality yet — `docs/gui-shell.md` §6's second gap.
+/// `lh check` exists in `lh-core`/`lh-cli`; nothing calls it from `lh-gui`. Giving the area
+/// its own rail row now, ahead of S3, is what made the gap obvious in the first place.
+fn checksum_check_panel() -> Element<'static, Message> {
+    text(
+        "Not yet implemented — planned as docs/gui-shell.md S3. `lh check <file>` \
+         already does this from the command line.",
     )
     .into()
+}
+
+fn about_panel() -> Element<'static, Message> {
+    column![
+        text("Little Helper"),
+        text(format!("v{}", env!("CARGO_PKG_VERSION"))),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// The dock (`docs/gui-shell.md` §4): a header that is always the aggregate `N of M done`
+/// plus Cancel, and a `Jobs | Log` toggle that switches only the body — the two bodies
+/// want the same vertical space, and the aggregate line must never be one click away.
+fn dock(app: &App) -> Element<'_, Message> {
+    let total = app.jobs.len();
+    let done = app
+        .jobs
+        .values()
+        .filter(|e| !matches!(e.status, JobStatus::Running { .. }))
+        .count();
+
+    let jobs_tab = dock_tab_button("Jobs", DockTab::Jobs, app.dock_tab == DockTab::Jobs);
+    let log_tab = dock_tab_button("Log", DockTab::Log, app.dock_tab == DockTab::Log);
+    let header = row![
+        text(format!("Jobs: {done} of {total} done")),
+        jobs_tab,
+        log_tab,
+        button("Cancel").on_press(Message::CancelPressed),
+    ]
+    .spacing(8);
+
+    let dock_body = match app.dock_tab {
+        DockTab::Jobs => job_queue_panel(&app.jobs),
+        DockTab::Log => log_panel(&app.log),
+    };
+
+    container(column![header, dock_body].spacing(4).padding(8))
+        .height(Length::FillPortion(2))
+        .into()
+}
+
+fn dock_tab_button(label: &str, tab: DockTab, selected: bool) -> Element<'_, Message> {
+    button(text(label))
+        .on_press(Message::DockTabSelected(tab))
+        .style(move |theme, status| {
+            if selected {
+                button::secondary(theme, status)
+            } else {
+                button::text(theme, status)
+            }
+        })
+        .into()
 }
 
 fn file_table(app: &App) -> Element<'_, Message> {
@@ -738,24 +993,6 @@ fn file_table(app: &App) -> Element<'_, Message> {
     scrollable(rows).height(Length::FillPortion(3)).into()
 }
 
-fn operation_panel(app: &App) -> Element<'_, Message> {
-    let picker = pick_list(
-        &Operation::ALL[..],
-        Some(app.operation),
-        Message::OperationSelected,
-    );
-    let overwrite = checkbox(app.overwrite)
-        .label("Overwrite existing outputs")
-        .on_toggle(Message::OverwriteToggled);
-    let run =
-        button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
-    let cancel = button("Cancel").on_press(Message::CancelPressed);
-
-    row![text("Operation:"), picker, overwrite, run, cancel]
-        .spacing(8)
-        .into()
-}
-
 /// `docs/torrent-creation.md` C5: folder (`App::working_root`, already scanned above) →
 /// trackers → create, with piece progress through the same job-queue panel every other
 /// operation uses. Pre-flight (C4) is postponed there and stays out of this panel too.
@@ -779,6 +1016,9 @@ fn torrent_create_panel(app: &App) -> Element<'_, Message> {
         .on_input(Message::TorrentSourceChanged);
     let comment = text_input("Comment (optional)", &app.torrent_comment)
         .on_input(Message::TorrentCommentChanged);
+    let overwrite = checkbox(app.torrent_overwrite)
+        .label("Overwrite existing .torrent")
+        .on_toggle(Message::TorrentOverwriteToggled);
     let create = button("Create torrent").on_press_maybe(
         app.working_root
             .is_some()
@@ -789,7 +1029,7 @@ fn torrent_create_panel(app: &App) -> Element<'_, Message> {
         text("Create torrent"),
         scrollable(known).height(Length::Fixed(80.0)),
         tracker_input,
-        row![private, source, comment, create].spacing(8),
+        row![private, source, comment, overwrite, create].spacing(8),
     ]
     .spacing(8)
     .into()
@@ -863,34 +1103,28 @@ fn torrent_check_results_panel(rows: &[job::TorrentFileRow]) -> Element<'_, Mess
 /// The log/audit pane — `Provenance::render()` text from every finished job that produced
 /// one, oldest first, plus an Export button that writes them to a text file the user
 /// picks (`docs/gui.md` §2). Not cleared between runs, same as the job-queue panel.
+/// The log/audit pane's body — `Provenance::render()` text from every finished job that
+/// produced one, oldest first, plus an Export button (`docs/gui.md` §2). The `Jobs | Log`
+/// header lives in [`dock`], not here — the aggregate line applies to Jobs only.
 fn log_panel(log: &[String]) -> Element<'_, Message> {
     let export = button("Export log...")
         .on_press_maybe((!log.is_empty()).then_some(Message::ExportLogPressed));
-    let mut list = Column::new()
-        .spacing(4)
-        .push(row![text("Log"), export].spacing(8));
+    let mut list = Column::new().spacing(4).push(row![export]);
     for entry in log {
         for line in entry.lines() {
             list = list.push(text(line.to_string()));
         }
     }
-    scrollable(list).height(Length::FillPortion(2)).into()
+    scrollable(list).height(Length::Fill).into()
 }
 
-/// Aggregate `N of M done` plus one line per job, oldest first (`BTreeMap<JobId, _>` order
-/// — `docs/gui.md` §4) — the job-queue panel `PLAN.md` §4 names. Unlike `lh-cli`'s batch
-/// commands, entries are not cleared between runs: the queue is long-lived (`docs/gui.md`
-/// §1), so a second Run's jobs simply join the first's in this same list.
+/// One line per job, oldest first (`BTreeMap<JobId, _>` order — `docs/gui.md` §4) — the
+/// job-queue panel `PLAN.md` §4 names. The aggregate `N of M done` line lives in [`dock`]'s
+/// header, not here, since it must stay visible even while the Log tab is showing. Unlike
+/// `lh-cli`'s batch commands, entries are not cleared between runs: the queue is
+/// long-lived (`docs/gui.md` §1), so a second Run's jobs simply join the first's here.
 fn job_queue_panel(jobs: &BTreeMap<JobId, JobEntry>) -> Element<'_, Message> {
-    let total = jobs.len();
-    let done = jobs
-        .values()
-        .filter(|e| !matches!(e.status, JobStatus::Running { .. }))
-        .count();
-
-    let mut list = Column::new()
-        .spacing(4)
-        .push(text(format!("Jobs: {done} of {total} done")));
+    let mut list = Column::new().spacing(4);
     for entry in jobs.values() {
         list = list.push(text(format!(
             "{}: {}",
@@ -899,11 +1133,14 @@ fn job_queue_panel(jobs: &BTreeMap<JobId, JobEntry>) -> Element<'_, Message> {
         )));
     }
 
-    scrollable(list).height(Length::FillPortion(2)).into()
+    scrollable(list).height(Length::Fill).into()
 }
 
 fn tools_panel(tools: &Registry) -> Element<'_, Message> {
-    let mut list = Column::new().spacing(4).push(text("Tools"));
+    // Labelled "Binaries" here, matching the rail row (`docs/gui-shell.md` §3) — TLH's own
+    // "Tools" menu means repair (Fix SBEs, Strip header, Create skt), a different, v0.2
+    // thing. `Registry`, `ToolId` and `lh tools` keep their names; this is a GUI label.
+    let mut list = Column::new().spacing(4).push(text("Binaries"));
     for (id, discovery) in tools.entries() {
         list = list.push(text(tool_line(id, discovery)));
     }
@@ -996,9 +1233,15 @@ fn subscription(app: &App) -> Subscription<Message> {
 }
 
 fn main() -> iced::Result {
+    // Rail + table + dock has a floor below which it stops being usable
+    // (`docs/gui-shell.md` §5) — TLH's own window is 634×407 and is not resizable smaller.
     iced::application(App::boot, update, view)
         .subscription(subscription)
         .title("Little Helper")
+        .window(iced::window::Settings {
+            min_size: Some(iced::Size::new(900.0, 600.0)),
+            ..Default::default()
+        })
         .run()
 }
 
@@ -1085,8 +1328,7 @@ mod tests {
     fn running_verify_through_the_real_queue_marks_ok_and_mismatch_files_correctly() {
         let (mut app, _) = App::boot();
         app.scan(&fixtures_dir());
-        app.operation = Operation::Verify;
-        app.run_operation();
+        app.run_operation(Operation::Verify);
 
         let files: Vec<(String, PathBuf)> = app
             .working_set
@@ -1124,8 +1366,7 @@ mod tests {
         let (mut app, _) = App::boot();
         app.scan(&fixtures_dir());
         app.queue.cancel();
-        app.operation = Operation::Sbe;
-        app.run_operation();
+        app.run_operation(Operation::Sbe);
 
         let total = app.working_set.as_ref().unwrap().files.len();
         let rx = app.queue.events();
@@ -1154,8 +1395,7 @@ mod tests {
 
         let (mut app, _) = App::boot();
         app.scan(dir.path());
-        app.operation = Operation::Convert(ConvertTarget::Wav);
-        app.run_operation();
+        app.run_operation(Operation::Convert(ConvertTarget::Wav));
 
         let total = app.working_set.as_ref().unwrap().files.len();
         let rx = app.queue.events();
@@ -1203,8 +1443,7 @@ mod tests {
 
         let (mut app, _) = App::boot();
         app.scan(dir.path());
-        app.operation = Operation::Convert(ConvertTarget::Flac);
-        app.run_operation();
+        app.run_operation(Operation::Convert(ConvertTarget::Flac));
 
         let total = app.working_set.as_ref().unwrap().files.len();
         let rx = app.queue.events();
@@ -1229,8 +1468,7 @@ mod tests {
 
         let (mut app, _) = App::boot();
         app.scan(dir.path());
-        app.operation = Operation::Convert(ConvertTarget::Wav);
-        app.run_operation();
+        app.run_operation(Operation::Convert(ConvertTarget::Wav));
 
         assert!(
             app.jobs.is_empty(),
