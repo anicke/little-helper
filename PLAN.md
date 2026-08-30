@@ -19,7 +19,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
 | M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; see [docs/job-queue.md](docs/job-queue.md) |
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
-| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0 spike, G1 (scaffold, file table, Tools panel) and G2 (job queue wired: verify/checksum/sbe, per-row and aggregate progress, Cancel) done, G3 (convert + log pane) not started |
+| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell is being revamped: [docs/gui-shell.md](docs/gui-shell.md) |
 | M4 Packaging | not started |
 
 136 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
@@ -236,6 +236,19 @@ disappoints for unrelated reasons.
 - **Job queue** — per-file and aggregate progress, cancel.
 - **Log / audit pane** — the provenance trail, exportable.
 - **Tools panel** — discovered binaries, versions, hashes, override paths.
+
+These are the *regions*, and G1–G4 built all six. They are not a *shell*: `lh-gui` stacks
+every one of them in a single scrolling column, so every control for every operation is on
+screen at once. [docs/gui-shell.md](docs/gui-shell.md) plans the replacement — a left rail
+of application areas over a shared working set and a persistent job/log dock — and grounds
+it in the original's own form definitions, extracted with
+[scripts/dump-tlh-forms.py](scripts/dump-tlh-forms.py). Trader's Little Helper turns out to
+render its own task taxonomy three times (menu bar, `frmTypeOfAction`, and a tree-over-pane
+Preferences window), so the rail is the original's idiom, not a departure from it.
+
+Note the name collision that doc resolves: TLH's own **Tools** menu means *repair*
+(fix SBEs, strip header, create skt), all of which is v0.2 here. The GUI calls the
+discovered-binary registry above **Binaries** so that `Tools` stays free for TLH's meaning.
 
 ---
 

@@ -245,6 +245,7 @@ already covers.
 | ~~**G2**~~ | ~~Job queue wired~~ | **Done** — one long-lived `Queue<JobOutcome>`, the subscription adapter, an operation panel (verify / ffp / md5 / st5 / sbe) that runs every file in the working set, per-row status via `App::latest_job_by_path`, an aggregate `N of M done` and per-job job-queue panel, and a working Cancel button. 2 new tests against the real fixture corpus and a real `Queue`, plus a real (non-interactive) run under X11. See §G2 notes. |
 | ~~**G3**~~ | ~~Convert + log pane~~ | **Done** — convert (both directions) joins the operation panel with a direction picker and an Overwrite checkbox, through the same queue, with real per-file progress (`to_wav_with_progress`) and a real mid-run cancel (`to_flac_cancellable`, J2). A file already in the target format submits no job at all rather than showing FAILED for a no-op. A log/audit pane renders `Provenance::render()` for every finished job that produced one, with an Export button. 4 new tests: two through the real queue (WAV write + FLAC write via the real reference `flac` binary), one proving the already-in-format skip submits nothing, none against a mocked queue. See §G3 notes. |
 | ~~**G4**~~ | ~~Torrent panels~~ | **Done** — a Create-torrent panel (folder from the already-scanned working set, comma-separated tracker ids/URLs, private/source/comment, one job with real piece progress) and a Check-torrent panel (Browse or drop a `.torrent`, parsed immediately for name/infohash/counts; Check against a folder, quick or full, through the same queue). The check panel gets its own per-file results table, the first `JobUpdate::Finished` payload beyond one status line. 6 new tests: two through the real queue (a real `.torrent` written and read back, and a create → check round trip reporting `Complete`), one proving an unresolvable tracker spec is rejected before any job is submitted, one proving drag-and-drop routes a `.torrent` to the check panel instead of `App::scan`, plus `format_bytes`. See §G4 notes. |
+| **S1–S4** | Shell revamp | Planned separately in [gui-shell.md](gui-shell.md). G1–G4 each appended one more panel to a single `column!`, so the window now renders ten regions at once; S1–S4 replace that with a left rail of application areas over a shared working set and a persistent job/log dock. It also adds the two front-end gaps this doc never covered — writing a checksum file, and checking one — neither of which is new `lh-core` logic. |
 
 ---
 
@@ -274,6 +275,13 @@ already covers.
    per `TrackerList` entry (bundled plus user) is real work for a v0.1 convenience nobody
    has asked for yet — the known-trackers list above the field already shows every id to
    copy. Revisit if a real user finds typing ids by hand painful.
+
+   **New evidence, 2026-08-30, from `gui-shell.md` §0:** the original did not make users
+   type tracker ids either. TLH ships `frmEditTrackerList` — a `TListView` with
+   `Add ... / Remove / Edit ... / Save` — and `frmGetAnnounceList`, which fetches an
+   announce list. That does not change v0.1's answer, since still nobody has asked, but it
+   removes the "perhaps the original got by without one" defence this question was leaning
+   on. Recorded rather than acted on.
 6. **Piece length, `--include-all`, and a custom output path are not exposed.** The create
    panel always auto-sizes pieces and excludes the same noise `lh-cli` does by default,
    matching `docs/torrent-creation.md` C5's own scope ("Folder → trackers → ... → create"
