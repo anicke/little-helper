@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 use crate::format::{self, wav::WavWriter};
 use crate::model::AudioFormat;
 use crate::output::TempOutput;
-use crate::tools::{Agent, Provenance, Tool, ToolId, run};
+use crate::tools::{Agent, Provenance, Tool, ToolId, run_cancellable};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::BufWriter;
@@ -64,6 +64,18 @@ pub struct Conversion {
 /// source's STREAMINFO. A file that fails its own checksum does not produce a WAV: handing
 /// someone audio we know to be wrong is worse than handing them nothing.
 pub fn to_wav(src: &Path, dst: &Path, overwrite: bool) -> Result<Conversion> {
+    to_wav_with_progress(src, dst, overwrite, &mut |_, _| true)
+}
+
+/// [`to_wav`], reporting (frames written, total frames) once per decoded block and
+/// stopping early — with [`Error::Cancelled`], nothing renamed into place — the moment
+/// `progress` returns `false`. `to_wav` is this with a `progress` that never says stop.
+pub fn to_wav_with_progress(
+    src: &Path,
+    dst: &Path,
+    overwrite: bool,
+    progress: &mut dyn FnMut(u32, u32) -> bool,
+) -> Result<Conversion> {
     let probed = format::probe(src)?;
     if probed.format != AudioFormat::Flac {
         return Err(Error::Unsupported {
@@ -77,7 +89,7 @@ pub fn to_wav(src: &Path, dst: &Path, overwrite: bool) -> Result<Conversion> {
     let file = File::create(temp.path()).map_err(|e| Error::io(temp.path(), e))?;
     let mut writer =
         WavWriter::new(BufWriter::new(file), &probed.stream_info).map_err(|e| Error::io(dst, e))?;
-    let audio_md5 = format::flac::decode_to_wav(src, temp.path(), &mut writer)?;
+    let audio_md5 = format::flac::decode_to_wav(src, temp.path(), &mut writer, progress)?;
     writer.finish().map_err(|e| Error::io(dst, e))?;
 
     if let Some(stored) = probed.stream_info.audio_md5
@@ -119,6 +131,27 @@ pub fn to_flac(
     opts: &EncodeOpts,
     overwrite: bool,
 ) -> Result<Conversion> {
+    to_flac_cancellable(src, dst, tool, opts, overwrite, &mut || true)
+}
+
+/// [`to_flac`], but `should_continue` is polled while `flac` is running and returning
+/// `false` kills it mid-run instead of waiting for it to finish (docs/job-queue.md §8).
+/// `flac` itself never learns it was asked to stop; the killed child's `.part` output is
+/// cleaned up by `TempOutput` the same as any other cancelled or failed conversion.
+///
+/// There is no (done, total) here the way [`to_wav_with_progress`] has: `flac` only draws
+/// its own percentage display when stderr is a terminal, confirmed empirically (see
+/// docs/job-queue.md §8) — piped through `Command`, it prints nothing until it exits, so
+/// there is no number to relay in between. `to_flac` is this with a `should_continue` that
+/// never says stop.
+pub fn to_flac_cancellable(
+    src: &Path,
+    dst: &Path,
+    tool: &Tool,
+    opts: &EncodeOpts,
+    overwrite: bool,
+    should_continue: &mut dyn FnMut() -> bool,
+) -> Result<Conversion> {
     if tool.id != ToolId::Flac {
         return Err(Error::ToolUnusable {
             tool: tool.id.name(),
@@ -158,7 +191,7 @@ pub fn to_flac(
     argv.push("--".into());
     argv.push(src.into());
 
-    let agent = run(tool, &argv)?;
+    let agent = run_cancellable(tool, &argv, should_continue)?;
 
     // What flac says it encoded, against what we read from the source ourselves.
     let source_md5 = format::audio_md5(src)?;

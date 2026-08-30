@@ -64,6 +64,21 @@ impl<T> Progress<T> {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
+
+    /// A `Progress` with no `Queue` behind it, for a caller that runs one job directly
+    /// instead of submitting it — `lh-cli`'s single-file fast path (docs/job-queue.md §3),
+    /// which skips the queue entirely but still wants `is_cancelled()` wired to its own
+    /// Ctrl-C handler. `report`s go nowhere: nothing is draining `events()` for a job the
+    /// queue never heard about, but sending into a channel with no receiver is harmless,
+    /// the same as it is when a `Queue` is torn down out from under a slow job.
+    pub fn detached(cancel: CancelToken) -> Self {
+        let (tx, _rx) = unbounded();
+        Progress {
+            id: JobId(0),
+            cancel,
+            tx,
+        }
+    }
 }
 
 /// One thing that happened to a job. `T` is the operation's own result type — the queue

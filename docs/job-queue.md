@@ -205,7 +205,7 @@ closes it there rather than leaving the queue to sit beside the code it was mean
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**J1**~~ | ~~Core queue~~ | **Done** — `CancelToken`, `JobId`, `Progress<T>`, `Event<T>`, `Queue<T>` on a bounded rayon pool. Wired into `lh verify`/`sbe`/`ffp`/`md5`/`st5`/`convert` for multi-file batches; `Ctrl-C` cancels cleanly via `ctrlc`. Torrent create runs as a single queued job reusing its existing progress callback. 5 tests in `lh-core/tests/job.rs`. See §7. |
-| **J2** | Fine-grained + killable | Byte-level progress for convert (progress-aware WAV writer; incremental read of `flac`'s stderr); `run()` grows a cancel-aware variant using `spawn()` + `kill()` so a WAV → FLAC job can actually be stopped mid-run. |
+| ~~**J2**~~ | ~~Fine-grained + killable~~ | **Done, with one sketch item cut on evidence** — frame-level progress for FLAC → WAV (in-process); `run()` grows `run_cancellable`, a `spawn()` + `kill()` variant, so a WAV → FLAC job actually stops mid-`flac`. Byte-level progress *from `flac`'s own stderr* is not implemented — §8 found it is not available at all over a pipe. See §8. |
 | **J3** | GUI adapter | Iced `Subscription` wrapping `Queue<T>::events()` for the job-queue panel in PLAN.md §4. Needs M3 to exist first. |
 
 ---
@@ -240,3 +240,57 @@ Four things the implementation forced, none of them visible from the sketch in �
 * **§3's "streams results as they land" oversold the CLI change, and got corrected here.** A script piping `lh verify`'s stdout must see the same file order on every run; printing in completion order — the literal reading of that sentence — makes the output nondeterministic across runs on a multi-file batch, since worker threads finish in whatever order the OS schedules them. `run_batch` keeps per-file report lines in submission order, buffered until every job has a terminal event, and only the *progress counter* ("N of M done") streams live, to stderr, where a script is not reading anyway. Real, visible feedback during a long batch; unchanged, reproducible stdout.
 * **The cancellation checkpoint inside `hash_pieces` needed the existing callback to grow a return value, not a second parameter.** `create_with_progress`'s `progress: &mut dyn FnMut(u32, u32)` became `FnMut(u32, u32) -> bool`, where `false` stops the walk. That keeps `torrent::create` free of any dependency on the `job` module, exactly as §2 requires — the CLI's job closure is the only place that knows both types, forwarding `Progress::report` in and `Progress::is_cancelled` out through the one function `hash_pieces` already called every piece. A stopped walk returns the new `Error::Cancelled` rather than a partial `Created`, matching Principle 1.
 * **`JobId::index()` is honest about leaning on a design choice from open question 3, not a general property.** It only maps to "position in the file list" because each CLI batch command builds one fresh `Queue` and submits every file in one dense, ordered pass — true today, and it would silently stop being true the moment two batches ever shared one `Queue`. Worth remembering if J3's GUI adapter reaches for a single long-lived queue across operations, per that same open question.
+
+---
+
+## 8. J2 notes
+
+*Landed 2026-08-30.*
+
+**§2's plan to read `flac`'s stderr incrementally does not work, and this was checked
+before writing any parsing code, not after.** `flac 1.5.0` (the reference binary this repo
+already uses — PLAN.md's `flac -d` / `--show-md5sum` parity claims are against the same
+binary) gates its `\r`-updated `N% complete` line on `isatty(stderr)`. Piped through
+`Command`'s `Stdio::piped()`, stderr carries only the four-line banner and one final summary
+line (`test.wav: Verify OK, wrote N bytes, ratio=R`) — confirmed both on a small fixture and
+on a 60-second synthetic WAV encoded at `-8` (finishes in ~50ms either way, so file size
+was not masking anything). `flac --help` has no flag to force the percentage display for a
+non-terminal, and no alternate progress channel (no `--progress-fd` or similar). Allocating
+a pty to get it would be a real new dependency for a number that, per §2's own reasoning,
+nothing currently consumes — cut, rather than built and left unused.
+
+What that leaves for WAV → FLAC: `run_cancellable` still turns cancellation from "wait for
+this whole file's `flac` to finish" into "kill it now", which was the actual named gap
+(§2, §0). The job just reports `Started` / `Finished` like any other opaque single-call
+job (§2's "sub-item level" category) — that was already true for checksum/verify/sbe in J1;
+WAV → FLAC joins them instead of getting a number nothing can produce.
+
+**`run_cancellable` drains the child's stdout and stderr on their own threads, not after
+`wait()`.** `Command::output()` (`run`'s old body, now `run_cancellable(tool, args, &mut ||
+true)`) reads both pipes only once the child has exited, which is fine when nothing is
+watching in between. Polling `try_wait()` in a loop instead means the child can sit blocked
+on a full stderr pipe while the loop is busy sleeping between polls — `flac`'s own banner is
+small enough that this was never observed in testing here, but a reader thread per pipe
+removes the possibility rather than relying on the message staying short forever.
+
+**Frame-level progress for FLAC → WAV reused `hash_pieces`'s exact shape**
+(`FnMut(u32, u32) -> bool`, called once per unit with cumulative-done and total, `false`
+means stop) rather than inventing a `(bytes, total_bytes)` variant — open question 4 asked
+whether the shape generalizes past pieces, and decoding one FLAC block at a time onto
+`done += block.duration()` against `total_frames` is the same shape with a different unit,
+exactly as guessed. `total_frames` comes from STREAMINFO and is usually present; when it is
+not (`probed.stream_info.total_frames == None`, legal but rare — a streaming encoder that
+never learned the sample count), `to_wav_with_progress` reports total `0` and the CLI shows
+a bare done-count instead of a fraction, rather than lying about a denominator it does not
+have.
+
+**`Progress<T>` grew a `detached()` constructor** so `run_batch`'s single-file fast path
+(§3 — deliberately skips the queue) can still hand `to_wav_with_progress` /
+`to_flac_cancellable` a real `Progress` to check `is_cancelled()` against, with its own
+fresh `CancelToken` wired to the same Ctrl-C handler either path installs. It sends into a
+channel nobody ever reads (the receiver is dropped immediately), which is fine — `submit`'s
+own `Progress` already tolerates a closed channel the same way, since a queue can be torn
+down out from under a slow job. This is the one place `job` gained API surface *for* a
+caller pattern rather than for the queue's own bookkeeping; it is a general enough shape
+(a cancel token plus a progress sink) that it did not seem worth gating behind `cfg(test)`
+or similar.

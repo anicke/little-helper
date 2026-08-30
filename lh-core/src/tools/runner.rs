@@ -7,8 +7,10 @@
 use super::{Tool, ToolId};
 use crate::error::{Error, Result};
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Who did the work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,13 +84,32 @@ impl Provenance {
 /// A non-zero exit is an error carrying the tool's own stderr: when `flac` refuses a file,
 /// the user should read what `flac` said, not a paraphrase of it (Principle 5).
 pub fn run(tool: &Tool, args: &[OsString]) -> Result<Agent> {
+    run_cancellable(tool, args, &mut || true)
+}
+
+/// Like [`run`], but polls `should_continue` while the child is running and kills it the
+/// moment that returns `false`, rather than blocking until it exits on its own —
+/// `Command::output()` (`run`'s old body) has no such door in. This is what makes a
+/// WAV → FLAC job actually stoppable mid-run (docs/job-queue.md §8); `run` is this with a
+/// `should_continue` that never says stop.
+///
+/// A killed child is reported as [`Error::Cancelled`], the same as a job the queue never
+/// started — from the caller's side, "asked to stop, and did" should look the same either
+/// way it happened.
+pub fn run_cancellable(
+    tool: &Tool,
+    args: &[OsString],
+    should_continue: &mut dyn FnMut() -> bool,
+) -> Result<Agent> {
     let mut argv = vec![tool.path.display().to_string()];
     argv.extend(args.iter().map(|a| a.to_string_lossy().into_owned()));
 
-    let output = Command::new(&tool.path)
+    let mut child = Command::new(&tool.path)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| Error::ToolFailed {
             tool: tool.id.name(),
             argv: argv.join(" "),
@@ -96,15 +117,57 @@ pub fn run(tool: &Tool, args: &[OsString]) -> Result<Agent> {
             detail: e.to_string(),
         })?;
 
-    if !output.status.success() {
+    // Drained on their own threads rather than after the wait loop below: polling
+    // `try_wait()` can leave the child sitting between checks, and a full pipe would
+    // block it. `flac`'s own output is small in practice, but nothing here should rely
+    // on that staying true.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if !should_continue() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Error::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(Error::ToolFailed {
+                    tool: tool.id.name(),
+                    argv: argv.join(" "),
+                    status: "could not be waited on".into(),
+                    detail: e.to_string(),
+                });
+            }
+        }
+    };
+
+    let stderr = stderr_thread.join().unwrap_or_default();
+    let _stdout = stdout_thread.join().unwrap_or_default();
+
+    if !status.success() {
         return Err(Error::ToolFailed {
             tool: tool.id.name(),
             argv: argv.join(" "),
-            status: match output.status.code() {
+            status: match status.code() {
                 Some(c) => format!("exit status {c}"),
                 None => "killed by a signal".into(),
             },
-            detail: last_lines(&output.stderr, 5),
+            detail: last_lines(&stderr, 5),
         });
     }
 

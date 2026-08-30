@@ -6,7 +6,7 @@
 //! Tests needing `flac` skip when it is absent rather than failing — Windows CI has no
 //! package for it — and say so, so a green run is never mistaken for a complete one.
 
-use lh_core::convert::{EncodeOpts, to_flac, to_wav};
+use lh_core::convert::{EncodeOpts, to_flac, to_flac_cancellable, to_wav, to_wav_with_progress};
 use lh_core::tools::{Agent, Registry, Tool, ToolId};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -165,5 +165,143 @@ fn the_output_may_not_be_the_input() {
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         std::fs::read(fixture("cdda-aligned.flac")).unwrap()
+    );
+}
+
+/// A canonical 16-bit stereo PCM WAV filled with pseudo-random noise — real audio
+/// compresses well, which made an earlier by-hand check of `flac`'s progress output
+/// finish before a single poll could observe it running (docs/job-queue.md §8).
+/// Incompressible samples keep `flac` busy long enough for the kill test below to land
+/// on a real "still running" poll rather than a lucky race.
+fn write_noise_wav(path: &Path, seconds: u32) {
+    let sample_rate: u32 = 44100;
+    let channels: u16 = 2;
+    let n_samples = sample_rate * seconds * channels as u32;
+    let data_len = n_samples * 2;
+
+    let mut w = Vec::with_capacity(44 + data_len as usize);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data_len).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    w.extend_from_slice(&channels.to_le_bytes());
+    w.extend_from_slice(&sample_rate.to_le_bytes());
+    w.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes());
+    w.extend_from_slice(&(channels * 2).to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data_len.to_le_bytes());
+
+    // xorshift32: deterministic, fast, and not worth reaching for a crate over.
+    let mut state: u32 = 0x2545F491;
+    for _ in 0..n_samples {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        w.extend_from_slice(&(state as i16).to_le_bytes());
+    }
+
+    std::fs::write(path, w).unwrap();
+}
+
+/// The killable half of J2: `to_flac_cancellable` stops `flac` mid-encode instead of
+/// waiting for it to finish, and leaves nothing behind (docs/job-queue.md §8).
+#[test]
+fn a_running_flac_can_be_killed_mid_encode() {
+    let Some(flac) = reference_flac() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("noise.wav");
+    write_noise_wav(&src, 30);
+    let dst = dir.path().join("out.flac");
+
+    let mut polls = 0u32;
+    let err = to_flac_cancellable(
+        &src,
+        &dst,
+        &flac,
+        &EncodeOpts::default(),
+        false,
+        &mut || {
+            polls += 1;
+            false
+        },
+    )
+    .expect_err("a should_continue that says stop must be honored");
+    assert!(matches!(err, lh_core::Error::Cancelled), "{err}");
+    assert!(polls >= 1, "should_continue was never polled");
+    assert!(
+        !dst.exists(),
+        "a cancelled encode must not leave the destination"
+    );
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != "noise.wav")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "partial files left behind: {leftovers:?}"
+    );
+}
+
+/// The frame-level progress half of J2: `to_wav_with_progress` reports (done, total) once
+/// per decoded block, done increasing to exactly total, before the WAV is committed.
+#[test]
+fn to_wav_reports_frame_progress_that_ends_at_the_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.wav");
+
+    let mut seen = Vec::new();
+    to_wav_with_progress(
+        &fixture("cdda-aligned.flac"),
+        &out,
+        false,
+        &mut |done, total| {
+            seen.push((done, total));
+            true
+        },
+    )
+    .unwrap();
+
+    assert!(!seen.is_empty(), "no progress was reported at all");
+    let total = seen[0].1;
+    assert!(
+        total > 0,
+        "a source with a known sample count must report one"
+    );
+    assert!(
+        seen.iter().all(|(_, t)| *t == total),
+        "total changed mid-decode: {seen:?}"
+    );
+    assert!(
+        seen.windows(2).all(|w| w[0].0 < w[1].0),
+        "done must strictly increase: {seen:?}"
+    );
+    assert_eq!(seen.last().unwrap().0, total, "final done must equal total");
+}
+
+/// Stopping a decode mid-way must leave no partial WAV, the same guarantee every other
+/// cancelled or failed conversion carries (Principle 1).
+#[test]
+fn to_wav_cancelled_mid_decode_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.wav");
+
+    let err = to_wav_with_progress(&fixture("cdda-aligned.flac"), &out, false, &mut |_, _| {
+        false
+    })
+    .expect_err("progress returning false must stop the decode");
+    assert!(matches!(err, lh_core::Error::Cancelled), "{err}");
+    assert!(!out.exists());
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "partial files left behind: {leftovers:?}"
     );
 }

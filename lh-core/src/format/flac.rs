@@ -75,22 +75,36 @@ pub fn audio_md5(path: &Path) -> Result<[u8; 16]> {
 /// rounded up to whole bytes — so the caller can compare it against STREAMINFO without
 /// a second pass over the file.
 /// `dst` is used only to attribute write errors to the file they happened on.
+///
+/// `progress` is called once per decoded block with (frames written so far, total frames
+/// — `0` if the source's STREAMINFO does not declare one) and returns whether to keep
+/// going, the same `FnMut(u32, u32) -> bool` shape `torrent::hash_pieces` uses for pieces
+/// (docs/job-queue.md §8). Returning `false` stops the decode and yields
+/// [`Error::Cancelled`]; nothing has been renamed into place yet at that point, so the
+/// caller's `TempOutput` cleans up the partial file as it always does.
 pub fn decode_to_wav<W: Write + Seek>(
     path: &Path,
     dst: &Path,
     out: &mut WavWriter<W>,
+    progress: &mut dyn FnMut(u32, u32) -> bool,
 ) -> Result<[u8; 16]> {
     let mut reader = claxon::FlacReader::open(path).map_err(|source| Error::Flac {
         path: path.to_path_buf(),
         source,
     })?;
     let bytes_per_sample = (reader.streaminfo().bits_per_sample as usize).div_ceil(8);
+    let total_frames = reader
+        .streaminfo()
+        .samples
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
 
     let mut hasher = Md5::new();
     let mut frames = reader.blocks();
     let mut block_buf = Vec::new();
     let mut interleaved: Vec<i32> = Vec::new();
     let mut digest_buf: Vec<u8> = Vec::new();
+    let mut done_frames: u32 = 0;
 
     loop {
         let block = match frames.read_next_or_eof(block_buf) {
@@ -116,6 +130,11 @@ pub fn decode_to_wav<W: Write + Seek>(
         hasher.update(&digest_buf);
         out.write_samples(&interleaved)
             .map_err(|e| Error::io(dst, e))?;
+
+        done_frames = done_frames.saturating_add(block.duration());
+        if !progress(done_frames, total_frames) {
+            return Err(Error::Cancelled);
+        }
 
         block_buf = block.into_buffer();
     }

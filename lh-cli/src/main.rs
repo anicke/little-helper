@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
-use lh_core::convert::{Conversion, EncodeOpts, to_flac, to_wav};
-use lh_core::job::{Event, Queue};
+use lh_core::convert::{Conversion, EncodeOpts, to_flac_cancellable, to_wav_with_progress};
+use lh_core::job::{CancelToken, Event, Progress, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
@@ -23,16 +23,30 @@ use std::process::ExitCode;
 /// pure overhead with nothing to show for it (docs/job-queue.md §3). `Ctrl-C` cancels: a
 /// file already being worked on finishes normally, nothing queued behind it starts.
 ///
+/// `job` gets a `Progress<T>` even outside a real queue (§8's `Progress::detached`) so a
+/// job that can check its own cancellation mid-run — `convert`, via
+/// `to_flac_cancellable` / `to_wav_with_progress` — behaves the same whether it is the
+/// only file or one of a batch.
+///
 /// Results come back paired with their file in submission order, not completion order —
 /// a script piping our stdout should see the same thing on every run, even though the
-/// work itself now happens in parallel. `None` means the file's job never ran because the
-/// batch was cancelled first.
+/// work itself now happens in parallel. `None` means the file's job never started because
+/// the batch was cancelled first; a job stopped mid-run instead produces its own `T`
+/// carrying `Error::Cancelled`, since only the job itself — not `run_batch` — knows how to
+/// tell "stopped" apart from any other failure for its own operation.
 fn run_batch<T: Send + 'static>(
     files: &[AudioFile],
-    job: impl Fn(&AudioFile) -> T + Send + Sync + 'static,
+    job: impl Fn(&AudioFile, &Progress<T>) -> T + Send + Sync + 'static,
 ) -> Vec<(AudioFile, Option<T>)> {
     if files.len() <= 1 {
-        return files.iter().map(|f| (f.clone(), Some(job(f)))).collect();
+        let cancel = CancelToken::new();
+        let progress = Progress::detached(cancel.clone());
+        // Only one batch runs per process invocation, so this is the only call site.
+        let _ = ctrlc::set_handler(move || cancel.cancel());
+        return files
+            .iter()
+            .map(|f| (f.clone(), Some(job(f, &progress))))
+            .collect();
     }
 
     let job = std::sync::Arc::new(job);
@@ -44,7 +58,7 @@ fn run_batch<T: Send + 'static>(
     for f in files {
         let f = f.clone();
         let job = job.clone();
-        queue.submit(f.file_name(), move |_progress| job(&f));
+        queue.submit(f.file_name(), move |progress| job(&f, progress));
     }
 
     let total = files.len();
@@ -311,7 +325,7 @@ fn cmd_info(p: &Paths) -> Result<bool> {
 
 fn cmd_verify(p: &Paths) -> Result<bool> {
     let (files, mut ok) = collect(p)?;
-    let results = run_batch(&files, |f| verify(&f.path));
+    let results = run_batch(&files, |f, _| verify(&f.path));
     for (f, result) in &results {
         match result {
             Some(Ok(Verification::Ok)) => println!("OK        {}", f.file_name()),
@@ -345,7 +359,7 @@ fn cmd_verify(p: &Paths) -> Result<bool> {
 
 fn cmd_sbe(p: &Paths) -> Result<bool> {
     let (files, mut ok) = collect(p)?;
-    let results = run_batch(&files, |f| sbe(&f.stream_info));
+    let results = run_batch(&files, |f, _| sbe(&f.stream_info));
     for (f, result) in &results {
         match result {
             Some(Sbe::Aligned) => println!("ALIGNED   {}", f.file_name()),
@@ -368,7 +382,7 @@ fn cmd_sbe(p: &Paths) -> Result<bool> {
 fn cmd_checksum(kind: ChecksumKind, args: &ChecksumArgs) -> Result<bool> {
     let (files, mut ok) = collect(&args.paths)?;
     let mut out = ChecksumFile::new(kind);
-    let results = run_batch(&files, move |f| compute(kind, &f.path));
+    let results = run_batch(&files, move |f, _| compute(kind, &f.path));
     for (f, result) in &results {
         match result {
             Some(Ok(digest)) => out.entries.push(Entry {
@@ -836,7 +850,7 @@ fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
     let to = args.to;
     let force = args.force;
     let out_dir = args.out_dir.clone();
-    let results = run_batch(&files, move |f| -> ConvertOutcome {
+    let results = run_batch(&files, move |f, progress| -> ConvertOutcome {
         if f.format == want {
             return ConvertOutcome::Skipped;
         }
@@ -845,13 +859,17 @@ fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
             None => return ConvertOutcome::NoFileName,
         };
         let result = match to {
-            Target::Wav => to_wav(&f.path, &dst, force),
-            Target::Flac => to_flac(
+            Target::Wav => to_wav_with_progress(&f.path, &dst, force, &mut |done, total| {
+                progress.report(done, total);
+                !progress.is_cancelled()
+            }),
+            Target::Flac => to_flac_cancellable(
                 &f.path,
                 &dst,
                 encoder.as_ref().expect("discovered above"),
                 &opts,
                 force,
+                &mut || !progress.is_cancelled(),
             ),
         };
         match result {

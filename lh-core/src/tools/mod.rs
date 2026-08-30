@@ -20,7 +20,7 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub use runner::{Agent, Provenance, run};
+pub use runner::{Agent, Provenance, run, run_cancellable};
 
 /// An external binary we know how to talk to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
