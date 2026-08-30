@@ -17,12 +17,12 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion done; job queue not started |
-| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools` all work |
+| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list done; job queue not started |
+| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
 | M3 `lh-gui` | not started (placeholder crate) |
 | M4 Packaging | not started |
 
-98 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+118 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 
@@ -133,9 +133,10 @@ little-helper/            cargo workspace
 │   ├── analysis/         sbe, verify, info
 │   ├── convert/          flac→wav in-process, wav→flac via reference flac
 │   ├── tools/            registry: discovery, version capture, argv, process runner
+│   ├── torrent/          metainfo, verify, create, encode, tracker list
 │   ├── job/              queue, worker pool, progress events, cancellation
 │   ├── report/           structured results + provenance/audit trail
-│   └── config/           serde + toml, directories
+│   └── config.rs         where config files live (LH_CONFIG_DIR, then the platform's)
 ├── lh-cli/               headless batch (clap)
 └── lh-gui/               iced 0.14
 ```
@@ -224,7 +225,7 @@ disappoints for unrelated reasons.
 | Directory walk | `walkdir` |
 | Tool discovery | `which` |
 | CLI | `clap` |
-| Config | `serde`, `toml`, `directories` |
+| Config | `directories` (`serde` + `toml` when there are settings; the tracker list uses TLH's own format) |
 | Errors | `thiserror` (core), `anyhow` (binaries) |
 | Logging | `tracing`, `tracing-subscriber` (custom layer feeds the GUI log pane) |
 | Concurrency | `crossbeam-channel`, `rayon` |

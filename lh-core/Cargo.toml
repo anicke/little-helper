@@ -15,6 +15,7 @@ md-5.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 bendy.workspace = true
+directories.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true

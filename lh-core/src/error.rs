@@ -57,6 +57,11 @@ pub enum Error {
     #[error("{path}: refusing unsafe path in torrent: {detail}")]
     UnsafeTorrentPath { path: PathBuf, detail: String },
 
+    /// A tracker we cannot turn into an announce URL that would work. Principle 5: name
+    /// it, say what we know, and never quietly write a URL nobody will ever connect to.
+    #[error("tracker {id}: {detail}")]
+    UnusableTracker { id: String, detail: String },
+
     /// Principle 1: v0.1 modifies nothing in place, so an existing output is a stop.
     #[error("{path} already exists; refusing to overwrite it")]
     OutputExists { path: PathBuf },

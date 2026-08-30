@@ -9,7 +9,10 @@ use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::convert::{Conversion, EncodeOpts, to_flac, to_wav};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
-use lh_core::torrent::{CreateOpts, FileStatus, Metainfo, Verdict, check, check_sizes, create};
+use lh_core::torrent::{
+    Chosen, CreateOpts, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList, Verdict,
+    check, check_sizes, create, resolve,
+};
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -67,6 +70,8 @@ enum TorrentCommand {
     },
     /// Make a .torrent for a show.
     Create(TorrentCreateArgs),
+    /// List the trackers we know about, with the date each was last checked.
+    Trackers,
     /// Check local files against a .torrent.
     Check {
         /// The .torrent file.
@@ -89,8 +94,9 @@ struct TorrentCreateArgs {
     /// inside the folder would add a file to what the torrent describes.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// A tracker's announce URL. Repeat it for more; each one becomes its own tier.
-    #[arg(long = "tracker", value_name = "URL")]
+    /// A tracker: an id from `lh torrent trackers`, or an announce URL, which is used
+    /// verbatim. Repeat it for more; each one becomes its own tier.
+    #[arg(long = "tracker", value_name = "ID|URL")]
     trackers: Vec<String>,
     /// Piece length in bytes: a power of two from 16384 to 16777216. Chosen from the
     /// payload size when omitted.
@@ -187,6 +193,7 @@ fn run(cli: Cli) -> Result<bool> {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
             TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),
             TorrentCommand::Create(a) => cmd_torrent_create(&a),
+            TorrentCommand::Trackers => cmd_torrent_trackers(),
         },
     }
 }
@@ -436,16 +443,26 @@ fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
         .canonicalize()
         .with_context(|| format!("reading {}", args.path.display()))?;
 
-    // Each --tracker is its own tier: clients pick at random within a tier and fall through
-    // between them, so putting unrelated sites in one tier is a coin flip over who hears
-    // about the seed.
-    let announce: Vec<Vec<String>> = args.trackers.iter().map(|t| vec![t.clone()]).collect();
+    // Ids become URLs here, and each --tracker becomes its own tier: clients pick at random
+    // within a tier and fall through between them, so putting unrelated sites in one tier
+    // is a coin flip over who hears about the seed.
+    let list = TrackerList::load().context("reading the tracker list")?;
+    let keys = Passkeys::load().context("reading the passkey list")?;
+    let chosen = resolve(&args.trackers, &list, &keys)?;
+    for warning in &chosen.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    // The flags win over the table: a tracker entry can only ever add `private` or a
+    // `source`, never take one away that the user asked for.
+    let private = args.private || chosen.private;
+    let source_tag = args.source.clone().or_else(|| chosen.source.clone());
 
     let opts = CreateOpts {
-        announce,
+        announce: chosen.tiers.clone(),
         piece_length: args.piece_length,
-        private: args.private,
-        source: args.source.clone(),
+        private,
+        source: source_tag.clone(),
         comment: args.comment.clone(),
         include_all: args.include_all,
         overwrite: args.force,
@@ -483,16 +500,111 @@ fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
         println!("  excluded   {} ({})", shown.display(), why.reason());
     }
     println!("  infohash   {}", made.info_hash_hex());
-    if args.private {
-        println!("  private    yes (BEP 27; part of the infohash)");
+    // The flag is inside the info dictionary, so a table we ship silently decided part of
+    // this torrent's identity. Say which entry did it.
+    if private {
+        let by = if args.private {
+            "--private".to_string()
+        } else {
+            let names: Vec<&str> = chosen
+                .chosen
+                .iter()
+                .filter(|c| c.tracker.as_ref().is_some_and(|t| t.private))
+                .map(Chosen::name)
+                .collect();
+            names.join(", ")
+        };
+        println!("  private    yes (BEP 27; part of the infohash — set by {by})");
     }
-    for (i, tracker) in args.trackers.iter().enumerate() {
-        println!("  {:<10} {tracker}", if i == 0 { "tracker" } else { "" });
+    if let Some(tag) = &source_tag {
+        println!("  source     {tag} (part of the infohash)");
     }
-    if args.trackers.is_empty() {
+    for (i, c) in chosen.chosen.iter().enumerate() {
+        let label = if i == 0 { "tracker" } else { "" };
+        match &c.tracker {
+            Some(t) => println!(
+                "  {label:<10} {}  {}  ({})",
+                t.name,
+                c.announce,
+                confirmation(t)
+            ),
+            None => println!(
+                "  {label:<10} {}  (given as a URL, used verbatim)",
+                c.announce
+            ),
+        }
+    }
+    if chosen.chosen.is_empty() {
         println!("  tracker    none (a trackerless torrent)");
     }
     println!("  wrote      {}", made.path.display());
+    Ok(true)
+}
+
+/// What we know about an entry, in one parenthesis. Never just a status word: a status
+/// with no date is the thing that let TLH recommend a dead tracker for years.
+fn confirmation(t: &Tracker) -> String {
+    match &t.checked {
+        Some(date) => format!("{} — checked {date}", t.health.label()),
+        None => format!("{} — from your own list", t.health.label()),
+    }
+}
+
+/// The list, with what we saw and when. Everything a user needs to decide whether to
+/// believe us or go and look.
+fn cmd_torrent_trackers() -> Result<bool> {
+    let list = TrackerList::load().context("reading the tracker list")?;
+    let keys = Passkeys::load().context("reading the passkey list")?;
+
+    for t in list.all() {
+        let origin = match t.origin {
+            Origin::Bundled => String::new(),
+            Origin::User => "  (yours)".to_string(),
+            Origin::Overridden => "  (replaced by your own list)".to_string(),
+        };
+        println!("{:<14}{}{origin}", t.id, t.name);
+        println!("{:<14}{}", "", t.announce);
+
+        let mut third = confirmation(t);
+        if let Some(saw) = &t.evidence {
+            third.push_str(": ");
+            third.push_str(saw);
+        }
+        println!("{:<14}{third}", "");
+
+        let mut flags = Vec::new();
+        if t.private {
+            flags.push("sets private: 1 (changes the infohash)".to_string());
+        }
+        if let Some(tag) = &t.source {
+            flags.push(format!("sets info.source {tag:?} (changes the infohash)"));
+        }
+        if t.needs_passkey() {
+            flags.push(match keys.get(&t.id) {
+                Some(_) => "passkey configured".to_string(),
+                None => "needs a passkey, and none is configured".to_string(),
+            });
+        }
+        if !flags.is_empty() {
+            println!("{:<14}{}", "", flags.join("; "));
+        }
+        println!();
+    }
+
+    let usable = list.iter().filter(|t| t.health.usable()).count();
+    let total = list.iter().count();
+    println!("{usable} of {total} entries can be used as they stand.");
+    match &list.user_list {
+        Some(path) if path.exists() => println!("your own list: {}", path.display()),
+        Some(path) => {
+            println!("no list of your own yet; put one at {}", path.display());
+            println!(
+                "  one `Display Name|announce URL` per line — the format Trader's Little \
+                 Helper used, so an existing tracker.lst can be copied straight in"
+            );
+        }
+        None => {}
+    }
     Ok(true)
 }
 

@@ -222,3 +222,139 @@ fn torrent_create_refuses_a_piece_length_clients_would_reject() {
 
     assert!(!dir.path().join("show.torrent").exists());
 }
+
+/// The listing's whole job is to let a user check us rather than trust us, so every entry
+/// has to show a date, and the ones we found unusable have to say so where they are read.
+#[test]
+fn torrent_trackers_dates_every_entry_and_marks_the_dead_ones() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = lh()
+        .arg("torrent")
+        .arg("trackers")
+        .env("LH_CONFIG_DIR", empty.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+
+    for id in [
+        "crosstown",
+        "dime",
+        "etree",
+        "genesis",
+        "jamtothis",
+        "losslesslegs",
+        "mindwarp",
+        "tradersden",
+        "yeeshkul",
+        "zappateers",
+        "zomb",
+    ] {
+        assert!(text.contains(id), "{id} is missing from the listing");
+    }
+    assert_eq!(
+        text.matches("checked 2026-08-30").count(),
+        11,
+        "every bundled entry carries the date it was checked:\n{text}"
+    );
+    assert!(text.contains("no DNS A record"), "{text}");
+    assert!(text.contains("personal URL needed"), "{text}");
+    // And it says where a list of the user's own would go.
+    assert!(text.contains("trackers.lst"), "{text}");
+}
+
+/// An id we have checked and found unusable never becomes an announce URL, and nothing is
+/// written. The escape hatch is in the error, because we might be the ones who are wrong.
+#[test]
+fn torrent_create_refuses_a_tracker_we_know_cannot_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("show");
+    std::fs::create_dir_all(&show).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), show.join("t01.flac")).unwrap();
+
+    lh().arg("torrent")
+        .arg("create")
+        .arg(&show)
+        .args(["--tracker", "zomb"])
+        .env("LH_CONFIG_DIR", dir.path().join("no-config"))
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("no DNS A record"))
+        .stderr(predicates::str::contains("--tracker <URL>"));
+
+    assert!(!dir.path().join("show.torrent").exists());
+}
+
+/// The user's own list, in TLH's format, with a passkey filled from the config directory —
+/// and `create` saying out loud that a table we read decided part of the infohash.
+#[test]
+fn a_user_tracker_list_supplies_the_announce_url_the_passkey_and_the_private_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("trackers.lst"),
+        "The Pit|https://pit.example/announce/{passkey}|private|source=PIT|id=pit\r\n",
+    )
+    .unwrap();
+    std::fs::write(config.join("passkeys.lst"), "pit|s3cr3t\n").unwrap();
+
+    let show = dir.path().join("show");
+    std::fs::create_dir_all(&show).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), show.join("t01.flac")).unwrap();
+
+    lh().arg("torrent")
+        .arg("create")
+        .arg(&show)
+        .args(["--tracker", "pit"])
+        .env("LH_CONFIG_DIR", &config)
+        .assert()
+        .success()
+        // The flag is invisible in the file and changes the infohash, so it is named.
+        .stdout(predicates::str::contains("private    yes"))
+        .stdout(predicates::str::contains("set by The Pit"))
+        .stdout(predicates::str::contains("source     PIT"));
+
+    let torrent = dir.path().join("show.torrent");
+    lh().arg("torrent")
+        .arg("info")
+        .arg(&torrent)
+        .arg("--no-files")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "https://pit.example/announce/s3cr3t",
+        ))
+        .stdout(predicates::str::contains("private      yes"));
+}
+
+/// A passkey we do not have would make a torrent nobody ever connects to, which the user
+/// would only discover much later. Stop instead.
+#[test]
+fn torrent_create_refuses_an_unfilled_passkey() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("trackers.lst"),
+        "The Pit|https://pit.example/announce/{passkey}|id=pit\n",
+    )
+    .unwrap();
+
+    let show = dir.path().join("show");
+    std::fs::create_dir_all(&show).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), show.join("t01.flac")).unwrap();
+
+    lh().arg("torrent")
+        .arg("create")
+        .arg(&show)
+        .args(["--tracker", "pit"])
+        .env("LH_CONFIG_DIR", &config)
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("passkeys.lst"));
+
+    assert!(!dir.path().join("show.torrent").exists());
+}
