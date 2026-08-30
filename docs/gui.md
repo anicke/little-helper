@@ -242,7 +242,7 @@ already covers.
 |---|---|---|
 | ~~**G0**~~ | ~~Iced/job-queue spike~~ | **Done** — confirmed the `Subscription` bridge, the `Hash`-identity requirement, that blocking `rx.iter()` inside `stream::channel` does not stall the window, and that window-level drag-and-drop is available. See §G0. |
 | ~~**G1**~~ | ~~Scaffold + file table~~ | **Done** — `iced` + `rfd` in the workspace, path bar (text input, Browse via `rfd::AsyncFileDialog`, Scan), window-wide drag-and-drop, `WorkingSet` → file table (name, format, duration, rate/bits/channels, SBE), Tools panel off `Registry::entries()`. Read-only: no queue yet. 4 tests in `lh-gui/src/main.rs`. See §G1 notes. |
-| **G2** | Job queue wired | `Queue<JobOutcome>`, the subscription adapter, operation panel for verify/checksum/sbe, per-row status, aggregate progress, Cancel. |
+| ~~**G2**~~ | ~~Job queue wired~~ | **Done** — one long-lived `Queue<JobOutcome>`, the subscription adapter, an operation panel (verify / ffp / md5 / st5 / sbe) that runs every file in the working set, per-row status via `App::latest_job_by_path`, an aggregate `N of M done` and per-job job-queue panel, and a working Cancel button. 2 new tests against the real fixture corpus and a real `Queue`, plus a real (non-interactive) run under X11. See §G2 notes. |
 | **G3** | Convert + log pane | Convert (both directions) through the queue with its real progress/cancel behavior (J2), Provenance log pane, export. |
 | **G4** | Torrent panels | Create and check, per `docs/torrent-creation.md` C5 and `docs/torrent-verification.md` T4 — both already named the job queue as their dependency; it now exists. |
 
@@ -302,3 +302,70 @@ already covers.
   fires end to end outside of the isolated §G0 spike. That is a real gap the plan's own
   standard (`docs/job-queue.md` and this doc's own §G0 both distinguish "compiles" from
   "was run") says not to paper over — worth a manual pass before G1 is trusted further.
+
+---
+
+## G2 notes
+
+*Landed 2026-08-30.*
+
+Four things the implementation forced or corrected, none visible from §2's sketch:
+
+* **`Sbe` carries `Sbe` directly, not `Result<Sbe>`.** §2's `JobOutcome` sketch guessed
+  `Sbe(lh_core::Result<Sbe>)` before checking `analysis::sbe`'s real signature
+  (`lh-core/src/analysis/sbe.rs:18`): it takes an already-probed `&StreamInfo`, not a path,
+  so it cannot fail the way `verify`/`compute` can. `JobOutcome::Sbe(Sbe)` is what actually
+  got built (`lh-gui/src/job.rs`).
+* **`Message` needing `Clone` forced a second, render-at-the-boundary type.** Iced's own
+  widgets (`text_input`, `pick_list`, `button::on_press`, ...) require `Message: Clone`
+  wherever they are used in `view` — not just at the one call site that builds a
+  `Message::Job` — and `JobOutcome`'s `lh_core::Result`s carry `lh_core::Error`, which is
+  not `Clone` (it wraps `std::io::Error`, `claxon::Error`, `metaflac::Error`, none of which
+  are). Rather than making `Error` fake-Clone or dropping `Clone` from every other widget's
+  requirements, `job::JobUpdate` was added: `Event<JobOutcome>` renders into it (via the
+  same `render()` that produces the file table's/job-queue panel's strings) the moment it
+  comes off the queue's channel, inside the subscription — so `Message` only ever carries
+  `String`/`Result<String, String>`, never the raw `lh_core::Error`. §2's sketch of
+  `Message::Job(job::Event<JobOutcome>)` does not compile as written; this is the fix, not
+  a redesign of the bridge itself.
+* **The queue's `CancelToken` needed a `reset()` that nothing before G2 had a reason to
+  add.** `Queue::submit` checks one `CancelToken` shared for the *queue's* whole life, and
+  every existing caller — every `lh-cli` batch command, `torrent create` — builds a fresh
+  `Queue` per invocation and exits, so a one-way cancel flag was never a problem before now.
+  `lh-gui`'s single long-lived `Queue<JobOutcome>` (§1) is the first caller that outlives
+  its own cancellation: without a reset, one Cancel press — even with nothing in flight —
+  would silently stop every *future* Run from ever executing a job, for the rest of the
+  window's life, since the flag is checked again on every later `submit`. `CancelToken`
+  grew `reset()` (`lh-core/src/job/mod.rs`), and `App::run_operation` calls it before
+  submitting each batch. `cancelling_with_nothing_in_flight_does_not_disable_the_next_run`
+  (`lh-gui/src/main.rs`) is there because this is exactly the kind of bug that compiles
+  clean and only shows up the second time a user clicks Run after Cancel — worth catching
+  in a test rather than in the field, per this repo's own standard for what counts as
+  checked.
+* **`Subscription::run_with`'s builder needed the `Receiver` cloned out of `&QueueEvents`
+  before entering the `async move` block, not borrowed from it.** §2's sketch (copied from
+  §G0's spike) wrote `for event in data.rx.iter() { ... }` directly inside
+  `async move |mut output| { ... }` where `data: &QueueEvents` is the builder's own
+  parameter — that fails to compile here with "lifetime may not live long enough": the
+  async block would be holding a borrow tied to the builder call's own stack frame, but the
+  stream it returns has to outlive that call. Cloning first —
+  `let rx = data.rx.clone(); iced::stream::channel(64, async move |mut output| { for event
+  in rx.iter() { ... } })` — moves an owned, `'static` `Receiver` into the block instead
+  (crossbeam's `Receiver` clone is cheap and shares the same channel, per `events()`'s own
+  doc). Unclear whether §G0's spike avoided this because its own `QueueEvents` was
+  constructed differently or because the exact code was never actually copy-pasted verbatim
+  — worth noting so a future doc sketch is not trusted byte-for-byte without compiling it.
+
+**What this did and did not check.** `App::run_operation` and `App::handle_job_event` are
+now exercised against a real `Queue<JobOutcome>` and the real fixture corpus
+(`lh-core/tests/fixtures`) in two tests — `cdda-aligned.flac` verifies OK, `wrong-md5.flac`
+reports a mismatch, and a Cancel-with-nothing-in-flight followed by a real Run produces no
+`Cancelled` rows — draining `queue.events()` directly rather than through Iced's own
+`Subscription`, since nothing outside a running window can drive that. The compiled binary
+was also run for real under this machine's X11 display (`timeout 6
+./target/debug/little-helper`, exit 124 — still running, no panic) as a smoke check, the
+same bar §G0 and G1 used. What is still unchecked, same gap G1 already named: nobody
+clicked Browse, Run, or Cancel, or watched the job-queue panel update live — no screenshot
+or input-automation tool is available for a native window in this sandbox, only for a
+Chrome tab. A manual pass (or a future in-repo integration harness) is still owed before
+the operation panel is trusted end to end.

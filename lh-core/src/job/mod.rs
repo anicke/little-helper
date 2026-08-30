@@ -27,6 +27,21 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
+
+    /// Clears the flag so a cancelled `Queue` accepts new work again. Every CLI caller
+    /// builds one `Queue` per batch and exits without ever needing this — cancellation
+    /// there is a one-way trip for the process's whole remaining life. `lh-gui`'s single
+    /// long-lived `Queue<JobOutcome>` (`docs/gui.md` §1) is the first caller that outlives
+    /// its own cancellation: without a reset, one Cancel press would permanently stop every
+    /// future submission from ever running, since `Queue::submit` checks this same shared
+    /// token for every job, forever. Safe to call on an uncancelled token (a no-op) and
+    /// safe while jobs submitted before the cancel are still finishing, since resetting the
+    /// flag only changes what a *not-yet-started* job sees at its own checkpoint in
+    /// `Queue::submit` — it cannot un-cancel a job that already observed `true` and returned
+    /// `Event::Cancelled`.
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Identifies one submitted job within its queue, in submission order starting at 0 — a
@@ -191,8 +206,15 @@ impl<T: Send + 'static> Queue<T> {
     /// `Progress`, and exactly one `Finished` or `Cancelled`, arrive here. `Started` for a
     /// given job always precedes its own terminal event, but events from different jobs
     /// interleave in whatever order the workers finish them.
-    pub fn events(&self) -> &Receiver<Event<T>> {
-        &self.rx
+    ///
+    /// Returns a clone rather than a borrow — a cheap `Receiver` clone, since crossbeam's
+    /// `Receiver` is designed to be shared this way and every message still goes to exactly
+    /// one of a channel's live receivers. `lh-gui` needs an owned, `'static` handle to move
+    /// into its Iced `Subscription` (`docs/gui.md` §2); every existing caller only ever
+    /// calls `&self` methods (`recv`/`recv_timeout`/iteration) on the result, which work
+    /// identically on a clone (`docs/gui.md` §0).
+    pub fn events(&self) -> Receiver<Event<T>> {
+        self.rx.clone()
     }
 
     /// A clone of the token this queue cancels on, for wiring up an external signal (a

@@ -17,3 +17,5 @@ path = "src/main.rs"
 lh-core.workspace = true
 iced.workspace = true
 rfd.workspace = true
+crossbeam-channel.workspace = true
+hex.workspace = true

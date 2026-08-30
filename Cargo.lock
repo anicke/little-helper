@@ -1807,6 +1807,8 @@ dependencies = [
 name = "lh-gui"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
+ "hex",
  "iced",
  "lh-core",
  "rfd",
