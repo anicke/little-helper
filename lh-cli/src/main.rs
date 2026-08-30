@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::model::AudioFile;
+use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{FileStatus, Metainfo, Verdict, check, check_sizes};
 use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,8 @@ enum Command {
     Md5(ChecksumArgs),
     /// Write or print ST5 checksums (audio data only).
     St5(ChecksumArgs),
+    /// Show the reference binaries we found, with versions and hashes.
+    Tools,
     /// Work with .torrent files.
     Torrent {
         #[command(subcommand)]
@@ -114,6 +117,7 @@ fn run(cli: Cli) -> Result<bool> {
         Command::Md5(a) => cmd_checksum(ChecksumKind::Md5, &a),
         Command::St5(a) => cmd_checksum(ChecksumKind::St5, &a),
         Command::Check { file } => cmd_check(&file),
+        Command::Tools => cmd_tools(),
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
             TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),
@@ -432,6 +436,60 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
         Verdict::Complete => println!("all {total} files verified"),
     }
     Ok(report.verdict() != Verdict::Incomplete)
+}
+
+/// The Tools panel, headless. Every operation that shells out logs the same facts this
+/// prints, so a trader can tell what produced a file before they trust it (Principle 2).
+fn cmd_tools() -> Result<bool> {
+    let registry = Registry::discover();
+    for (id, discovery) in registry.entries() {
+        match discovery {
+            Discovery::Found(t) => {
+                println!(
+                    "{:<10} {}  ({})",
+                    id.name(),
+                    t.path.display(),
+                    t.source.label()
+                );
+                println!("{:<10} {}", "", t.version);
+                println!("{:<10} sha256 {}", "", t.sha256);
+            }
+            Discovery::Unusable { path, reason } => {
+                println!("{:<10} {} is unusable", id.name(), path.display());
+                println!("{:<10} {reason}", "");
+            }
+            Discovery::NotFound { searched } => {
+                let need = if id.is_required() {
+                    "needed for"
+                } else {
+                    "only needed for"
+                };
+                println!("{:<10} not found — {need} {}", id.name(), id.purpose());
+                println!("{:<10} looked in {}", "", searched.join(", "));
+                println!(
+                    "{:<10} point at your own with {}=/path/to/{}",
+                    "",
+                    id.env_var(),
+                    id.name()
+                );
+            }
+        }
+    }
+
+    let missing: Vec<ToolId> = registry.missing_required().collect();
+    if missing.is_empty() {
+        Ok(true)
+    } else {
+        println!();
+        for id in missing {
+            println!(
+                "{} is required and was not found; {} will not run",
+                id,
+                id.purpose()
+            );
+        }
+        Ok(false)
+    }
 }
 
 fn pieces_phrase(pieces: &[u32]) -> String {

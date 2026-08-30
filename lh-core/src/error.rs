@@ -53,6 +53,30 @@ pub enum Error {
     #[error("{path}: refusing unsafe path in torrent: {detail}")]
     UnsafeTorrentPath { path: PathBuf, detail: String },
 
+    /// Principle 5: name the tool, say what it was for, and list where we looked.
+    #[error("{purpose} requires {tool}, which was not found (looked in {searched})")]
+    ToolNotFound {
+        tool: &'static str,
+        purpose: &'static str,
+        searched: String,
+    },
+
+    #[error("{tool} at {path} cannot be used: {detail}")]
+    ToolUnusable {
+        tool: &'static str,
+        path: PathBuf,
+        detail: String,
+    },
+
+    /// The tool ran and refused. `detail` is the tool's own words, not a paraphrase.
+    #[error("{tool} failed ({status}): {detail}\n  argv: {argv}")]
+    ToolFailed {
+        tool: &'static str,
+        status: String,
+        argv: String,
+        detail: String,
+    },
+
     #[error("{path}:{line}: malformed {kind} entry: {detail}")]
     ChecksumSyntax {
         path: PathBuf,

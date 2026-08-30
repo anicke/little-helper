@@ -77,3 +77,16 @@ fn torrent_info_on_a_non_torrent_is_a_command_failure() {
         .code(2)
         .stderr(predicates::str::contains("not valid bencode"));
 }
+
+/// A tool the user pointed at by hand and that is not there must fail loudly, and take
+/// the exit code with it: a scripted install check is exactly what this command is for.
+#[test]
+fn tools_reports_a_configured_flac_that_is_absent() {
+    lh().arg("tools")
+        .env("LH_FLAC", fixtures().join("no-such-flac"))
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("not found"))
+        .stdout(predicates::str::contains("LH_FLAC"))
+        .stdout(predicates::str::contains("flac is required"));
+}
