@@ -67,9 +67,16 @@ def main():
     wav(OUT / "hires-24bit.wav", 4410, bits=24)
     wav(OUT / "mono-48k.wav", 4800, rate=48000, channels=1)
 
+    # Non-ASCII name. Live recordings are traded with the taper's own spelling of the
+    # venue and the band, so this is the normal case rather than an exotic one — and it
+    # is the fixture PLAN.md section 9 names as the mitigation for path/Unicode risk.
+    # Written NFC; see docs/torrent-creation.md on why we never normalize it ourselves.
+    wav(OUT / "non-ascii-t\u00e4pe.wav", SECTOR * 5)
+
     flac(aligned, OUT / "cdda-aligned.flac")
     flac(sbe, OUT / "cdda-sbe.flac")
     flac(OUT / "hires-24bit.wav", OUT / "hires-24bit.flac")
+    flac(OUT / "non-ascii-t\u00e4pe.wav", OUT / "non-ascii-t\u00e4pe.flac")
 
     # Decodes cleanly, but the STREAMINFO MD5 is a lie. STREAMINFO's 16-byte MD5 sits at
     # offset 26: "fLaC" (4) + metadata block header (4) + 34-byte STREAMINFO, MD5 last.
@@ -84,7 +91,12 @@ def main():
 
     # Golden checksums, straight from the reference tool.
     lines = []
-    for name in ("cdda-aligned.flac", "cdda-sbe.flac", "hires-24bit.flac"):
+    for name in (
+        "cdda-aligned.flac",
+        "cdda-sbe.flac",
+        "hires-24bit.flac",
+        "non-ascii-t\u00e4pe.flac",
+    ):
         lines.append(f"{name}:{md5_of(OUT / name)}")
     (OUT / "reference.ffp").write_text("\n".join(lines) + "\n")
 

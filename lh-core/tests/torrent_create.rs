@@ -27,6 +27,12 @@ fn payload(dir: &Path, files: &[(&str, usize)]) {
     }
 }
 
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/torrents")
+        .join(name)
+}
+
 fn mktorrent() -> Option<PathBuf> {
     match which::which("mktorrent") {
         Ok(p) => Some(p),
@@ -123,6 +129,45 @@ fn our_infohash_matches_mktorrent() {
             "{what}: our torrent is not the torrent mktorrent would have made"
         );
     }
+}
+
+/// The same comparison as above, against mktorrent's *committed answer* rather than a live
+/// mktorrent — so it runs on macOS and Windows too, which is where our directory walk is
+/// most likely to differ and where there is no mktorrent package to check against.
+///
+/// The payload and the torrent come from `scripts/gen-mktorrent-oracle.py`. If this fails
+/// while `our_infohash_matches_mktorrent` passes, the difference is the platform, not the
+/// encoder.
+#[test]
+fn our_infohash_matches_the_committed_mktorrent_oracle() {
+    let show = fixture("payload/oracle/gd1977-05-08");
+    let theirs = Metainfo::read(&fixture("mktorrent-oracle.torrent")).unwrap();
+    assert_eq!(
+        theirs.info_hash_hex(),
+        "0edf4acecf73d3faadfa5a9c30922af8825aa905",
+        "the committed oracle changed; regenerate the test with it"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let ours = create(
+        &show,
+        &dir.path().join("ours.torrent"),
+        &CreateOpts {
+            piece_length: Some(theirs.piece_length),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        ours.files, theirs.files,
+        "we did not build the same file list mktorrent did"
+    );
+    assert_eq!(
+        ours.info_hash_hex(),
+        theirs.info_hash_hex(),
+        "our torrent is not the torrent mktorrent made from this payload"
+    );
 }
 
 /// A single-file torrent takes the `length` branch instead of `files`, and mktorrent has to
@@ -379,4 +424,94 @@ fn a_folder_with_no_data_is_refused() {
     )
     .expect_err("an empty folder must be refused");
     assert!(err.to_string().contains("no files"), "{err}");
+}
+
+/// Live recordings are traded with the taper's own spelling of the band and the venue, so a
+/// non-ASCII name is the normal case. What must hold on every platform is that the torrent
+/// describes what is *actually on disk*, byte for byte — not some normalized idea of it.
+#[test]
+fn non_ascii_names_go_in_exactly_as_the_filesystem_gives_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("show");
+    payload(
+        &show,
+        &[
+            ("Björk – Debüt.txt", 100),
+            ("d1/t01 Håkan.flac", 20_000),
+            ("日本語.flac", 3_000),
+        ],
+    );
+
+    let torrent = dir.path().join("out.torrent");
+    let made = create(&show, &torrent, &CreateOpts::default()).unwrap();
+
+    // Whatever the filesystem stored — precomposed, decomposed, or something else — the
+    // torrent has to name it identically, or it will not verify against its own folder.
+    let on_disk = names_on_disk(&show);
+    let in_torrent: std::collections::BTreeSet<String> =
+        made.files.iter().map(|f| f.display_path()).collect();
+    assert_eq!(in_torrent, on_disk);
+
+    let meta = Metainfo::read(&torrent).unwrap();
+    let report = check(&meta, &torrent, &show).unwrap();
+    assert_eq!(report.verdict(), Verdict::Complete, "{:?}", report.files);
+}
+
+/// The same name in NFC and in NFD is two files on Linux and one on macOS, because APFS
+/// compares names normalization-insensitively. We do not normalize either way: the torrent
+/// says what the filesystem says. This test asserts that consistency rather than a count,
+/// so it passes on both — and documents why a show's infohash can legitimately differ
+/// between a torrent made on Linux and one made on macOS.
+#[test]
+fn nfc_and_nfd_are_taken_as_the_filesystem_gives_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("show");
+    std::fs::create_dir_all(&show).unwrap();
+    // "é" precomposed (U+00E9) and decomposed (e + U+0301).
+    payload(&show, &[("caf\u{e9}.flac", 5_000)]);
+    payload(&show, &[("cafe\u{301}.flac", 5_000)]);
+
+    let torrent = dir.path().join("out.torrent");
+    let made = create(&show, &torrent, &CreateOpts::default()).unwrap();
+
+    let on_disk = names_on_disk(&show);
+    assert!(
+        on_disk.len() == 1 || on_disk.len() == 2,
+        "unexpected filesystem behaviour: {on_disk:?}"
+    );
+    let in_torrent: std::collections::BTreeSet<String> =
+        made.files.iter().map(|f| f.display_path()).collect();
+    assert_eq!(
+        in_torrent, on_disk,
+        "the torrent must name what is on disk, normalized or not"
+    );
+
+    let meta = Metainfo::read(&torrent).unwrap();
+    assert_eq!(
+        check(&meta, &torrent, &show).unwrap().verdict(),
+        Verdict::Complete
+    );
+}
+
+/// Every file under `root`, as a path relative to it, exactly as the filesystem spells it.
+fn names_on_disk(root: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            let joined = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.file_type().unwrap().is_dir() {
+                walk(&entry.path(), &joined, out);
+            } else {
+                out.insert(joined);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(root, "", &mut out);
+    out
 }

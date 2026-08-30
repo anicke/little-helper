@@ -1,0 +1,4 @@
+# Fixtures are compared byte for byte — several of them *are* hashes of their own bytes.
+# Git must never rewrite a line ending inside this tree, on any platform, or the committed
+# mktorrent infohash stops matching what we compute from the payload on checkout.
+lh-core/tests/fixtures/** -text

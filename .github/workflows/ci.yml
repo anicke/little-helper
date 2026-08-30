@@ -21,19 +21,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # lh-gui needs system deps on Linux; core and cli do not. `flac` and `mktorrent`
-      # are the oracles the conversion and torrent-creation tests compare against — an
-      # infohash that disagrees with mktorrent's would never cross-seed. Without them the
-      # tests skip, so both are installed wherever there is a package. Windows has
-      # neither, and the tests say on stderr that they skipped.
+      # lh-gui needs system deps on Linux; core and cli do not.
+      #
+      # `flac` and `mktorrent` are the oracles the conversion and torrent-creation tests
+      # compare against. Both are deterministic pure computation, so running them on a
+      # second platform re-checks the same arithmetic: `mktorrent` is installed on Linux
+      # only, and every platform instead checks the *committed* answer it gave
+      # (tests/fixtures/torrents/mktorrent-oracle.torrent). That is what covers the
+      # directory walk on macOS and Windows, where it is most likely to differ.
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev flac mktorrent
-      - name: Install the reference tools
+      - name: Install the reference flac
         if: runner.os == 'macOS'
-        run: brew install flac mktorrent
+        run: brew install flac
       - run: cargo test --workspace --all-features
 
   lint:

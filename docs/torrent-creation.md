@@ -112,6 +112,10 @@ checked by deliberately reverting the sort.
 
 Three things the implementation forced:
 
+* **The corpus did not contain the non-ASCII names three places claimed it did.** PLAN.md
+  §6 listed them, §9 cited them as the mitigation for the Windows/Unicode risk, and §8 here
+  said "already in the corpus". None existed. There is one now, and the creation tests cover
+  the normalization case in §2 that only macOS exhibits.
 * **`mktorrent 1.1` cannot express our smallest piece length.** It accepts exponents 15–28,
   so 32 KiB to 256 MiB, while our floor is 16 KiB. The equality test therefore covers 32 KiB
   and up; the 16 KiB case — which `auto_piece_length` picks for anything under about 32 MB —
@@ -191,6 +195,16 @@ a torrent the user believes describes the folder. Name the link and stop.
 bytes and need not be. Refuse and name the file rather than transcoding lossily — a mangled
 name produces a torrent that will not verify against the folder it was made from, which is
 the worst possible failure here.
+
+**We never normalize a name.** The torrent says what the filesystem says, byte for byte.
+This is the one place where the same show genuinely produces different torrents on different
+machines: HFS+ normalized names to NFD and APFS compares them normalization-insensitively,
+so a name written as NFC `é` may come back decomposed, and `café.flac` and `cafe\u{301}.flac`
+are two files on Linux and one on macOS. Normalizing to "fix" that would be worse — the
+torrent would stop describing the folder it was made from, which is the only property that
+has to hold. `mktorrent` takes the bytes as they come too. The tests assert the consistency
+(what is in the torrent equals what is on disk) rather than a fixed infohash, so they pass
+on both, and the difference is documented rather than pretended away.
 
 **Zero-byte files** are legal, appear in `files` with `length: 0`, and contribute nothing to
 the stream. The walk has to cross a zero-length span without stumbling. TLH shipped a bug
@@ -433,8 +447,28 @@ and no external tool, and it tests our encoder against a real canonical torrent 
 
 > **Done in C1, and it generalised.** Every fixture uses only the `info` keys we model, so
 > six torrents from three generators re-encode to their own infohashes, not just the debian
-> one. That is why `mktorrent` is not in CI yet: there is nothing it would catch until C2
-> introduces a folder walk and a file ordering for it to disagree with.
+> one.
+
+### Commit the oracle's answer, not only the tool
+
+`mktorrent` is packaged for Linux and not for Windows, and running it on macOS only re-checks
+arithmetic Linux already checked — the encoder is pure computation, and mktorrent's output is
+deterministic for the same input bytes. What actually varies across platforms is the half
+*before* the encoder: the directory walk, name encoding, case sensitivity, ordering. Skipping
+the comparison wherever the tool is missing puts the thinnest coverage on the platform with
+the highest risk.
+
+So the oracle is committed rather than merely invoked: `scripts/gen-mktorrent-oracle.py`
+writes a payload and the torrent mktorrent makes of it, both go into the fixture corpus, and
+every platform asserts our infohash equals that stored value. The live mktorrent comparison
+stays on Linux, where it catches the tool changing under us; the committed one is what covers
+macOS and Windows. It is the same move `reference.ffp` already makes for `metaflac`.
+
+The payload is deliberately all-ASCII with no two names differing only by case, because a
+fixed infohash has to be a platform-independent assertion. Non-ASCII names are tested
+separately, for the property that survives normalization (§2). `.gitattributes` marks the
+whole fixture tree `-text` so Git cannot rewrite a line ending inside a file whose bytes are
+being hashed.
 
 Then the fixtures — three of which are the bugs TLH shipped:
 
@@ -443,7 +477,8 @@ Then the fixtures — three of which are the bugs TLH shipped:
 * `creation date` is UTC, not local;
 * a single-file torrent (the `length` branch);
 * nested directories;
-* non-ASCII names (already in the corpus);
+* non-ASCII names, and an NFC/NFD pair, asserted against what the filesystem actually stored
+  rather than against a fixed hash;
 * a name that is not valid UTF-8 → refused, not mangled (Unix only);
 * a symlink → refused, and nothing outside the folder is read;
 * `--piece-length` not a power of two → refused;
@@ -468,7 +503,7 @@ for piece progress. None of §1–§8 needs the GUI to exist first.
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**C1**~~ | ~~Bencode out~~ | **Done** — canonical encoder, `info` encoded once and hashed from that buffer, the debian vector re-encoded to its published infohash. Tiered `announce`, `private` and `source` in `Metainfo` and `lh torrent info`. 9 tests. See §0. |
-| ~~**C2**~~ | ~~Folder → torrent~~ | **Done** — collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. mktorrent equality in CI. 13 tests. See §0. |
+| ~~**C2**~~ | ~~Folder → torrent~~ | **Done** — collection, exclusions, ordering, piece-length choice, the shared span walk, self-check, atomic write. `lh torrent create` with `--tracker URL`. mktorrent equality live on Linux and committed for every platform. 16 tests. See §0. |
 | **C3** | The tracker list | Bundled list with `confirmed` dates, user list in TLH's format, `--tracker` by id, passkeys, tiers, `--private`, `--source`, `lh torrent trackers`. |
 | **C4** | Pre-flight | Verify/FFP/SBE checks before writing, `--no-check`, `--write-ffp`. |
 | **C5** | GUI panel | Folder → trackers → pre-flight → create, with piece progress. Needs the job queue. |

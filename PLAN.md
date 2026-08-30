@@ -22,7 +22,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M3 `lh-gui` | not started (placeholder crate) |
 | M4 Packaging | not started |
 
-73 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+98 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 
@@ -291,7 +291,7 @@ opinion.
 | macOS notarization cost and friction | Budget it, or ship via Homebrew and document the Gatekeeper step |
 | GPL sidecar obligations | Mirror upstream source tarballs in every release |
 | Scope creep toward full TLH parity | The v0.2+ list is written down and explicitly out of v0.1 |
-| Windows path and Unicode handling | Non-ASCII filenames are in the fixture corpus; CI covers Windows |
+| Windows path and Unicode handling | Non-ASCII filenames are in the fixture corpus; CI covers Windows. Torrent creation additionally asserts that a torrent names files exactly as the filesystem spells them, NFC or NFD, which is the case that differs on macOS |
 | Users trusting a new tool with irreplaceable archives | Principle 1: nothing in place, nothing deleted, in v0.1 |
 
 ---
