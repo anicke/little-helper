@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
-use lh_core::convert::{Conversion, EncodeOpts, to_flac_cancellable, to_wav_with_progress};
+use lh_core::convert::{
+    Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
+};
 use lh_core::job::{CancelToken, Event, Progress, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Discovery, Registry, ToolId};
@@ -854,7 +856,7 @@ fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
         if f.format == want {
             return ConvertOutcome::Skipped;
         }
-        let dst = match destination(f, extension, out_dir.as_deref()) {
+        let dst = match destination(&f.path, extension, out_dir.as_deref()) {
             Some(d) => d,
             None => return ConvertOutcome::NoFileName,
         };
@@ -937,21 +939,6 @@ fn report_conversion(done: &Conversion, show_provenance: bool) {
             println!("          {line}");
         }
     }
-}
-
-/// Same stem, new extension, beside the source unless told otherwise.
-///
-/// Built as an `OsString` rather than through `with_extension`, which would eat everything
-/// after the last dot of a name like `gd77-05-08.d1t01.flac` — and non-UTF-8 names are in
-/// the fixture corpus for a reason.
-fn destination(f: &AudioFile, extension: &str, out_dir: Option<&Path>) -> Option<PathBuf> {
-    let dir = out_dir
-        .map(Path::to_path_buf)
-        .or_else(|| f.path.parent().map(Path::to_path_buf))?;
-    let mut name = f.path.file_stem()?.to_os_string();
-    name.push(".");
-    name.push(extension);
-    Some(dir.join(name))
 }
 
 /// The Tools panel, headless. Every operation that shells out logs the same facts this

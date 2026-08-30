@@ -1,13 +1,15 @@
 //! The GUI's one shared job queue and its `JobOutcome` — `docs/gui.md` §2.
 //!
 //! `job::Queue<T>` never imports an operation's result type (`docs/job-queue.md` §2); this
-//! is where that coupling terminates for `lh-gui`. G2 wires the three operations that need
-//! no per-run options: verify, checksum (any of the three kinds), sbe. Convert and the
-//! torrent panels join this enum in G3/G4, per `docs/gui.md`'s milestone table — not added
-//! ahead of a real caller.
+//! is where that coupling terminates for `lh-gui`. G2 wired the three operations that need
+//! no per-run options: verify, checksum (any of the three kinds), sbe. G3 adds convert —
+//! the first operation with real (done, total) progress and a real cancel, and the first
+//! that produces a `Provenance` for the log pane. The torrent panels join this enum in G4,
+//! per `docs/gui.md`'s milestone table — not added ahead of a real caller.
 
 use lh_core::analysis::{Sbe, Verification};
 use lh_core::checksum::ChecksumKind;
+use lh_core::convert::Conversion;
 use lh_core::job::{Event, JobId};
 use std::hash::{Hash, Hasher};
 
@@ -15,11 +17,17 @@ use std::hash::{Hash, Hasher};
 /// `Result` — `analysis::sbe` is infallible (it takes an already-probed `StreamInfo`, not a
 /// path), unlike the sketch in `docs/gui.md` §2, which guessed `Result<Sbe>` before this was
 /// checked against the real signature. See the G2 notes at the bottom of that doc.
+///
+/// `Convert` boxes its `Conversion` for the same reason `lh-cli`'s own `ConvertOutcome`
+/// does (`lh-cli/src/main.rs`): it is by far the largest variant here (a `Provenance` with
+/// an `Agent::Tool`'s argv `Vec<String>` inside it), and it is moved through the queue's
+/// channel once per file.
 #[derive(Debug)]
 pub enum JobOutcome {
     Verify(lh_core::Result<Verification>),
     Checksum(ChecksumKind, lh_core::Result<[u8; 16]>),
     Sbe(Sbe),
+    Convert(lh_core::Result<Box<Conversion>>),
 }
 
 /// The `Subscription::run_with` data, hashed by a stable id only — `docs/gui.md` §G0/§2.
@@ -58,6 +66,10 @@ pub enum JobUpdate {
     Finished {
         id: JobId,
         result: Result<String, String>,
+        /// The full audit-trail text (`Provenance::render()`) for the log pane, when this
+        /// outcome produced one — only a written file has provenance to show; verify,
+        /// checksum and sbe read a file but do not produce one.
+        provenance: Option<String>,
     },
     Cancelled {
         id: JobId,
@@ -70,11 +82,23 @@ impl From<Event<JobOutcome>> for JobUpdate {
             Event::Started { id, label } => JobUpdate::Started { id, label },
             Event::Progress { id, done, total } => JobUpdate::Progress { id, done, total },
             Event::Finished { id, output, .. } => JobUpdate::Finished {
-                id,
                 result: render(&output),
+                provenance: provenance_of(&output),
+                id,
             },
             Event::Cancelled { id, .. } => JobUpdate::Cancelled { id },
         }
+    }
+}
+
+/// The log pane's entry for a finished job, when it wrote one — `docs/gui.md` §2's Log /
+/// audit pane bullet. Only `Convert` produces a `Provenance` today (verify/checksum/sbe
+/// are read-only, per `PLAN.md` §1 Principle 3); the torrent panels (G4) will be the next
+/// to add one here.
+fn provenance_of(outcome: &JobOutcome) -> Option<String> {
+    match outcome {
+        JobOutcome::Convert(Ok(c)) => Some(c.provenance.render()),
+        _ => None,
     }
 }
 
@@ -104,5 +128,22 @@ fn render(outcome: &JobOutcome) -> Result<String, String> {
             Err(format!("SBE (+{remainder_frames} frames)"))
         }
         JobOutcome::Sbe(Sbe::NotApplicable { reason }) => Ok(format!("N/A ({reason})")),
+        JobOutcome::Convert(Ok(c)) => {
+            let name = c
+                .output
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| c.output.display().to_string());
+            if c.checked_against_source {
+                Ok(format!("WROTE {name}"))
+            } else {
+                // A weaker result than the usual one, and it says so rather than looking
+                // the same — matches `lh-cli`'s own `report_conversion`.
+                Ok(format!(
+                    "WROTE {name} (unchecked: nothing in the source to compare against)"
+                ))
+            }
+        }
+        JobOutcome::Convert(Err(e)) => Err(e.to_string()),
     }
 }

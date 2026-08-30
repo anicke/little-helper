@@ -228,3 +228,19 @@ pub fn to_flac_cancellable(
         )),
     }
 }
+
+/// Same stem, new extension, beside `src` unless told otherwise. Shared by `lh-cli` and
+/// `lh-gui` (Principle 4) so both front ends name outputs the same way.
+///
+/// Built as an `OsString` rather than through `with_extension`, which would eat everything
+/// after the last dot of a name like `gd77-05-08.d1t01.flac` — and non-UTF-8 names are in
+/// the fixture corpus for a reason.
+pub fn destination(src: &Path, extension: &str, out_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = out_dir
+        .map(Path::to_path_buf)
+        .or_else(|| src.parent().map(Path::to_path_buf))?;
+    let mut name = src.file_stem()?.to_os_string();
+    name.push(".");
+    name.push(extension);
+    Some(dir.join(name))
+}

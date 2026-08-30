@@ -1812,6 +1812,7 @@ dependencies = [
  "iced",
  "lh-core",
  "rfd",
+ "tempfile",
 ]
 
 [[package]]

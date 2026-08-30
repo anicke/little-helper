@@ -1,44 +1,64 @@
 //! Little Helper desktop application — milestone M3, see `docs/gui.md`.
 //!
-//! G2: the job queue is wired in. One long-lived `job::Queue<JobOutcome>` (`docs/gui.md`
-//! §1/§2) lives for the app's whole life; the operation panel submits verify/checksum/sbe
-//! jobs against every file in the working set, and the subscription in `subscription()`
-//! folds their events into per-row status and the job-queue panel, the same way `lh-cli`'s
-//! `run_batch` folds them into printed lines.
+//! G2 wired in the job queue: one long-lived `job::Queue<JobOutcome>` (`docs/gui.md`
+//! §1/§2) lives for the app's whole life; the operation panel submits jobs against every
+//! file in the working set, and the subscription in `subscription()` folds their events
+//! into per-row status and the job-queue panel, the same way `lh-cli`'s `run_batch` folds
+//! them into printed lines.
+//!
+//! G3 adds convert (both directions, through the same queue, with real progress and a
+//! real cancel — J2) and the log/audit pane: every finished job that produced a
+//! `Provenance` (today, only convert) appends its rendered text to `App::log`, exportable
+//! to a text file via `Message::ExportLogPressed`.
 
 mod job;
 
 use iced::widget::{
-    Column, button, column, container, pick_list, row, scrollable, text, text_input,
+    Column, button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
 };
 use iced::{Element, Length, Subscription, Task};
 use job::JobOutcome;
 use lh_core::analysis::{self, Sbe};
 use lh_core::checksum::{self, ChecksumKind};
+use lh_core::convert::{self, Conversion, EncodeOpts};
 use lh_core::job::{JobId, Queue};
+use lh_core::model::AudioFormat;
 use lh_core::scan::{self, WorkingSet};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-/// One of the operations `lh-cli` already exposes with no per-run options beyond the file
-/// itself — `docs/gui.md` §4's "operation panel for verify/checksum/sbe" (G2). Convert
-/// needs a destination/direction and the torrent panels need a tracker list, so they wait
-/// for G3/G4 rather than growing this into a catch-all now.
+/// One of the operations `lh-cli` already exposes. G2 wired verify/checksum/sbe, which
+/// need no per-run options beyond the file itself; G3 adds convert, which needs a
+/// direction (`ConvertTarget`) and reads `App::overwrite`, the one option it does need.
+/// The torrent panels need a tracker list, so they still wait for G4 rather than growing
+/// this into a catch-all now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Verify,
     Checksum(ChecksumKind),
     Sbe,
+    Convert(ConvertTarget),
+}
+
+/// Convert's direction. Not `AudioFormat` — that also names `Shn`/`Ape`/`Wv`/`Tta`, which
+/// `lh_core::convert` cannot produce, and this picker should only ever offer a choice that
+/// works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConvertTarget {
+    Wav,
+    Flac,
 }
 
 impl Operation {
-    const ALL: [Operation; 5] = [
+    const ALL: [Operation; 7] = [
         Operation::Verify,
         Operation::Checksum(ChecksumKind::Ffp),
         Operation::Checksum(ChecksumKind::Md5),
         Operation::Checksum(ChecksumKind::St5),
         Operation::Sbe,
+        Operation::Convert(ConvertTarget::Wav),
+        Operation::Convert(ConvertTarget::Flac),
     ];
 }
 
@@ -50,6 +70,8 @@ impl std::fmt::Display for Operation {
             Operation::Checksum(ChecksumKind::Md5) => "MD5 checksum",
             Operation::Checksum(ChecksumKind::St5) => "ST5 checksum",
             Operation::Sbe => "SBE",
+            Operation::Convert(ConvertTarget::Wav) => "Convert to WAV",
+            Operation::Convert(ConvertTarget::Flac) => "Convert to FLAC",
         })
     }
 }
@@ -87,8 +109,17 @@ struct App {
     error: Option<String>,
     queue: Queue<JobOutcome>,
     operation: Operation,
+    /// Convert's one option (`lh-cli`'s `--force`) — whether to overwrite an output that
+    /// already exists. Read only by `Operation::Convert`; harmless while any other
+    /// operation is selected.
+    overwrite: bool,
     jobs: BTreeMap<JobId, JobEntry>,
     latest_job_by_path: HashMap<PathBuf, JobId>,
+    /// The log/audit pane: `Provenance::render()` text from every finished job that
+    /// produced one, oldest first (`docs/gui.md` §2, §5 open question 4 — resolved for G3
+    /// as "the rendered strings from every finished job, in order," no new `report/`
+    /// module).
+    log: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,9 +130,12 @@ enum Message {
     ScanPressed,
     PathDropped(PathBuf),
     OperationSelected(Operation),
+    OverwriteToggled(bool),
     RunPressed,
     CancelPressed,
     Job(job::JobUpdate),
+    ExportLogPressed,
+    LogExportPathPicked(Option<PathBuf>),
 }
 
 impl App {
@@ -114,8 +148,10 @@ impl App {
                 error: None,
                 queue: Queue::new(),
                 operation: Operation::Verify,
+                overwrite: false,
                 jobs: BTreeMap::new(),
                 latest_job_by_path: HashMap::new(),
+                log: Vec::new(),
             },
             Task::none(),
         )
@@ -145,13 +181,50 @@ impl App {
     /// single Cancel press would silently stop every future Run from ever executing a job —
     /// a gap only a long-lived queue like this one's can hit (`CancelToken::reset`'s doc,
     /// `docs/gui.md`'s G2 notes).
+    ///
+    /// A convert to FLAC needs the reference `flac` binary; discovered once at boot
+    /// (`self.tools`), not re-discovered per run. Missing it fails the whole Run up front,
+    /// the same as `lh-cli`'s own `cmd_convert` — before converting half a show, not after.
     fn run_operation(&mut self) {
         let Some(set) = &self.working_set else {
             return;
         };
+        if let Operation::Convert(ConvertTarget::Flac) = self.operation
+            && let Err(e) = self.tools.require(ToolId::Flac)
+        {
+            self.error = Some(e.to_string());
+            return;
+        }
+        self.error = None;
         self.queue.cancel_token().reset();
         let operation = self.operation;
+        let overwrite = self.overwrite;
+        // Cloned once per Run rather than borrowed: each submitted job needs its own
+        // owned `Tool` to move into its closure, and discovery already happened at boot.
+        let flac_tool = match operation {
+            Operation::Convert(ConvertTarget::Flac) => Some(
+                self.tools
+                    .require(ToolId::Flac)
+                    .expect("checked above")
+                    .clone(),
+            ),
+            _ => None,
+        };
         for file in &set.files {
+            // A file already in the target format is a silent no-op in `lh-cli`'s own
+            // `cmd_convert` (`ConvertOutcome::Skipped`, printed `SKIPPED ... (already
+            // {want})`), not a failure — matched here by not submitting a job for it at
+            // all, rather than inventing a `JobOutcome::Convert(Err(...))` that would show
+            // up as FAILED in the job-queue panel for a file nothing was wrong with.
+            if let Operation::Convert(target) = operation {
+                let want = match target {
+                    ConvertTarget::Wav => AudioFormat::Wav,
+                    ConvertTarget::Flac => AudioFormat::Flac,
+                };
+                if file.format == want {
+                    continue;
+                }
+            }
             let path = file.path.clone();
             let info = file.stream_info.clone();
             let label = file.file_name();
@@ -166,6 +239,17 @@ impl App {
                 Operation::Sbe => self.queue.submit(label.clone(), move |_p| {
                     JobOutcome::Sbe(analysis::sbe(&info))
                 }),
+                Operation::Convert(ConvertTarget::Wav) => {
+                    self.queue.submit(label.clone(), move |p| {
+                        JobOutcome::Convert(convert_to_wav(&path, overwrite, p))
+                    })
+                }
+                Operation::Convert(ConvertTarget::Flac) => {
+                    let tool = flac_tool.clone().expect("discovered above");
+                    self.queue.submit(label.clone(), move |p| {
+                        JobOutcome::Convert(convert_to_flac(&path, &tool, overwrite, p))
+                    })
+                }
             };
             self.latest_job_by_path.insert(row_path, id);
             self.jobs.insert(
@@ -191,12 +275,19 @@ impl App {
                     entry.status = JobStatus::Running { done, total };
                 }
             }
-            job::JobUpdate::Finished { id, result } => {
+            job::JobUpdate::Finished {
+                id,
+                result,
+                provenance,
+            } => {
                 if let Some(entry) = self.jobs.get_mut(&id) {
                     entry.status = match result {
                         Ok(s) => JobStatus::Done(s),
                         Err(s) => JobStatus::Failed(s),
                     };
+                }
+                if let Some(text) = provenance {
+                    self.log.push(text);
                 }
             }
             job::JobUpdate::Cancelled { id } => {
@@ -206,6 +297,49 @@ impl App {
             }
         }
     }
+}
+
+/// [`Operation::Convert`]`(`[`ConvertTarget::Wav`]`)`'s job body — `job::Progress<T>` is
+/// the queue's channel back to the GUI (`docs/gui.md` §2), so both directions' real
+/// per-file progress and cancellation (J2) reach the job-queue panel exactly the way
+/// `lh-cli`'s own `cmd_convert` reaches its progress bar. `run_operation` never submits
+/// this for a file already in WAV — that is a no-op, not a job.
+fn convert_to_wav(
+    path: &Path,
+    overwrite: bool,
+    p: &lh_core::job::Progress<JobOutcome>,
+) -> lh_core::Result<Box<Conversion>> {
+    let dst = destination_for(path, "wav")?;
+    convert::to_wav_with_progress(path, &dst, overwrite, &mut |done, total| {
+        p.report(done, total);
+        !p.is_cancelled()
+    })
+    .map(Box::new)
+}
+
+/// [`convert_to_wav`]'s FLAC counterpart. `run_operation` never submits this for a file
+/// already in FLAC, same as above.
+fn convert_to_flac(
+    path: &Path,
+    tool: &lh_core::tools::Tool,
+    overwrite: bool,
+    p: &lh_core::job::Progress<JobOutcome>,
+) -> lh_core::Result<Box<Conversion>> {
+    let dst = destination_for(path, "flac")?;
+    convert::to_flac_cancellable(
+        path,
+        &dst,
+        tool,
+        &EncodeOpts::default(),
+        overwrite,
+        &mut || !p.is_cancelled(),
+    )
+    .map(Box::new)
+}
+
+fn destination_for(path: &Path, extension: &str) -> lh_core::Result<PathBuf> {
+    convert::destination(path, extension, None)
+        .ok_or_else(|| lh_core::Error::malformed(path, "has no file name to work from"))
 }
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
@@ -231,9 +365,24 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.scan(&path);
         }
         Message::OperationSelected(op) => app.operation = op,
+        Message::OverwriteToggled(v) => app.overwrite = v,
         Message::RunPressed => app.run_operation(),
         Message::CancelPressed => app.queue.cancel(),
         Message::Job(event) => app.handle_job_event(event),
+        Message::ExportLogPressed => {
+            return Task::perform(
+                rfd::AsyncFileDialog::new()
+                    .set_file_name("little-helper-log.txt")
+                    .save_file(),
+                |handle| Message::LogExportPathPicked(handle.map(|h| h.path().to_path_buf())),
+            );
+        }
+        Message::LogExportPathPicked(Some(path)) => {
+            if let Err(e) = std::fs::write(&path, app.log.join("\n")) {
+                app.error = Some(format!("writing {}: {e}", path.display()));
+            }
+        }
+        Message::LogExportPathPicked(None) => {}
     }
     Task::none()
 }
@@ -253,12 +402,21 @@ fn view(app: &App) -> Element<'_, Message> {
     let table = file_table(app);
     let operations = operation_panel(app);
     let jobs_panel = job_queue_panel(&app.jobs);
+    let log = log_panel(&app.log);
     let tools_panel = tools_panel(&app.tools);
 
     container(
-        column![path_bar, error, table, operations, jobs_panel, tools_panel]
-            .spacing(12)
-            .padding(12),
+        column![
+            path_bar,
+            error,
+            table,
+            operations,
+            jobs_panel,
+            log,
+            tools_panel
+        ]
+        .spacing(12)
+        .padding(12),
     )
     .into()
 }
@@ -316,13 +474,33 @@ fn operation_panel(app: &App) -> Element<'_, Message> {
         Some(app.operation),
         Message::OperationSelected,
     );
+    let overwrite = checkbox(app.overwrite)
+        .label("Overwrite existing outputs")
+        .on_toggle(Message::OverwriteToggled);
     let run =
         button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
     let cancel = button("Cancel").on_press(Message::CancelPressed);
 
-    row![text("Operation:"), picker, run, cancel]
+    row![text("Operation:"), picker, overwrite, run, cancel]
         .spacing(8)
         .into()
+}
+
+/// The log/audit pane — `Provenance::render()` text from every finished job that produced
+/// one, oldest first, plus an Export button that writes them to a text file the user
+/// picks (`docs/gui.md` §2). Not cleared between runs, same as the job-queue panel.
+fn log_panel(log: &[String]) -> Element<'_, Message> {
+    let export = button("Export log...")
+        .on_press_maybe((!log.is_empty()).then_some(Message::ExportLogPressed));
+    let mut list = Column::new()
+        .spacing(4)
+        .push(row![text("Log"), export].spacing(8));
+    for entry in log {
+        for line in entry.lines() {
+            list = list.push(text(line.to_string()));
+        }
+    }
+    scrollable(list).height(Length::FillPortion(2)).into()
 }
 
 /// Aggregate `N of M done` plus one line per job, oldest first (`BTreeMap<JobId, _>` order
@@ -567,6 +745,105 @@ mod tests {
                 entry.label
             );
         }
+    }
+
+    /// G3's real evidence: `Operation::Convert(ConvertTarget::Wav)` moves a real FLAC
+    /// fixture through the queue, `to_wav_with_progress`, and back into `App` state —
+    /// writing an actual `.wav` beside the source, reporting it "checked against source"
+    /// (the fixture carries a STREAMINFO MD5), and appending its `Provenance::render()`
+    /// text to `App::log`. Run against a copy in a tempdir rather than the fixtures dir
+    /// itself, since a real write must not touch the read-only checked-in corpus.
+    #[test]
+    fn running_convert_to_wav_through_the_real_queue_writes_a_checked_file_and_logs_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("cdda-aligned.flac");
+        std::fs::copy(fixtures_dir().join("cdda-aligned.flac"), &src).unwrap();
+
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        app.operation = Operation::Convert(ConvertTarget::Wav);
+        app.run_operation();
+
+        let total = app.working_set.as_ref().unwrap().files.len();
+        let rx = app.queue.events();
+        drain(&mut app, &rx, total);
+
+        let id = app.latest_job_by_path[&src];
+        assert_eq!(
+            status_label(&app.jobs[&id].status),
+            "WROTE cdda-aligned.wav"
+        );
+        assert!(
+            dir.path().join("cdda-aligned.wav").exists(),
+            "convert should have written cdda-aligned.wav beside the source"
+        );
+        assert_eq!(
+            app.log.len(),
+            1,
+            "one finished convert job should log one provenance entry, got {:?}",
+            app.log
+        );
+        assert!(
+            app.log[0].contains("FLAC → WAV"),
+            "log entry should name the conversion, got {:?}",
+            app.log[0]
+        );
+    }
+
+    /// The other direction, through the reference `flac` binary discovered from
+    /// `App::tools` — real evidence `run_operation`'s `flac_tool` plumbing actually reaches
+    /// `to_flac_cancellable`, not just that it compiles. Skips (rather than failing) when
+    /// `flac` is not installed, the same convention `lh-core/tests/convert.rs` uses.
+    #[test]
+    fn running_convert_to_flac_through_the_real_queue_writes_a_checked_file() {
+        if Registry::discover_one(ToolId::Flac)
+            .require(ToolId::Flac)
+            .is_err()
+        {
+            eprintln!("skipping: flac not found");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("cdda-aligned.wav");
+        std::fs::copy(fixtures_dir().join("cdda-aligned.wav"), &src).unwrap();
+
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        app.operation = Operation::Convert(ConvertTarget::Flac);
+        app.run_operation();
+
+        let total = app.working_set.as_ref().unwrap().files.len();
+        let rx = app.queue.events();
+        drain(&mut app, &rx, total);
+
+        let id = app.latest_job_by_path[&src];
+        let status = status_label(&app.jobs[&id].status);
+        assert_eq!(status, "WROTE cdda-aligned.flac", "got {status:?}");
+        assert!(dir.path().join("cdda-aligned.flac").exists());
+        assert!(app.log.iter().any(|e| e.contains("WAV → FLAC")));
+    }
+
+    /// The gap `run_operation`'s pre-filter closes: `lh-cli`'s `cmd_convert` treats a file
+    /// already in the target format as a silent skip (`ConvertOutcome::Skipped`), not a
+    /// failure. Converting a working set that is *already* WAV to WAV must not submit a
+    /// job, and must not leave a FAILED row for a file nothing was wrong with.
+    #[test]
+    fn converting_to_the_format_a_file_is_already_in_submits_no_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("cdda-aligned.wav");
+        std::fs::copy(fixtures_dir().join("cdda-aligned.wav"), &src).unwrap();
+
+        let (mut app, _) = App::boot();
+        app.scan(dir.path());
+        app.operation = Operation::Convert(ConvertTarget::Wav);
+        app.run_operation();
+
+        assert!(
+            app.jobs.is_empty(),
+            "no job should have been submitted for a file already in the target format, got {:?}",
+            app.jobs.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]

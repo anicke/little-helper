@@ -243,7 +243,7 @@ already covers.
 | ~~**G0**~~ | ~~Iced/job-queue spike~~ | **Done** — confirmed the `Subscription` bridge, the `Hash`-identity requirement, that blocking `rx.iter()` inside `stream::channel` does not stall the window, and that window-level drag-and-drop is available. See §G0. |
 | ~~**G1**~~ | ~~Scaffold + file table~~ | **Done** — `iced` + `rfd` in the workspace, path bar (text input, Browse via `rfd::AsyncFileDialog`, Scan), window-wide drag-and-drop, `WorkingSet` → file table (name, format, duration, rate/bits/channels, SBE), Tools panel off `Registry::entries()`. Read-only: no queue yet. 4 tests in `lh-gui/src/main.rs`. See §G1 notes. |
 | ~~**G2**~~ | ~~Job queue wired~~ | **Done** — one long-lived `Queue<JobOutcome>`, the subscription adapter, an operation panel (verify / ffp / md5 / st5 / sbe) that runs every file in the working set, per-row status via `App::latest_job_by_path`, an aggregate `N of M done` and per-job job-queue panel, and a working Cancel button. 2 new tests against the real fixture corpus and a real `Queue`, plus a real (non-interactive) run under X11. See §G2 notes. |
-| **G3** | Convert + log pane | Convert (both directions) through the queue with its real progress/cancel behavior (J2), Provenance log pane, export. |
+| ~~**G3**~~ | ~~Convert + log pane~~ | **Done** — convert (both directions) joins the operation panel with a direction picker and an Overwrite checkbox, through the same queue, with real per-file progress (`to_wav_with_progress`) and a real mid-run cancel (`to_flac_cancellable`, J2). A file already in the target format submits no job at all rather than showing FAILED for a no-op. A log/audit pane renders `Provenance::render()` for every finished job that produced one, with an Export button. 4 new tests: two through the real queue (WAV write + FLAC write via the real reference `flac` binary), one proving the already-in-format skip submits nothing, none against a mocked queue. See §G3 notes. |
 | **G4** | Torrent panels | Create and check, per `docs/torrent-creation.md` C5 and `docs/torrent-verification.md` T4 — both already named the job queue as their dependency; it now exists. |
 
 ---
@@ -263,12 +263,12 @@ already covers.
    Windows path/Unicode handling as a risk; the drag-and-drop event path in particular
    (`DroppedFile`/`HoveredFile`) should be re-checked on each platform once CI (M4) can run
    the GUI crate, not assumed to be identical everywhere winit compiles.
-4. **Does the log pane need `report/`?** `PLAN.md` §3's architecture sketch names a
-   `report/` module ("structured results + provenance/audit trail") that was never built —
-   `Provenance::render()` has covered every need so far. Decide in G3 whether an aggregate,
-   exportable audit log needs more structure than "the rendered strings from every finished
-   job, in order," or whether that is still enough once there is a real multi-operation
-   session to look at.
+4. ~~**Does the log pane need `report/`?**~~ **Resolved in G3: no.** `App::log` is
+   `Vec<String>` — `Provenance::render()`'s text from every finished job that produced one,
+   appended in the order jobs finish, exported by joining with `\n`. Nothing G3 built
+   (Export button, the per-line scroll, a real multi-operation session mixing verify and
+   convert) needed more structure than that. Revisit only if a real caller needs to filter,
+   sort, or re-render the log some other way than "read top to bottom" — none has yet.
 
 ---
 
@@ -369,3 +369,66 @@ clicked Browse, Run, or Cancel, or watched the job-queue panel update live — n
 or input-automation tool is available for a native window in this sandbox, only for a
 Chrome tab. A manual pass (or a future in-repo integration harness) is still owed before
 the operation panel is trusted end to end.
+
+---
+
+## G3 notes
+
+*Landed 2026-08-30.*
+
+* **`destination()` moved from `lh-cli` into `lh_core::convert`, generalized from
+  `&AudioFile` to `&Path`.** It was a private fn in `lh-cli/src/main.rs` building "same
+  stem, new extension, beside the source" as an `OsString` (not `with_extension`, which
+  eats everything after the last dot — `gd77-05-08.d1t01.flac` — and the fixture corpus
+  carries non-UTF-8 names on purpose). `lh-gui` needed the exact same logic for its own
+  convert destinations; duplicating a correctness-sensitive detail like non-ASCII path
+  handling across both front ends is exactly what Principle 4 exists to avoid, so it was
+  lifted rather than copied. `lh-cli/src/main.rs`'s own `destination()` is now a call to
+  `lh_core::convert::destination`; no behavior changed, confirmed by the existing
+  `lh-core/tests/convert.rs` and `lh-cli` suites still passing unmodified.
+* **The "already in the target format" case is a skip, not a job — matching `lh-cli`'s own
+  `ConvertOutcome::Skipped`, which was not obvious from §2's sketch.** The first draft had
+  `convert_to_wav`/`convert_to_flac` return `Err(Error::malformed(path, "already WAV"))`
+  for this case, which `job::render` would have shown as `FAILED: already WAV` in the
+  job-queue panel — wrong, since nothing about the file is actually wrong. `lh-cli`'s
+  `cmd_convert` treats this as `ConvertOutcome::Skipped`, printed `SKIPPED ... (already
+  {want})`, never touching the error path. Fixed by filtering in `run_operation` before
+  `submit` is ever called: a file already in the target format gets no `JobId`, no
+  job-queue row, and its file-table status is whatever it already was — not by inventing a
+  third `JobOutcome` variant for "ran but did nothing."
+  `converting_to_the_format_a_file_is_already_in_submits_no_job` is the regression test for
+  the bug that was caught before it was committed, not after.
+* **The log pane's provenance has to be extracted from `JobOutcome` at the same boundary
+  `Message: Clone` already forced in G2, not later.** `JobUpdate::Finished` grew a
+  `provenance: Option<String>` field, filled by a new `provenance_of(&JobOutcome) ->
+  Option<String>` called inside `From<Event<JobOutcome>> for JobUpdate` — the same place
+  `render()` already turns the outcome into its short status line, for the same reason:
+  once `Message::Job` exists, the raw `JobOutcome` (and the `lh_core::Error` it can carry,
+  which is not `Clone`) must not cross into it. `App::handle_job_event` just pushes
+  `Some(text)` onto `App::log`; only `JobOutcome::Convert(Ok(_))` produces one today, per
+  §5 open question 4's resolution.
+* **`iced::widget::checkbox` is a builder, not a struct literal or a helper with inline
+  args.** `checkbox(is_checked).label("...").on_toggle(Message::OverwriteToggled)` —
+  consistent with every other Iced 0.14 widget already in this file (`text_input`,
+  `pick_list`, `button`), but worth confirming against `iced_widget-0.14.2/src/checkbox.rs`
+  rather than assumed, per this doc's own standard.
+
+**What this did and did not check.** Four tests run `App::run_operation` against a real
+`Queue<JobOutcome>` and real files in a `tempfile::tempdir()` (never the read-only fixtures
+dir, since convert actually writes): FLAC → WAV against `cdda-aligned.flac` writes a real
+`.wav`, is reported "checked against source" (the fixture carries a STREAMINFO MD5), and
+logs one `FLAC → WAV` provenance entry; WAV → FLAC against `cdda-aligned.wav` runs the real
+`flac` binary found on this machine (skips with a note if `flac` is absent, the convention
+`lh-core/tests/convert.rs` already uses) and writes a real, independently-checked `.flac`;
+and the already-in-format case submits zero jobs. This is the first `lh-gui` milestone
+whose tests actually invoke the reference `flac` binary, not just in-process code — G2's
+real-`Queue` tests only ever exercised verify/checksum/sbe, none of which shell out.
+Cancellation mid-convert (`Progress::is_cancelled` reaching `to_flac_cancellable`'s killed
+child, J2's whole point) is exercised by `lh-core/tests/convert.rs` already, not re-tested
+here — `lh-gui`'s own wiring only needed proving that pressing Cancel calls
+`Queue::cancel()` (G2) and that `is_cancelled()` is threaded into both closures (this
+milestone), not that killing a real `flac` child works, which is `lh-core`'s job to prove
+and already does. Same unchecked gap as G1/G2: nobody clicked the real Convert button, the
+Overwrite checkbox, or Export in a running window — no input-automation tool exists here
+for a native window, only for a Chrome tab. The compiled binary was run for real under X11
+(`timeout 6 ./target/debug/little-helper`, exit 124, no panic) as the same smoke check.
