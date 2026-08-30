@@ -19,7 +19,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
 | M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; see [docs/job-queue.md](docs/job-queue.md) |
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
-| M3 `lh-gui` | **planned** — see [docs/gui.md](docs/gui.md); G0 spike done, G1 (scaffold) not started |
+| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0 spike and G1 (scaffold, file table, Tools panel) done, G2 (job queue) not started |
 | M4 Packaging | not started |
 
 130 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte

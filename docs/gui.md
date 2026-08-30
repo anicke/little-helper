@@ -241,7 +241,7 @@ already covers.
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**G0**~~ | ~~Iced/job-queue spike~~ | **Done** — confirmed the `Subscription` bridge, the `Hash`-identity requirement, that blocking `rx.iter()` inside `stream::channel` does not stall the window, and that window-level drag-and-drop is available. See §G0. |
-| **G1** | Scaffold + file table | `iced` dependency, path bar, drag-and-drop, `WorkingSet` → file table, Tools panel. Read-only: no queue yet. |
+| ~~**G1**~~ | ~~Scaffold + file table~~ | **Done** — `iced` + `rfd` in the workspace, path bar (text input, Browse via `rfd::AsyncFileDialog`, Scan), window-wide drag-and-drop, `WorkingSet` → file table (name, format, duration, rate/bits/channels, SBE), Tools panel off `Registry::entries()`. Read-only: no queue yet. 4 tests in `lh-gui/src/main.rs`. See §G1 notes. |
 | **G2** | Job queue wired | `Queue<JobOutcome>`, the subscription adapter, operation panel for verify/checksum/sbe, per-row status, aggregate progress, Cancel. |
 | **G3** | Convert + log pane | Convert (both directions) through the queue with its real progress/cancel behavior (J2), Provenance log pane, export. |
 | **G4** | Torrent panels | Create and check, per `docs/torrent-creation.md` C5 and `docs/torrent-verification.md` T4 — both already named the job queue as their dependency; it now exists. |
@@ -269,3 +269,36 @@ already covers.
    exportable audit log needs more structure than "the rendered strings from every finished
    job, in order," or whether that is still enough once there is a real multi-operation
    session to look at.
+
+---
+
+## G1 notes
+
+*Landed 2026-08-30.*
+
+* **`iced::application`'s `boot` argument being `impl BootFn<State, Message>` (a `Fn() -> C`)
+  meant `App::boot() -> (App, Task<Message>)` as an associated function, not a closure** —
+  `App::boot` coerces to the right shape directly (§G0's non-capturing-closure finding, one
+  level up: an ordinary top-level or associated `fn` always satisfies it, which is simpler
+  than the wrapped-in-a-closure phrasing in Iced's own doc example).
+* **`Task::perform` needed none of `Subscription::run_with`'s `Hash`-identity ceremony.**
+  Its `f: impl FnOnce(A) -> T + MaybeSend + 'static` is an ordinary capturing closure
+  (`iced_runtime-0.14.0/src/task.rs:48-51`) — a one-shot future (the Browse button's
+  `rfd::AsyncFileDialog::pick_folder()`) is not something Iced needs to diff across `view`
+  calls the way a long-running subscription stream is, so the wrapper struct §G0 needed for
+  the job-queue bridge does not generalize to every async boundary. G2's actual queue
+  subscription will still need it.
+* **A bare `.map(...).unwrap_or_else(...)` building an `Element` failed to infer `Theme`**
+  (`iced::widget::text::Catalog` unsatisfied) until the branch was annotated
+  `let error: Element<'_, Message> = ...`. Cosmetic, but worth naming: Iced 0.14's default
+  `Theme` type parameter only resolves inside a context that already commits to a concrete
+  `Element<Message>`, not through an inferred closure return.
+* **What this did not check, and could not in this environment**: the window ran for
+  several seconds under this machine's X11 display without panicking, and `App::scan`,
+  `sbe_label`, `format_duration`, and `tool_line` are covered by tests against the real
+  fixture corpus (`lh-core/tests/fixtures`) and a live `Registry::discover()` — but nobody
+  clicked Browse, dropped a file, or looked at the rendered table. No screenshot tool was
+  available in this sandbox to confirm layout, spacing, or that the drag-and-drop path
+  fires end to end outside of the isolated §G0 spike. That is a real gap the plan's own
+  standard (`docs/job-queue.md` and this doc's own §G0 both distinguish "compiles" from
+  "was run") says not to paper over — worth a manual pass before G1 is trusted further.

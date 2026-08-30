@@ -32,6 +32,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossbeam-channel = "0.5"
 rayon = "1"
 ctrlc = "3"
+iced = "0.14"
+rfd = "0.17"
 
 [profile.release]
 lto = "thin"

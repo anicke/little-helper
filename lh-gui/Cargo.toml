@@ -15,3 +15,5 @@ path = "src/main.rs"
 
 [dependencies]
 lh-core.workspace = true
+iced.workspace = true
+rfd.workspace = true
