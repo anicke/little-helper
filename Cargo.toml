@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["lh-core", "lh-cli", "lh-gui"]
+members = ["lh-core", "lh-cli", "lh-gui", "lh-tui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -34,6 +34,8 @@ rayon = "1"
 ctrlc = "3"
 iced = "0.14"
 rfd = "0.17"
+ratatui = "0.29"
+crossterm = "0.29"
 
 [profile.release]
 lto = "thin"

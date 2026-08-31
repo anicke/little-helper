@@ -10,6 +10,14 @@
 //! as its own per-file table, not just one status line, so it grows `JobUpdate::Finished`
 //! a field for that rather than overloading the log pane (`docs/gui.md`'s G3 open question
 //! 4 resolved that pane as "audit text only").
+//!
+//! S3 (`docs/gui-shell.md` §6) closes the two checksum gaps. Checksum → Create reuses the
+//! existing per-file `Checksum` job unchanged, threading each finished digest back through
+//! a new `checksum_entry` field. Checksum → Check gets its own `JobOutcome::ChecksumCheck`
+//! — one job per checksum-file entry, comparing `checksum::compute` against the stored
+//! digest, a call site rather than new `lh-core` logic. `TorrentFileRow` is renamed
+//! `FileRow` here: `docs/gui-shell.md` §6 predicted Checksum → Check would be the second
+//! caller `report_rows`'s row shape was waiting for, and it is.
 
 use lh_core::analysis::{Sbe, Verification};
 use lh_core::checksum::ChecksumKind;
@@ -35,6 +43,21 @@ pub enum JobOutcome {
     Convert(lh_core::Result<Box<Conversion>>),
     TorrentCreate(lh_core::Result<Box<Created>>),
     TorrentCheck(lh_core::Result<Box<TorrentReport>>),
+    /// One checksum-file entry's outcome, computed by the job closure itself rather than a
+    /// `lh_core` function — `cmd_check`'s own comparison (`lh-cli/src/main.rs`) is exactly
+    /// this small, and lifting it would be new `lh-core` surface for no reuse beyond one
+    /// caller (`docs/gui-shell.md` §6, S3).
+    ChecksumCheck(ChecksumEntryStatus),
+}
+
+/// What checking one checksum-file entry against the file beside it can find — the same
+/// four outcomes `lh-cli`'s `cmd_check` prints (`MISSING`/`OK`/`MISMATCH`/`FAILED`), as data.
+#[derive(Debug)]
+pub enum ChecksumEntryStatus {
+    Ok,
+    Missing,
+    Mismatch { expected: [u8; 16], actual: [u8; 16] },
+    Failed(String),
 }
 
 /// The `Subscription::run_with` data, hashed by a stable id only — `docs/gui.md` §G0/§2.
@@ -83,7 +106,17 @@ pub enum JobUpdate {
         /// A `TorrentCheck`'s per-file results, for the check panel's own table
         /// (`docs/torrent-verification.md` T4) — `render()` alone only has room for one
         /// summary line, which is what the job-queue panel and log use.
-        torrent_check: Option<Vec<TorrentFileRow>>,
+        torrent_check: Option<Vec<FileRow>>,
+        /// A finished `Checksum` job's file name and digest, for `App`'s checksum-create
+        /// batch to accumulate into a `ChecksumFile` once every job it submitted has
+        /// reported (`docs/gui-shell.md` §6, S3). `None` for every other outcome and for a
+        /// digest that failed — a failed file contributes no entry, matching `lh-cli`'s own
+        /// `cmd_checksum`.
+        checksum_entry: Option<(String, [u8; 16])>,
+        /// A finished `ChecksumCheck` job's one row for the check panel's table — the same
+        /// `FileRow` shape as `torrent_check`, one row per entry instead of one report's
+        /// worth at once.
+        checksum_check_row: Option<FileRow>,
     },
     Cancelled {
         id: JobId,
@@ -95,10 +128,12 @@ impl From<Event<JobOutcome>> for JobUpdate {
         match event {
             Event::Started { id, label } => JobUpdate::Started { id, label },
             Event::Progress { id, done, total } => JobUpdate::Progress { id, done, total },
-            Event::Finished { id, output, .. } => JobUpdate::Finished {
+            Event::Finished { id, label, output } => JobUpdate::Finished {
                 result: render(&output),
                 provenance: provenance_of(&output),
                 torrent_check: torrent_check_rows(&output),
+                checksum_entry: checksum_entry(&label, &output),
+                checksum_check_row: checksum_check_row(&label, &output),
                 id,
             },
             Event::Cancelled { id, .. } => JobUpdate::Cancelled { id },
@@ -106,11 +141,12 @@ impl From<Event<JobOutcome>> for JobUpdate {
     }
 }
 
-/// One row of a finished `TorrentCheck`'s per-file table — the same information
-/// `lh-cli`'s `cmd_torrent_check` prints, as data instead of `println!`s.
+/// One row of a finished `TorrentCheck`'s per-file table, or a finished `ChecksumCheck`
+/// entry's single row — the same information `lh-cli`'s `cmd_torrent_check`/`cmd_check`
+/// print, as data instead of `println!`s.
 #[derive(Debug, Clone)]
-pub struct TorrentFileRow {
-    /// Displayed relative to the torrent's root, like `lh-cli`'s own `EXTRA` line does.
+pub struct FileRow {
+    /// Displayed relative to the torrent's root, or the checksum file's own file name.
     pub path: String,
     pub label: &'static str,
     /// Empty when the status needs no elaboration (`OK`, `MISSING`, ...).
@@ -132,17 +168,54 @@ fn provenance_of(outcome: &JobOutcome) -> Option<String> {
 /// A finished `TorrentCheck`'s per-file rows, for the check panel's own table. `None` for
 /// every other outcome, and for a `TorrentCheck` that failed outright (nothing to show a
 /// table of when the torrent itself would not even parse).
-fn torrent_check_rows(outcome: &JobOutcome) -> Option<Vec<TorrentFileRow>> {
+fn torrent_check_rows(outcome: &JobOutcome) -> Option<Vec<FileRow>> {
     match outcome {
         JobOutcome::TorrentCheck(Ok(report)) => Some(report_rows(report)),
         _ => None,
     }
 }
 
+/// A finished `Checksum` job's file name and digest, for the checksum-create batch
+/// (`App::checksum_create_batch`). `label` is the job's own label, which `run_operation`
+/// sets to `file.file_name()` — the same name a `ChecksumFile::Entry` wants.
+fn checksum_entry(label: &str, outcome: &JobOutcome) -> Option<(String, [u8; 16])> {
+    match outcome {
+        JobOutcome::Checksum(_, Ok(digest)) => Some((label.to_string(), *digest)),
+        _ => None,
+    }
+}
+
+/// A finished `ChecksumCheck` job's one row, for the checksum-check batch
+/// (`App::checksum_check_batch`). `label` is the entry's own file name, set by
+/// `App::run_checksum_check` the same way `checksum_entry` reads it back.
+fn checksum_check_row(label: &str, outcome: &JobOutcome) -> Option<FileRow> {
+    let JobOutcome::ChecksumCheck(status) = outcome else {
+        return None;
+    };
+    let (tag, detail) = match status {
+        ChecksumEntryStatus::Ok => ("OK", String::new()),
+        ChecksumEntryStatus::Missing => ("MISSING", String::new()),
+        ChecksumEntryStatus::Mismatch { expected, actual } => (
+            "MISMATCH",
+            format!(
+                "expected {} actual {}",
+                hex::encode(expected),
+                hex::encode(actual)
+            ),
+        ),
+        ChecksumEntryStatus::Failed(e) => ("FAILED", e.clone()),
+    };
+    Some(FileRow {
+        path: label.to_string(),
+        label: tag,
+        detail,
+    })
+}
+
 /// Mirrors `lh-cli`'s `cmd_torrent_check` line-by-line: skip padding (it is not a file a
 /// user can look at), show every real file's status with the same detail CLI prints in
 /// parentheses, then the extras the torrent does not list.
-fn report_rows(report: &TorrentReport) -> Vec<TorrentFileRow> {
+fn report_rows(report: &TorrentReport) -> Vec<FileRow> {
     let mut rows = Vec::with_capacity(report.files.len() + report.extra_local.len());
     for outcome in &report.files {
         if outcome.status == FileStatus::Padding {
@@ -171,7 +244,7 @@ fn report_rows(report: &TorrentReport) -> Vec<TorrentFileRow> {
             ),
             _ => String::new(),
         };
-        rows.push(TorrentFileRow {
+        rows.push(FileRow {
             path: shown.display().to_string(),
             label: outcome.status.label(),
             detail,
@@ -179,7 +252,7 @@ fn report_rows(report: &TorrentReport) -> Vec<TorrentFileRow> {
     }
     for extra in &report.extra_local {
         let shown = extra.strip_prefix(&report.root).unwrap_or(extra);
-        rows.push(TorrentFileRow {
+        rows.push(FileRow {
             path: shown.display().to_string(),
             label: "EXTRA",
             detail: String::new(),
@@ -265,5 +338,15 @@ fn render(outcome: &JobOutcome) -> Result<String, String> {
             }
         },
         JobOutcome::TorrentCheck(Err(e)) => Err(e.to_string()),
+        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Ok) => Ok("OK".to_string()),
+        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Missing) => Err("MISSING".to_string()),
+        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Mismatch { expected, actual }) => {
+            Err(format!(
+                "MISMATCH expected {} actual {}",
+                hex::encode(expected),
+                hex::encode(actual)
+            ))
+        }
+        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Failed(e)) => Err(e.clone()),
     }
 }

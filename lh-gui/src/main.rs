@@ -25,7 +25,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task};
 use job::JobOutcome;
 use lh_core::analysis::{self, Sbe};
-use lh_core::checksum::{self, ChecksumKind};
+use lh_core::checksum::{self, ChecksumFile, ChecksumKind, Entry};
 use lh_core::convert::{self, Conversion, EncodeOpts};
 use lh_core::job::{JobId, Queue};
 use lh_core::model::AudioFormat;
@@ -142,6 +142,29 @@ struct JobEntry {
     status: JobStatus,
 }
 
+/// Tracks a Checksum → Create run while its per-file digest jobs are still in flight
+/// (`docs/gui-shell.md` §6, S3). `order` fixes the entries' final order to submission
+/// (scan) order rather than whichever job the queue's worker pool happens to finish
+/// first — `lh-cli`'s own `run_batch` re-sorts back into submission order for the same
+/// reason (`lh-cli/src/main.rs`'s `run_batch`), and a `.ffp` a user diffs run to run should
+/// not reorder itself just because the OS scheduled threads differently.
+struct ChecksumCreateBatch {
+    kind: ChecksumKind,
+    output: PathBuf,
+    order: Vec<(JobId, String)>,
+    digests: HashMap<JobId, [u8; 16]>,
+    pending: HashSet<JobId>,
+}
+
+/// Tracks a Checksum → Check run while its per-entry comparison jobs are still in flight —
+/// the same shape as [`ChecksumCreateBatch`], but accumulating `FileRow`s for
+/// `App::checksum_check_rows` instead of `ChecksumFile::Entry`s to write. Order does not
+/// matter here: the result is a table for reading, not a file another tool re-parses.
+struct ChecksumCheckBatch {
+    pending: HashSet<JobId>,
+    rows: Vec<job::FileRow>,
+}
+
 fn status_label(status: &JobStatus) -> String {
     match status {
         JobStatus::Running { done, total } if *total > 0 => format!("running ({done}/{total})"),
@@ -180,6 +203,29 @@ struct App {
     convert_target: ConvertTarget,
     /// Checksum → Create's kind picker, same role as `convert_target` for `Operation::Checksum`.
     checksum_kind: ChecksumKind,
+    /// Checksum → Create's output path — the field that turns the per-file digests
+    /// `Operation::Checksum` already computed into an actual `.ffp`/`.md5`/`.st5`
+    /// (`docs/gui-shell.md` §6, S3).
+    checksum_output: String,
+    /// Set while a Checksum → Create run's digest jobs are still in flight; `None`
+    /// otherwise, including before the first Run and after the file has been written.
+    checksum_create_batch: Option<ChecksumCreateBatch>,
+    /// Set by Browse or a checksum-file drop (`Message::PathDropped` routes by extension,
+    /// same as `.torrent`) — parsed immediately via `App::pick_checksum_file` so the panel
+    /// shows the entry count and kind before Check ever runs, the same shape as
+    /// `torrent_check_path`/`torrent_check_meta`.
+    checksum_check_path: Option<PathBuf>,
+    /// Inferred from `checksum_check_path`'s extension, the same way `cmd_check` infers it
+    /// (`lh-cli/src/main.rs`) — `None` when the extension names none of `.ffp`/`.md5`/`.st5`.
+    checksum_check_kind: Option<ChecksumKind>,
+    /// The parsed checksum file, once a valid one has been picked.
+    checksum_check_file: Option<ChecksumFile>,
+    /// Set while a Checksum → Check run's per-entry jobs are still in flight.
+    checksum_check_batch: Option<ChecksumCheckBatch>,
+    /// The last finished check's per-entry rows (`docs/gui-shell.md` §6's "per-file results
+    /// table reusing G4's `JobUpdate` boundary") — same convention as `torrent_check_rows`:
+    /// replaced wholesale on completion, not cleared between runs otherwise.
+    checksum_check_rows: Vec<job::FileRow>,
     /// Convert's one option (`lh-cli`'s `--force`) — whether to overwrite an output that
     /// already exists. Split from `torrent_overwrite` in S1: the two checkboxes were one
     /// field only because convert and torrent-create were on screen together (G3/G4);
@@ -220,7 +266,7 @@ struct App {
     /// The last finished check's per-file rows (`docs/torrent-verification.md` T4's file
     /// table). Replaced wholesale on each `JobUpdate::Finished` that carries one; not
     /// cleared between runs otherwise, same convention as `jobs` and `log`.
-    torrent_check_rows: Vec<job::TorrentFileRow>,
+    torrent_check_rows: Vec<job::FileRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +281,12 @@ enum Message {
     AreaSelected(Area),
     ConvertTargetSelected(ConvertTarget),
     ChecksumKindSelected(ChecksumKind),
+    ChecksumOutputChanged(String),
+    ChecksumOutputBrowsePressed,
+    ChecksumOutputPicked(Option<PathBuf>),
+    ChecksumCheckBrowsePressed,
+    ChecksumFilePicked(Option<PathBuf>),
+    ChecksumCheckPressed,
     ConvertOverwriteToggled(bool),
     TorrentOverwriteToggled(bool),
     DockTabSelected(DockTab),
@@ -271,6 +323,13 @@ impl App {
                 area: Area::Files,
                 convert_target: ConvertTarget::Flac,
                 checksum_kind: ChecksumKind::Ffp,
+                checksum_output: String::new(),
+                checksum_create_batch: None,
+                checksum_check_path: None,
+                checksum_check_kind: None,
+                checksum_check_file: None,
+                checksum_check_batch: None,
+                checksum_check_rows: Vec::new(),
                 convert_overwrite: false,
                 torrent_overwrite: false,
                 dock_tab: DockTab::Jobs,
@@ -338,6 +397,44 @@ impl App {
             }
         }
         self.torrent_check_path = Some(path);
+    }
+
+    /// A checksum file chosen via Browse or dropped on the window — parsed immediately, the
+    /// same convention as [`pick_torrent`]. The kind is inferred from the extension exactly
+    /// as `cmd_check` infers it (`lh-cli/src/main.rs`); an extension that names none of
+    /// `.ffp`/`.md5`/`.st5` is an error here for the same reason it is a `bail!` there
+    /// (`docs/gui-shell.md` §10 Q4 — the original asks via `frmTypeChecksumFile`, unscoped
+    /// for S3).
+    fn pick_checksum_file(&mut self, path: PathBuf) {
+        let kind = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("ffp") => Some(ChecksumKind::Ffp),
+            Some("md5") => Some(ChecksumKind::Md5),
+            Some("st5") => Some(ChecksumKind::St5),
+            _ => None,
+        };
+        self.checksum_check_kind = kind;
+        self.checksum_check_file = None;
+        match kind {
+            Some(kind) => match ChecksumFile::read(kind, &path) {
+                Ok(file) => {
+                    self.error = None;
+                    self.checksum_check_file = Some(file);
+                }
+                Err(e) => self.error = Some(e.to_string()),
+            },
+            None => {
+                self.error = Some(format!(
+                    "cannot tell what kind of checksum file this is from {:?}; expected .ffp, .md5 or .st5",
+                    path.extension().and_then(|e| e.to_str()).unwrap_or("")
+                ));
+            }
+        }
+        self.checksum_check_path = Some(path);
     }
 
     /// Submits one job to the shared queue that makes a torrent for `working_root`
@@ -479,15 +576,20 @@ impl App {
     /// A convert to FLAC needs the reference `flac` binary; discovered once at boot
     /// (`self.tools`), not re-discovered per run. Missing it fails the whole Run up front,
     /// the same as `lh-cli`'s own `cmd_convert` — before converting half a show, not after.
-    fn run_operation(&mut self, operation: Operation) {
+    ///
+    /// Returns every `(JobId, label)` it actually submitted, in the same order `set.files`
+    /// iterates — `run_checksum_create` (S3) is the one caller that needs this, to fix a
+    /// `.ffp`/`.md5`/`.st5`'s entry order to submission order rather than whichever job the
+    /// queue's worker pool happens to finish first.
+    fn run_operation(&mut self, operation: Operation) -> Vec<(JobId, String)> {
         let Some(set) = &self.working_set else {
-            return;
+            return Vec::new();
         };
         if let Operation::Convert(ConvertTarget::Flac) = operation
             && let Err(e) = self.tools.require(ToolId::Flac)
         {
             self.error = Some(e.to_string());
-            return;
+            return Vec::new();
         }
         self.error = None;
         self.queue.cancel_token().reset();
@@ -503,6 +605,7 @@ impl App {
             ),
             _ => None,
         };
+        let mut submitted = Vec::new();
         for file in &set.files {
             // Working-set areas act on the ticked rows only (`docs/gui-shell.md` §4, S2) —
             // an unticked file gets no job at all, not a skipped one, same treatment as the
@@ -551,6 +654,7 @@ impl App {
                 }
             };
             self.latest_job_by_path.insert(row_path, id);
+            submitted.push((id, label.clone()));
             self.jobs.insert(
                 id,
                 JobEntry {
@@ -558,6 +662,150 @@ impl App {
                     status: JobStatus::Running { done: 0, total: 0 },
                 },
             );
+        }
+        submitted
+    }
+
+    /// Checksum → Create (`docs/gui-shell.md` §6, S3): the per-file digest jobs
+    /// `run_operation` already submits for `Operation::Checksum`, plus a batch that writes
+    /// a `ChecksumFile` once every one of them has reported. Requires an output path up
+    /// front — with none chosen there is nothing S3 adds over what G2 already did (the
+    /// per-file digest shown as a status line), so this fails before submitting anything,
+    /// the same "checked synchronously, before any job" convention `run_torrent_create`
+    /// uses for its tracker spec.
+    fn run_checksum_create(&mut self) {
+        if self.checksum_output.trim().is_empty() {
+            self.error = Some("choose an output file first".to_string());
+            return;
+        }
+        let output = PathBuf::from(self.checksum_output.trim());
+        let kind = self.checksum_kind;
+        let order = self.run_operation(Operation::Checksum(kind));
+        if order.is_empty() {
+            // Nothing selected, or nothing in the working set — same "no job, not even
+            // considered" treatment `run_operation` already gives an empty selection; a
+            // batch with nothing pending would just write an empty file for no reason.
+            return;
+        }
+        let pending = order.iter().map(|(id, _)| *id).collect();
+        self.checksum_create_batch = Some(ChecksumCreateBatch {
+            kind,
+            output,
+            order,
+            digests: HashMap::new(),
+            pending,
+        });
+    }
+
+    /// Checksum → Check (`docs/gui-shell.md` §6, S3): one job per entry in the checksum
+    /// file already parsed into `checksum_check_file`, each comparing `checksum::compute`
+    /// against the entry's stored digest against the file beside the checksum file itself
+    /// — the same directory `cmd_check` resolves each entry against
+    /// (`lh-cli/src/main.rs`'s `cmd_check`).
+    fn run_checksum_check(&mut self) {
+        let Some(path) = self.checksum_check_path.clone() else {
+            self.error = Some("choose a checksum file first".to_string());
+            return;
+        };
+        let Some(kind) = self.checksum_check_kind else {
+            return;
+        };
+        let Some(file) = self.checksum_check_file.clone() else {
+            return;
+        };
+        let dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        self.error = None;
+        self.queue.cancel_token().reset();
+        let mut pending = HashSet::new();
+        for entry in &file.entries {
+            let target = dir.join(&entry.file_name);
+            let expected = entry.digest;
+            let label = entry.file_name.clone();
+            let id = self.queue.submit(label.clone(), move |_p| {
+                let status = if !target.exists() {
+                    job::ChecksumEntryStatus::Missing
+                } else {
+                    match checksum::compute(kind, &target) {
+                        Ok(actual) if actual == expected => job::ChecksumEntryStatus::Ok,
+                        Ok(actual) => job::ChecksumEntryStatus::Mismatch { expected, actual },
+                        Err(e) => job::ChecksumEntryStatus::Failed(e.to_string()),
+                    }
+                };
+                JobOutcome::ChecksumCheck(status)
+            });
+            pending.insert(id);
+            self.jobs.insert(
+                id,
+                JobEntry {
+                    label,
+                    status: JobStatus::Running { done: 0, total: 0 },
+                },
+            );
+        }
+        self.checksum_check_batch = Some(ChecksumCheckBatch {
+            pending,
+            rows: Vec::new(),
+        });
+    }
+
+    /// Progresses a Checksum → Create batch by one job's outcome, and writes the
+    /// `ChecksumFile` once every submitted job has reported. `digest` is `None` for a job
+    /// that failed or was cancelled — its file contributes no entry, matching `lh-cli`'s
+    /// own `cmd_checksum`, but still counts toward the batch finishing.
+    fn progress_checksum_create(&mut self, id: JobId, digest: Option<[u8; 16]>) {
+        let Some(batch) = &mut self.checksum_create_batch else {
+            return;
+        };
+        if !batch.pending.remove(&id) {
+            return;
+        }
+        if let Some(digest) = digest {
+            batch.digests.insert(id, digest);
+        }
+        if !batch.pending.is_empty() {
+            return;
+        }
+        let batch = self.checksum_create_batch.take().expect("checked above");
+        let mut out = ChecksumFile::new(batch.kind);
+        for (id, file_name) in &batch.order {
+            if let Some(digest) = batch.digests.get(id) {
+                out.entries.push(Entry {
+                    file_name: file_name.clone(),
+                    digest: *digest,
+                });
+            }
+        }
+        match out.write(&batch.output) {
+            Ok(()) => self.log.push(format!(
+                "wrote {} {} entries to {}",
+                out.entries.len(),
+                batch.kind.label(),
+                batch.output.display(),
+            )),
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Progresses a Checksum → Check batch by one job's row, filling `checksum_check_rows`
+    /// once every submitted job has reported — same shape as `progress_checksum_create`,
+    /// `row` is `None` for a job that was cancelled before producing one.
+    fn progress_checksum_check(&mut self, id: JobId, row: Option<job::FileRow>) {
+        let Some(batch) = &mut self.checksum_check_batch else {
+            return;
+        };
+        if !batch.pending.remove(&id) {
+            return;
+        }
+        if let Some(row) = row {
+            batch.rows.push(row);
+        }
+        if batch.pending.is_empty() {
+            let batch = self.checksum_check_batch.take().expect("checked above");
+            self.checksum_check_rows = batch.rows;
         }
     }
 
@@ -579,6 +827,8 @@ impl App {
                 result,
                 provenance,
                 torrent_check,
+                checksum_entry,
+                checksum_check_row,
             } => {
                 if let Some(entry) = self.jobs.get_mut(&id) {
                     entry.status = match result {
@@ -592,11 +842,15 @@ impl App {
                 if let Some(rows) = torrent_check {
                     self.torrent_check_rows = rows;
                 }
+                self.progress_checksum_create(id, checksum_entry.map(|(_, digest)| digest));
+                self.progress_checksum_check(id, checksum_check_row);
             }
             job::JobUpdate::Cancelled { id } => {
                 if let Some(entry) = self.jobs.get_mut(&id) {
                     entry.status = JobStatus::Cancelled;
                 }
+                self.progress_checksum_create(id, None);
+                self.progress_checksum_check(id, None);
             }
         }
     }
@@ -664,17 +918,21 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.scan(&path);
         }
         Message::PathDropped(path) => {
-            // A dropped `.torrent` goes to the check panel; anything else is a folder (or
-            // file) to scan, same as Browse/Scan — the window has one drop target, not one
-            // per panel (`docs/gui.md` §G0's window-wide drag-and-drop).
-            if path
+            // A dropped `.torrent` goes to the torrent check panel, a `.ffp`/`.md5`/`.st5`
+            // to the checksum check panel (S3), and anything else is a folder (or file) to
+            // scan, same as Browse/Scan — the window has one drop target, not one per panel
+            // (`docs/gui.md` §G0's window-wide drag-and-drop).
+            let ext = path
                 .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
-            {
-                app.pick_torrent(path);
-            } else {
-                app.path_input = path.display().to_string();
-                app.scan(&path);
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            match ext.as_deref() {
+                Some("torrent") => app.pick_torrent(path),
+                Some("ffp") | Some("md5") | Some("st5") => app.pick_checksum_file(path),
+                _ => {
+                    app.path_input = path.display().to_string();
+                    app.scan(&path);
+                }
             }
         }
         Message::FileToggled(path, checked) => {
@@ -696,6 +954,34 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::AreaSelected(area) => app.area = area,
         Message::ConvertTargetSelected(t) => app.convert_target = t,
         Message::ChecksumKindSelected(k) => app.checksum_kind = k,
+        Message::ChecksumOutputChanged(s) => app.checksum_output = s,
+        Message::ChecksumOutputBrowsePressed => {
+            let default_name = format!("checksum.{}", app.checksum_kind.extension());
+            return Task::perform(
+                rfd::AsyncFileDialog::new()
+                    .set_file_name(default_name)
+                    .save_file(),
+                |handle| Message::ChecksumOutputPicked(handle.map(|h| h.path().to_path_buf())),
+            );
+        }
+        Message::ChecksumOutputPicked(Some(path)) => {
+            app.checksum_output = path.display().to_string();
+        }
+        Message::ChecksumOutputPicked(None) => {}
+        Message::ChecksumCheckBrowsePressed => {
+            return Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("checksum", &["ffp", "md5", "st5"])
+                        .pick_file()
+                        .await
+                },
+                |handle| Message::ChecksumFilePicked(handle.map(|h| h.path().to_path_buf())),
+            );
+        }
+        Message::ChecksumFilePicked(Some(path)) => app.pick_checksum_file(path),
+        Message::ChecksumFilePicked(None) => {}
+        Message::ChecksumCheckPressed => app.run_checksum_check(),
         Message::ConvertOverwriteToggled(v) => app.convert_overwrite = v,
         Message::TorrentOverwriteToggled(v) => app.torrent_overwrite = v,
         Message::DockTabSelected(tab) => app.dock_tab = tab,
@@ -703,10 +989,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         // select an area whose panel emitted this, so the other areas are unreachable here
         // rather than mis-submitting an operation nobody asked for.
         Message::RunPressed => match app.area {
-            Area::Convert => app.run_operation(Operation::Convert(app.convert_target)),
-            Area::ChecksumCreate => app.run_operation(Operation::Checksum(app.checksum_kind)),
-            Area::Verify => app.run_operation(Operation::Verify),
-            Area::Sbe => app.run_operation(Operation::Sbe),
+            Area::Convert => {
+                app.run_operation(Operation::Convert(app.convert_target));
+            }
+            Area::ChecksumCreate => app.run_checksum_create(),
+            Area::Verify => {
+                app.run_operation(Operation::Verify);
+            }
+            Area::Sbe => {
+                app.run_operation(Operation::Sbe);
+            }
             _ => {}
         },
         Message::CancelPressed => app.queue.cancel(),
@@ -803,11 +1095,16 @@ fn area_pane(app: &App) -> Element<'_, Message> {
         Area::ChecksumCreate => column![checksum_create_panel(app), file_table(app)]
             .spacing(12)
             .into(),
-        Area::ChecksumCheck => checksum_check_panel(),
+        Area::ChecksumCheck => column![
+            checksum_check_panel(app),
+            file_rows_panel("Checksum check results", &app.checksum_check_rows),
+        ]
+        .spacing(12)
+        .into(),
         Area::TorrentCreate => torrent_create_panel(app),
         Area::TorrentCheck => column![
             torrent_check_panel(app),
-            torrent_check_results_panel(&app.torrent_check_rows),
+            file_rows_panel("Torrent check results", &app.torrent_check_rows),
         ]
         .spacing(12)
         .into(),
@@ -883,10 +1180,10 @@ fn convert_panel(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// Checksum → Create today: the digest-per-file computation `Operation::Checksum` already
-/// did in G2, with a kind picker instead of sharing the old flat operation `pick_list`.
-/// Writing a `ChecksumFile` (the actual gap `docs/gui-shell.md` §6 names) is S3, not this
-/// milestone — S1 is a pure re-layout, not new behaviour.
+/// Checksum → Create (`docs/gui-shell.md` §6, S3): the digest-per-file computation
+/// `Operation::Checksum` already did in G2, a kind picker (unchanged since S1), and the
+/// output path that turns those digests into a written `ChecksumFile`
+/// (`App::run_checksum_create`).
 fn checksum_create_panel(app: &App) -> Element<'_, Message> {
     let kinds = row(
         [ChecksumKind::Ffp, ChecksumKind::Md5, ChecksumKind::St5]
@@ -894,14 +1191,17 @@ fn checksum_create_panel(app: &App) -> Element<'_, Message> {
             .map(|k| kind_button(k, app.checksum_kind == k)),
     )
     .spacing(4);
+    let output = text_input("Output file (.ffp/.md5/.st5)", &app.checksum_output)
+        .on_input(Message::ChecksumOutputChanged);
+    let browse = button("Browse...").on_press(Message::ChecksumOutputBrowsePressed);
     let run =
         button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
     let cancel = button("Cancel").on_press(Message::CancelPressed);
 
     column![
-        text("Computes a digest per file below (status column). Writing a .ffp/.md5/.st5 \
-              file is planned in docs/gui-shell.md S3."),
-        row![text("Kind:"), kinds, run, cancel].spacing(8),
+        row![text("Kind:"), kinds].spacing(8),
+        row![output, browse].spacing(8),
+        row![run, cancel].spacing(8),
     ]
     .spacing(8)
     .into()
@@ -920,14 +1220,41 @@ fn kind_button(kind: ChecksumKind, selected: bool) -> Element<'static, Message> 
         .into()
 }
 
-/// Checksum → Check has no functionality yet — `docs/gui-shell.md` §6's second gap.
-/// `lh check` exists in `lh-core`/`lh-cli`; nothing calls it from `lh-gui`. Giving the area
-/// its own rail row now, ahead of S3, is what made the gap obvious in the first place.
-fn checksum_check_panel() -> Element<'static, Message> {
-    text(
-        "Not yet implemented — planned as docs/gui-shell.md S3. `lh check <file>` \
-         already does this from the command line.",
-    )
+/// Checksum → Check (`docs/gui-shell.md` §6, S3): Browse or drop a `.ffp`/`.md5`/`.st5`,
+/// see what `App::pick_checksum_file` parsed from it, then Check against the files beside
+/// it. The per-entry table is [`file_rows_panel`], not here — same split as
+/// [`torrent_check_panel`]/[`file_rows_panel`].
+fn checksum_check_panel(app: &App) -> Element<'_, Message> {
+    let label = match &app.checksum_check_path {
+        Some(p) => p.display().to_string(),
+        None => {
+            "No checksum file chosen — Browse or drop a .ffp/.md5/.st5 on the window."
+                .to_string()
+        }
+    };
+    let browse = button("Browse...").on_press(Message::ChecksumCheckBrowsePressed);
+
+    let info: Element<'_, Message> = match (&app.checksum_check_kind, &app.checksum_check_file) {
+        (Some(kind), Some(file)) => text(format!(
+            "{} entries, kind {}",
+            file.entries.len(),
+            kind.label()
+        ))
+        .into(),
+        _ => text("").into(),
+    };
+
+    let run = button("Check")
+        .on_press_maybe(app.checksum_check_file.is_some().then_some(Message::ChecksumCheckPressed));
+    let cancel = button("Cancel").on_press(Message::CancelPressed);
+
+    column![
+        text("Check checksum file"),
+        row![text(label), browse].spacing(8),
+        info,
+        row![run, cancel].spacing(8),
+    ]
+    .spacing(8)
     .into()
 }
 
@@ -1090,7 +1417,7 @@ fn torrent_create_panel(app: &App) -> Element<'_, Message> {
 
 /// `docs/torrent-verification.md` T4: drop or Browse a `.torrent`, see what
 /// `App::pick_torrent` parsed from it, then Check against a folder. The per-file table is
-/// [`torrent_check_results_panel`], not here — it needs a finished job's rows, not just
+/// [`file_rows_panel`], not here — it needs a finished job's rows, not just
 /// the metainfo this panel already has before Check is ever pressed.
 fn torrent_check_panel(app: &App) -> Element<'_, Message> {
     let torrent_label = match &app.torrent_check_path {
@@ -1137,11 +1464,15 @@ fn torrent_check_panel(app: &App) -> Element<'_, Message> {
 
 /// The last finished check's per-file status — `docs/torrent-verification.md` T4's "file
 /// table with status". Empty until a check has actually finished once.
-fn torrent_check_results_panel(rows: &[job::TorrentFileRow]) -> Element<'_, Message> {
+/// The last finished run's per-file rows — [`job::FileRow`]'s shape, one caller for
+/// `Torrent → Check` (G4) and one for `Checksum → Check` (S3, `docs/gui-shell.md` §6: "that
+/// table is not new work either ... this is the second caller that pattern was waiting
+/// for"). Empty until a check of that kind has actually finished once.
+fn file_rows_panel(title: &str, rows: &[job::FileRow]) -> Element<'static, Message> {
     if rows.is_empty() {
         return text("").into();
     }
-    let mut list = Column::new().spacing(4).push(text("Torrent check results"));
+    let mut list = Column::new().spacing(4).push(text(title.to_string()));
     for r in rows {
         let line = if r.detail.is_empty() {
             format!("{:<11} {}", r.label, r.path)
@@ -1722,6 +2053,164 @@ mod tests {
         let _ = update(&mut app, Message::PathDropped(torrent_path.clone()));
 
         assert_eq!(app.torrent_check_path, Some(torrent_path));
+        assert!(
+            app.working_set.is_none(),
+            "must not have been treated as a folder to scan"
+        );
+    }
+
+    /// S3's real evidence for Checksum → Create (`docs/gui-shell.md` §6): select just the
+    /// four fixtures `reference.ffp` has entries for, run Checksum → Create at FFP through
+    /// the real queue, and confirm the written file's entries match the reference tool's
+    /// own output exactly — the same oracle `lh-core/tests/corpus.rs`'s
+    /// `ffp_matches_the_reference_tools` uses, one layer up through `App` state instead of
+    /// calling `checksum::ffp` directly.
+    #[test]
+    fn running_checksum_create_through_the_real_queue_writes_a_checksum_file_matching_the_reference_ffp()
+     {
+        let reference = ChecksumFile::read(ChecksumKind::Ffp, &fixtures_dir().join("reference.ffp"))
+            .expect("reference.ffp should parse");
+        let reference_names: HashSet<String> = reference
+            .entries
+            .iter()
+            .map(|e| e.file_name.clone())
+            .collect();
+
+        let (mut app, _) = App::boot();
+        app.scan(&fixtures_dir());
+        app.selected = app
+            .working_set
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .filter(|f| reference_names.contains(&f.file_name()))
+            .map(|f| f.path.clone())
+            .collect();
+        assert_eq!(
+            app.selected.len(),
+            reference.entries.len(),
+            "every reference.ffp name must be a real fixture"
+        );
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let output = out_dir.path().join("out.ffp");
+        app.checksum_kind = ChecksumKind::Ffp;
+        app.checksum_output = output.display().to_string();
+        app.run_checksum_create();
+
+        let total = app.selected.len();
+        let rx = app.queue.events();
+        drain(&mut app, &rx, total);
+
+        let written = ChecksumFile::read(ChecksumKind::Ffp, &output).expect("output must parse");
+        let written_map: HashMap<String, [u8; 16]> = written
+            .entries
+            .iter()
+            .map(|e| (e.file_name.clone(), e.digest))
+            .collect();
+        let reference_map: HashMap<String, [u8; 16]> = reference
+            .entries
+            .iter()
+            .map(|e| (e.file_name.clone(), e.digest))
+            .collect();
+        assert_eq!(written_map, reference_map);
+    }
+
+    /// S3's real evidence for Checksum → Check: the checked-in `reference.ffp`
+    /// (`lh-core/tests/fixtures`) names real fixtures, so checking it against them end to
+    /// end through the real queue must report OK for every entry.
+    #[test]
+    fn running_checksum_check_through_the_real_queue_against_the_reference_ffp_reports_ok_for_every_entry()
+     {
+        let (mut app, _) = App::boot();
+        app.pick_checksum_file(fixtures_dir().join("reference.ffp"));
+        assert_eq!(app.checksum_check_kind, Some(ChecksumKind::Ffp));
+        let total = app.checksum_check_file.as_ref().unwrap().entries.len();
+        assert!(total > 0, "reference.ffp is empty");
+
+        app.run_checksum_check();
+        let rx = app.queue.events();
+        drain(&mut app, &rx, total);
+
+        assert_eq!(app.checksum_check_rows.len(), total);
+        for row in &app.checksum_check_rows {
+            assert_eq!(row.label, "OK", "{}: {}", row.path, row.detail);
+        }
+    }
+
+    /// Same, against `reference.st5` — a different kind (decoded-audio MD5, not the
+    /// STREAMINFO one) and a different oracle (real shntool, `lh-core/tests/corpus.rs`'s
+    /// own note on why this file exists), through the same Checksum → Check path.
+    #[test]
+    fn running_checksum_check_through_the_real_queue_against_the_reference_st5_reports_ok_for_every_entry()
+     {
+        let (mut app, _) = App::boot();
+        app.pick_checksum_file(fixtures_dir().join("reference.st5"));
+        assert_eq!(app.checksum_check_kind, Some(ChecksumKind::St5));
+        let total = app.checksum_check_file.as_ref().unwrap().entries.len();
+        assert!(total > 0, "reference.st5 is empty");
+
+        app.run_checksum_check();
+        let rx = app.queue.events();
+        drain(&mut app, &rx, total);
+
+        assert_eq!(app.checksum_check_rows.len(), total);
+        for row in &app.checksum_check_rows {
+            assert_eq!(row.label, "OK", "{}: {}", row.path, row.detail);
+        }
+    }
+
+    /// The two failure paths `cmd_check` prints as `MISSING`/`MISMATCH`
+    /// (`lh-cli/src/main.rs`) — a synthetic checksum file naming one file that does not
+    /// exist beside it and one whose digest does not match the real file that does.
+    #[test]
+    fn checksum_check_reports_missing_and_mismatch_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"hello").unwrap();
+        let content = format!("{}  a.bin\n{}  missing.bin\n", "0".repeat(32), "f".repeat(32));
+        let checksum_path = dir.path().join("check.md5");
+        std::fs::write(&checksum_path, &content).unwrap();
+
+        let (mut app, _) = App::boot();
+        app.pick_checksum_file(checksum_path);
+        assert_eq!(app.checksum_check_kind, Some(ChecksumKind::Md5));
+        app.run_checksum_check();
+
+        let rx = app.queue.events();
+        drain(&mut app, &rx, 2);
+
+        let mut by_path: HashMap<String, &'static str> = app
+            .checksum_check_rows
+            .iter()
+            .map(|r| (r.path.clone(), r.label))
+            .collect();
+        assert_eq!(by_path.remove("a.bin"), Some("MISMATCH"));
+        assert_eq!(by_path.remove("missing.bin"), Some("MISSING"));
+    }
+
+    /// The extension-inference gap `docs/gui-shell.md` §10 Q4 leaves open: an extension
+    /// naming none of `.ffp`/`.md5`/`.st5` is an error, matching `cmd_check`'s own `bail!`,
+    /// not a silent guess.
+    #[test]
+    fn picking_a_checksum_file_with_an_unrecognized_extension_sets_an_error() {
+        let (mut app, _) = App::boot();
+        app.pick_checksum_file(PathBuf::from("/tmp/does-not-need-to-exist/show.txt"));
+
+        assert!(app.error.is_some(), "expected an error, got none");
+        assert_eq!(app.checksum_check_kind, None);
+        assert!(app.checksum_check_file.is_none());
+    }
+
+    /// `Message::PathDropped` routes a `.ffp`/`.md5`/`.st5` to the checksum check panel,
+    /// the same way it already routes a `.torrent` to the torrent check panel.
+    #[test]
+    fn dropping_a_checksum_file_is_routed_to_the_checksum_check_panel() {
+        let path = PathBuf::from("/tmp/does-not-need-to-exist/reference.ffp");
+        let (mut app, _) = App::boot();
+        let _ = update(&mut app, Message::PathDropped(path.clone()));
+
+        assert_eq!(app.checksum_check_path, Some(path));
         assert!(
             app.working_set.is_none(),
             "must not have been treated as a folder to scan"

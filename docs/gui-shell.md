@@ -429,7 +429,7 @@ signature has been read.
 |---|---|---|
 | ~~**S1**~~ | ~~The shell~~ | **Done** — `Area`, the rail, the global path bar, the area pane, the dock with its `Jobs \| Log` toggle. Every existing panel moved into its area unchanged; `run_operation` takes its operation as an argument; `overwrite` split into `convert_overwrite`/`torrent_overwrite`; the window gained a 900×600 minimum size. **No behaviour change** — the existing 14 tests kept passing, five of them with a one-line edit each (§5). See §9 notes. |
 | ~~**S2**~~ | ~~Selection~~ | **Done** — `App::selected: HashSet<PathBuf>`, filled on every `scan`; a select-all checkbox in the file table's header, one per row wired to `Message::FileToggled`; `run_operation` skips any file not in `selected` before its existing per-operation checks. Torrent → Create still reads `working_root` alone. Two new tests: an unticked file gets no job, and clearing the selection entirely does not change what `run_torrent_create` writes. See §9 notes. |
-| **S3** | The checksum areas | Checksum → Create (kind picker, output path, `ChecksumFile::write` after the digests land) and Checksum → Check (`ChecksumFile::read`, one job per entry, per-file results table reusing G4's `JobUpdate` boundary). Tests through the real queue against the fixture corpus and the committed `reference.ffp`/`reference.st5` goldens. |
+| ~~**S3**~~ | ~~The checksum areas~~ | **Done** — Checksum → Create (kind picker, output path, `ChecksumFile::write` after the digests land) and Checksum → Check (`ChecksumFile::read`, one job per entry, per-file results table reusing G4's `JobUpdate` boundary). Tests through the real queue against the fixture corpus and the committed `reference.ffp`/`reference.st5` goldens. See §9 notes. |
 | **S4** | The table widget | Replace the hand-rolled file table with `iced::widget::table`; give Files the wide column set including the encoder vendor string. |
 
 S1 before everything: it is the only one that touches every existing panel, and doing it
@@ -495,6 +495,40 @@ implicit:
   two this milestone added) and a 6-second `DISPLAY=:0 timeout 6 ./target/debug/little-helper`
   run with no panic. The same screenshot-tool gap S1 hit means the checkbox column's on-screen
   alignment is unverified beyond the fixed 24px width both the header and each row share.
+
+### S3 notes
+
+Landed as planned. One shape decision the plan above did not spell out, and one reuse it
+predicted correctly:
+
+* **Entry order is fixed to submission order, not completion order.** `run_operation` now
+  returns every `(JobId, label)` it submits, and `ChecksumCreateBatch::order` keeps that
+  list untouched while a `HashMap<JobId, [u8; 16]>` collects digests as jobs finish out of
+  order on the queue's worker pool. Writing entries in whatever order jobs happened to
+  finish would make a `.ffp` reorder itself between runs of the same working set for no
+  reason a user could see — `lh-cli`'s own `run_batch` re-sorts its results back into
+  submission order for exactly this reason (`lh-cli/src/main.rs`), and the GUI's long-lived
+  queue needed the same fix. `ChecksumCheckBatch`, by contrast, needed no such ordering:
+  its rows are a table for reading, not a file another tool re-parses, so they land in
+  whatever order their jobs finish.
+* **§6's prediction about `report_rows`'s shape held exactly.** `TorrentFileRow` is renamed
+  `FileRow` and is now built by two functions in `job.rs` — `report_rows` (unchanged, G4)
+  and the new `checksum_check_row` — and rendered by one shared `file_rows_panel` in
+  `main.rs` that both `Area::TorrentCheck` and `Area::ChecksumCheck` call with their own
+  title and row `Vec`. No new widget, no new layout: this is the "second caller that
+  pattern was waiting for" §6 named before either function existed.
+* **Checksum → Check infers its kind from the extension and stops there**, matching
+  `cmd_check`'s own `bail!` on an unrecognized one (`lh-cli/src/main.rs`) rather than
+  inventing the picker §10 Q4 sketches — that question is still open, not answered by S3.
+* Real evidence, same bar as S1/S2: `cargo test -p lh-gui` (22 tests, the 16 from S1/S2 plus
+  six this milestone added) including two run against the checked-in `reference.ffp` and
+  `reference.st5` goldens themselves — Checksum → Check reports every entry `OK` against
+  the real fixtures those files describe, and Checksum → Create's written FFP output
+  matches `reference.ffp`'s entries exactly, both through the real queue and `App` state,
+  not by calling `lh_core::checksum` functions directly. Also a 6-second
+  `DISPLAY=:0 timeout 6 ./target/debug/little-helper` run with no panic; the same
+  screenshot-tool gap every milestone has hit means the two new panels' on-screen layout is
+  unverified.
 
 ---
 
