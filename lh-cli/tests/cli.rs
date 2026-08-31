@@ -224,9 +224,10 @@ fn torrent_create_refuses_a_piece_length_clients_would_reject() {
 }
 
 /// The listing's whole job is to let a user check us rather than trust us, so every entry
-/// has to show a date, and the ones we found unusable have to say so where they are read.
+/// shown has to carry a date — and only the entries that answered when checked are shown at
+/// all, so the ones we found dead or unreachable don't clutter every run.
 #[test]
-fn torrent_trackers_dates_every_entry_and_marks_the_dead_ones() {
+fn torrent_trackers_lists_only_the_ones_that_answered() {
     let empty = tempfile::tempdir().unwrap();
     let out = lh()
         .arg("torrent")
@@ -239,28 +240,33 @@ fn torrent_trackers_dates_every_entry_and_marks_the_dead_ones() {
         .clone();
     let text = String::from_utf8(out).unwrap();
 
+    for id in ["dime", "etree", "genesis", "tradersden"] {
+        assert!(text.contains(id), "{id} is missing from the listing");
+    }
     for id in [
         "crosstown",
-        "dime",
-        "etree",
-        "genesis",
         "jamtothis",
         "losslesslegs",
         "mindwarp",
-        "tradersden",
         "yeeshkul",
         "zappateers",
         "zomb",
     ] {
-        assert!(text.contains(id), "{id} is missing from the listing");
+        assert!(
+            !text.contains(id),
+            "{id} never answered when checked and should not be in the listing:\n{text}"
+        );
     }
     assert_eq!(
         text.matches("checked 2026-08-30").count(),
-        11,
-        "every bundled entry carries the date it was checked:\n{text}"
+        4,
+        "every listed entry carries the date it was checked:\n{text}"
     );
-    assert!(text.contains("no DNS A record"), "{text}");
     assert!(text.contains("personal URL needed"), "{text}");
+    assert!(
+        text.contains("2 of 4 entries can be used as they stand"),
+        "{text}"
+    );
     // And it says where a list of the user's own would go.
     assert!(text.contains("trackers.lst"), "{text}");
 }

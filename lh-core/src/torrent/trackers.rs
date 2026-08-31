@@ -71,6 +71,13 @@ impl Health {
     pub fn usable(self) -> bool {
         !matches!(self, Self::PersonalUrl | Self::Broken)
     }
+
+    /// Whether anything answered when we checked. `false` for `Broken` and `Unreachable` —
+    /// `lh torrent trackers` leaves those out, because a listing that still names a host with
+    /// no DNS record is the mistake this module exists to avoid repeating.
+    pub fn responds(self) -> bool {
+        !matches!(self, Self::Broken | Self::Unreachable)
+    }
 }
 
 /// Where an entry came from, so `lh torrent trackers` can show which ones are ours and

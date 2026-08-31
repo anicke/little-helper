@@ -669,26 +669,26 @@ fn confirmation(t: &Tracker) -> String {
 }
 
 /// The list, with what we saw and when. Everything a user needs to decide whether to
-/// believe us or go and look.
+/// believe us or go and look — in two lines per entry, not four: only the trackers that
+/// answered when checked are in here at all, so there is no dead weight left to explain.
 fn cmd_torrent_trackers() -> Result<bool> {
     let list = TrackerList::load().context("reading the tracker list")?;
     let keys = Passkeys::load().context("reading the passkey list")?;
 
-    for t in list.all() {
+    for t in list.all().filter(|t| t.health.responds()) {
         let origin = match t.origin {
             Origin::Bundled => String::new(),
             Origin::User => "  (yours)".to_string(),
             Origin::Overridden => "  (replaced by your own list)".to_string(),
         };
-        println!("{:<14}{}{origin}", t.id, t.name);
-        println!("{:<14}{}", "", t.announce);
+        println!("{:<14}{}{origin}  —  {}", t.id, t.name, confirmation(t));
 
-        let mut third = confirmation(t);
+        let mut second = t.announce.clone();
         if let Some(saw) = &t.evidence {
-            third.push_str(": ");
-            third.push_str(saw);
+            second.push_str(" — ");
+            second.push_str(saw);
         }
-        println!("{:<14}{third}", "");
+        println!("{:<14}{second}", "");
 
         let mut flags = Vec::new();
         if t.private {
@@ -706,11 +706,13 @@ fn cmd_torrent_trackers() -> Result<bool> {
         if !flags.is_empty() {
             println!("{:<14}{}", "", flags.join("; "));
         }
-        println!();
     }
 
-    let usable = list.iter().filter(|t| t.health.usable()).count();
-    let total = list.iter().count();
+    let usable = list
+        .iter()
+        .filter(|t| t.health.responds() && t.health.usable())
+        .count();
+    let total = list.iter().filter(|t| t.health.responds()).count();
     println!("{usable} of {total} entries can be used as they stand.");
     match &list.user_list {
         Some(path) if path.exists() => println!("your own list: {}", path.display()),
