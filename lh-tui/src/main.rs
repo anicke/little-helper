@@ -44,6 +44,33 @@ struct FileRow {
     status: Status,
 }
 
+/// Every color/style this UI uses, named once. Deliberately avoids inverted
+/// backgrounds (`.bg(Color::Cyan)`, `.bg(Color::DarkGray)`) — those assume a dark
+/// terminal and clash on a light one, since ratatui's named colors map to the
+/// terminal's own ANSI palette rather than fixed RGB. Bold/underline read as
+/// "header" or "accent" regardless of the terminal's background.
+struct Theme {
+    accent: Style,
+    ok: Style,
+    warn: Style,
+    error: Style,
+    dim: Style,
+    header: Style,
+}
+
+impl Theme {
+    fn new() -> Self {
+        Theme {
+            accent: Style::default().fg(Color::Cyan),
+            ok: Style::default().fg(Color::Green).bold(),
+            warn: Style::default().fg(Color::Yellow),
+            error: Style::default().fg(Color::Red).bold(),
+            dim: Style::default().fg(Color::DarkGray),
+            header: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
     let mut path = PathBuf::from(".");
     let mut recursive = false;
@@ -91,6 +118,7 @@ fn run(mut terminal: DefaultTerminal, root: &Path, files: Vec<AudioFile>) -> io:
     let mut failed_count = 0usize;
     let start = Instant::now();
     let mut tick = 0usize;
+    let theme = Theme::new();
 
     loop {
         while let Ok(event) = events.try_recv() {
@@ -133,7 +161,7 @@ fn run(mut terminal: DefaultTerminal, root: &Path, files: Vec<AudioFile>) -> io:
             mismatch: mismatch_count,
             failed: failed_count,
         };
-        terminal.draw(|frame| draw(frame, root, &rows, &stats, start, tick))?;
+        terminal.draw(|frame| draw(frame, root, &rows, &stats, start, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -169,6 +197,7 @@ fn draw(
     stats: &Stats,
     start: Instant,
     tick: usize,
+    theme: &Theme,
 ) {
     let area = frame.area();
     let chunks = Layout::default()
@@ -181,21 +210,25 @@ fn draw(
         ])
         .split(area);
 
-    draw_header(frame, chunks[0], root, stats, start);
-    draw_table(frame, chunks[1], rows, tick);
-    draw_gauge(frame, chunks[2], stats);
-    draw_footer(frame, chunks[3]);
+    draw_header(frame, chunks[0], root, stats, start, theme);
+    draw_table(frame, chunks[1], rows, tick, theme);
+    draw_gauge(frame, chunks[2], stats, theme);
+    draw_footer(frame, chunks[3], theme);
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, root: &Path, stats: &Stats, start: Instant) {
+fn draw_header(
+    frame: &mut Frame,
+    area: Rect,
+    root: &Path,
+    stats: &Stats,
+    start: Instant,
+    theme: &Theme,
+) {
     let elapsed = start.elapsed().as_secs_f32();
     let line = Line::from(vec![
-        Span::styled(
-            " lh-tui ",
-            Style::default().bg(Color::Cyan).fg(Color::Black).bold(),
-        ),
+        Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(" verify  "),
-        Span::styled(root.display().to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(root.display().to_string(), theme.dim),
         Span::raw(format!(
             "   {} / {} files   {elapsed:.1}s",
             stats.done, stats.total
@@ -203,19 +236,19 @@ fn draw_header(frame: &mut Frame, area: Rect, root: &Path, stats: &Stats, start:
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(theme.dim);
     frame.render_widget(Paragraph::new(line).block(block), area);
 }
 
-fn draw_table(frame: &mut Frame, area: Rect, rows: &[FileRow], tick: usize) {
+fn draw_table(frame: &mut Frame, area: Rect, rows: &[FileRow], tick: usize, theme: &Theme) {
     let spin = SPINNER[tick / 2 % SPINNER.len()];
     let table_rows = rows.iter().map(|row| {
-        let (label, style) = status_cell(&row.status, spin);
+        let (label, style) = status_cell(&row.status, spin, theme);
         let detail = status_detail(&row.status);
         Row::new(vec![
             Cell::from(label).style(style),
             Cell::from(row.name.clone()),
-            Cell::from(detail).style(Style::default().fg(Color::DarkGray)),
+            Cell::from(detail).style(theme.dim),
         ])
     });
 
@@ -227,35 +260,25 @@ fn draw_table(frame: &mut Frame, area: Rect, rows: &[FileRow], tick: usize) {
             Constraint::Percentage(45),
         ],
     )
-    .header(
-        Row::new(vec!["status", "file", "detail"]).style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
+    .header(Row::new(vec!["status", "file", "detail"]).style(theme.header))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .title(" files ")
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(theme.dim),
     );
 
     frame.render_widget(table, area);
 }
 
-fn status_cell(status: &Status, spin: char) -> (String, Style) {
+fn status_cell(status: &Status, spin: char, theme: &Theme) -> (String, Style) {
     match status {
-        Status::Pending => ("pending".to_string(), Style::default().fg(Color::DarkGray)),
-        Status::Running => (format!("{spin} running"), Style::default().fg(Color::Cyan)),
-        Status::Ok => ("OK".to_string(), Style::default().fg(Color::Green).bold()),
-        Status::NoMd5 => ("NO MD5".to_string(), Style::default().fg(Color::Yellow)),
-        Status::Mismatch { .. } => (
-            "MISMATCH".to_string(),
-            Style::default().fg(Color::Red).bold(),
-        ),
-        Status::Failed(_) => ("FAILED".to_string(), Style::default().fg(Color::Red).bold()),
+        Status::Pending => ("pending".to_string(), theme.dim),
+        Status::Running => (format!("{spin} running"), theme.accent),
+        Status::Ok => ("OK".to_string(), theme.ok),
+        Status::NoMd5 => ("NO MD5".to_string(), theme.warn),
+        Status::Mismatch { .. } => ("MISMATCH".to_string(), theme.error),
+        Status::Failed(_) => ("FAILED".to_string(), theme.error),
     }
 }
 
@@ -274,18 +297,18 @@ fn status_detail(status: &Status) -> String {
     }
 }
 
-fn draw_gauge(frame: &mut Frame, area: Rect, stats: &Stats) {
+fn draw_gauge(frame: &mut Frame, area: Rect, stats: &Stats, theme: &Theme) {
     let ratio = if stats.total == 0 {
         0.0
     } else {
         stats.done as f64 / stats.total as f64
     };
-    let color = if stats.mismatch > 0 || stats.failed > 0 {
-        Color::Red
+    let style = if stats.mismatch > 0 || stats.failed > 0 {
+        theme.error
     } else if stats.done == stats.total {
-        Color::Green
+        theme.ok
     } else {
-        Color::Cyan
+        theme.accent
     };
     let label = format!(
         "{}/{} ok:{} no-md5:{} mismatch:{} failed:{}",
@@ -295,18 +318,15 @@ fn draw_gauge(frame: &mut Frame, area: Rect, stats: &Stats) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(theme.dim),
         )
-        .gauge_style(Style::default().fg(color))
+        .gauge_style(style)
         .ratio(ratio)
         .label(label);
     frame.render_widget(gauge, area);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect) {
-    let line = Line::from(Span::styled(
-        " q / esc quit ",
-        Style::default().fg(Color::DarkGray),
-    ));
+fn draw_footer(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let line = Line::from(Span::styled(" q / esc quit ", theme.dim));
     frame.render_widget(Paragraph::new(line), area);
 }
