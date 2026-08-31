@@ -8,7 +8,10 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
 crossterm.workspace = true
 hex.workspace = true
+lh-cli = { path = "../lh-cli" }
 lh-core.workspace = true
 ratatui.workspace = true

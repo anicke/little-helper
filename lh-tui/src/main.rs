@@ -1,8 +1,12 @@
-//! `lh-tui` — a spike testing whether a terminal UI (ratatui) is easier to make look decent
-//! than `lh-gui`'s Iced shell. One command for now: verify, run over a folder exactly like
-//! `lh verify` (`lh-cli/src/main.rs`'s `cmd_verify`), its results streamed live into a table
-//! through the same `lh_core::job::Queue` the GUI uses, instead of a scrolling `println!`
-//! list or a widget tree.
+//! `lh-tui` — a terminal UI for Little Helper. It parses the exact same subcommands as
+//! `lh` (`lh-cli/src/lib.rs`, shared as a library so both binaries stay in lockstep), so
+//! every command `lh` knows is callable here too — `lh-tui convert --to flac .` works the
+//! same as `lh convert --to flac .`.
+//!
+//! Only `verify` has an actual screen so far: results streamed live into a table through
+//! the same `lh_core::job::Queue` the GUI uses, instead of a scrolling `println!` list.
+//! Every other command runs exactly as `lh` would — printing to the terminal rather than
+//! drawing one — until it gets a screen of its own.
 //!
 //! `lh_core::analysis::verify` decodes the whole file and never calls `Progress::report`
 //! mid-file, so every job here goes straight from Running to a terminal status with no
@@ -10,14 +14,15 @@
 //! the table and the overall gauge.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
+use lh_cli::{Cli, Command, Paths};
 use lh_core::analysis::{Verification, verify};
 use lh_core::job::{Event, Queue};
 use lh_core::model::AudioFile;
-use lh_core::scan;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -71,29 +76,79 @@ impl Theme {
     }
 }
 
-fn main() -> io::Result<()> {
-    let mut path = PathBuf::from(".");
-    let mut recursive = false;
-    for arg in std::env::args().skip(1) {
-        match arg.as_str() {
-            "-r" | "--recursive" => recursive = true,
-            other => path = PathBuf::from(other),
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Verify(paths) => run_verify(paths),
+        other => run_headless(Cli { command: other }),
+    }
+}
+
+/// Every command besides `verify` doesn't have a screen yet, so it runs exactly the way
+/// `lh` itself would — same output, same exit-code contract — just from this binary.
+fn run_headless(cli: Cli) -> ExitCode {
+    match lh_cli::run(cli) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("lh-tui: {e:#}");
+            ExitCode::from(2)
         }
     }
+}
 
-    let set = scan::scan(&path, recursive).map_err(io::Error::other)?;
-    if set.files.is_empty() {
-        eprintln!("no audio files found under {}", path.display());
-        return Ok(());
+fn run_verify(paths: Paths) -> ExitCode {
+    let label = describe(&paths);
+    let (files, mut clean) = match lh_cli::collect(&paths) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("lh-tui: {e:#}");
+            return ExitCode::from(2);
+        }
+    };
+    if files.is_empty() {
+        eprintln!("no audio files found under {label}");
+        return if clean {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
     }
 
     let terminal = ratatui::init();
-    let result = run(terminal, &path, set.files);
+    let result = run(terminal, &label, files);
     ratatui::restore();
-    result
+
+    match result {
+        Ok(ok) => {
+            clean &= ok;
+            if clean {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("lh-tui: {e}");
+            ExitCode::from(2)
+        }
+    }
 }
 
-fn run(mut terminal: DefaultTerminal, root: &Path, files: Vec<AudioFile>) -> io::Result<()> {
+/// What the header shows for where these files came from: the one path given, or a count
+/// when there were several — `Paths` allows more than one, unlike the plain folder this
+/// screen used to assume.
+fn describe(paths: &Paths) -> String {
+    match paths.paths.as_slice() {
+        [one] => one.display().to_string(),
+        many => format!("{} paths", many.len()),
+    }
+}
+
+/// Returns whether every file verified cleanly (no mismatches, no failures) — the same
+/// notion of "ok" `lh verify`'s exit code uses, so quitting the screen early still leaves
+/// scripts able to tell success from trouble via `$?`.
+fn run(mut terminal: DefaultTerminal, root: &str, files: Vec<AudioFile>) -> io::Result<bool> {
     let total = files.len();
     let mut rows: Vec<FileRow> = files
         .iter()
@@ -178,7 +233,7 @@ fn run(mut terminal: DefaultTerminal, root: &Path, files: Vec<AudioFile>) -> io:
         }
         tick = tick.wrapping_add(1);
     }
-    Ok(())
+    Ok(mismatch_count == 0 && failed_count == 0)
 }
 
 struct Stats {
@@ -192,7 +247,7 @@ struct Stats {
 
 fn draw(
     frame: &mut Frame,
-    root: &Path,
+    root: &str,
     rows: &[FileRow],
     stats: &Stats,
     start: Instant,
@@ -219,7 +274,7 @@ fn draw(
 fn draw_header(
     frame: &mut Frame,
     area: Rect,
-    root: &Path,
+    root: &str,
     stats: &Stats,
     start: Instant,
     theme: &Theme,
@@ -228,7 +283,7 @@ fn draw_header(
     let line = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(" verify  "),
-        Span::styled(root.display().to_string(), theme.dim),
+        Span::styled(root.to_string(), theme.dim),
         Span::raw(format!(
             "   {} / {} files   {elapsed:.1}s",
             stats.done, stats.total
