@@ -25,10 +25,8 @@ walkdir = "2"
 which = "8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
 directories = "6"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossbeam-channel = "0.5"
 rayon = "1"
 ctrlc = "3"
