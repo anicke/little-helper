@@ -162,34 +162,34 @@ pub enum TorrentCommand {
 #[derive(clap::Args)]
 pub struct TorrentCreateArgs {
     /// The folder to make a torrent for, or a single file.
-    path: PathBuf,
+    pub path: PathBuf,
     /// Where to write the .torrent. Defaults to beside the source folder — writing it
     /// inside the folder would add a file to what the torrent describes.
     #[arg(short, long)]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
     /// A tracker: an id from `lh torrent trackers`, or an announce URL, which is used
     /// verbatim. Repeat it for more; each one becomes its own tier.
     #[arg(long = "tracker", value_name = "ID|URL")]
-    trackers: Vec<String>,
+    pub trackers: Vec<String>,
     /// Piece length in bytes: a power of two from 16384 to 16777216. Chosen from the
     /// payload size when omitted.
     #[arg(long, value_name = "BYTES")]
-    piece_length: Option<u64>,
+    pub piece_length: Option<u64>,
     /// Mark the torrent private (BEP 27). This is part of the infohash, so it cannot be
     /// added or removed afterwards — it makes a different torrent.
     #[arg(long)]
-    private: bool,
+    pub private: bool,
     /// The source tag some private trackers require. Also part of the infohash.
     #[arg(long, value_name = "TAG")]
-    source: Option<String>,
+    pub source: Option<String>,
     #[arg(long, value_name = "TEXT")]
-    comment: Option<String>,
+    pub comment: Option<String>,
     /// Include files normally left out: Thumbs.db, .DS_Store, other .torrent files.
     #[arg(long)]
-    include_all: bool,
+    pub include_all: bool,
     /// Overwrite an existing .torrent. The payload is never touched either way.
     #[arg(long)]
-    force: bool,
+    pub force: bool,
 }
 
 #[derive(clap::Args)]

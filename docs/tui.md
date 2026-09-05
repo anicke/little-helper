@@ -60,7 +60,7 @@ Like `lh-gui`, it adds no domain logic of its own (Principle 4) — a screen cal
   `compute`, etc. are correct. What a screen's own code can be held to is the same bar
   `lh-gui`'s G-milestones use: compiled, and run for real (§0 below "real evidence" in every
   `gui.md`/`gui-shell.md` milestone) — a screenshot tool is unavailable for `lh-gui`'s native
-  window, but a terminal screen can at least be captured as text; §5 records what has and
+  window, but a terminal screen can at least be captured as text; §6 records what has and
   has not actually been looked at.
 
 ---
@@ -92,7 +92,7 @@ Everything else about scope matches `lh-gui`'s own framing: `lh-tui` adds no ope
 `lh-core` does not already expose (Principle 4), and a command with no screen yet keeps
 working exactly as `lh` does — `run_headless` is not a placeholder to delete, it is the
 permanent fallback for whichever commands never earn a screen of their own (`tools`,
-`torrent info` and `info` are plausibly fine as plain text forever; §4 Q1).
+`torrent info` and `info` are plausibly fine as plain text forever; §7 Q1).
 
 ---
 
@@ -181,19 +181,72 @@ One screen serves `Command::Ffp`/`Md5`/`St5`, parameterized by `ChecksumKind`, e
 suite covering `ChecksumArgs` now exposing public fields) and `cargo clippy --all-targets`
 both clean. The compiled binary was run for real inside `tmux` (a real pty — this sandbox has
 no screenshot tool for a native window, per every `gui.md`/`gui-shell.md` milestone, but a
-terminal screen can be captured as text, which §5 above flagged as the actual bar): `lh-tui
+terminal screen can be captured as text, which §6 above flagged as the actual bar): `lh-tui
 ffp lh-core/tests/fixtures` showed the table filling in live (`running` → `OK`/`FAILED`),
 each `OK` row's digest matching what `lh ffp` prints for the same files, the gauge coloring
 red on the first failure, `q` restoring the terminal cleanly, and the post-quit stdout render
 (`name:hash` lines) exactly matching `ChecksumFile::render()`'s FFP format. `-o /tmp/out.ffp`
 against two fixtures wrote a file whose two lines matched submission order, not completion
-order. Verify's own screen (§0, previously untested per this doc's own §5) was run the same
+order. Verify's own screen (§0, previously untested per this doc's own §6) was run the same
 way over the same corpus: OK/NO MD5/MISMATCH/FAILED all rendered correctly and the gauge/exit
-code (`1`, matching the real mismatch+failure) were correct — closing the gap §5 named.
+code (`1`, matching the real mismatch+failure) were correct — closing the gap §6 named.
 
 ---
 
-## 4. Screens not yet planned
+## 4. TUI3 — Torrent create / check screens — done
+
+Two screens, not one: `create_with_progress` walks the whole payload as a single sequential
+piece-hashing pass, so there is one job on a queue of one and one row of progress to show,
+not a batch table; `check`/`check_with_progress` produces a per-file `TorrentReport` only
+once the whole pass finishes, so its screen shows a "hashing…" placeholder during the run
+and the file table (the same shape as `lh-gui` G4's `TorrentFileRow`/`report_rows`, ported
+to a ratatui `Table`) only after. Neither fits §2's per-file pattern, which is why they were
+left out of it — a single job with sub-item progress, not N independent files.
+
+* **Create's cancellation is real.** `create_with_progress`'s progress callback returns a
+  `bool` the same way `lh-cli`'s own `cmd_torrent_create` uses it — `false` stops the hash
+  within one piece. So the create screen's `q`/`Esc`/`Ctrl-C` waits for the job's actual
+  `Done` (bounded by one piece's hash time) instead of breaking the draw loop immediately
+  the way every other screen does, so the reported outcome (cancelled vs. finished vs.
+  errored) is the real one rather than a guess made before the job caught up.
+* **Check's cancellation is not.** `check_with_progress` (`lh-core/src/torrent/verify.rs`)
+  has no cancellation checkpoint — its progress callback returns `()`, not a `bool` — a gap
+  `lh-gui`'s G4 already hit and accepted rather than changing `lh-core` (`lh-gui/src/main.rs`'s
+  `run_torrent_check` comment). The check screen inherits the same limitation: `q`/`Esc`/
+  `Ctrl-C` breaks the draw loop immediately, same as verify/checksum, but the hash keeps
+  running in the background until it finishes — no worse than plain `lh torrent check`,
+  which cannot be interrupted at all short of killing the process, and a strict improvement
+  over it (a live gauge instead of silence) everywhere except that one edge.
+* **`--quick`** (`check_sizes`, no piece hashing) reuses the same screen and queue — it just
+  produces a `Finished` event almost immediately, with no `Progress` events in between, so
+  the "hashing…" placeholder is skipped in practice rather than needing its own code path.
+* **Create's summary panel**, shown once the job finishes: file count, total size, piece
+  count/length, infohash, and any excluded paths with `Skipped::reason()` — the same content
+  `cmd_torrent_create` prints, plus the resolved tracker tiers and `private`/`source` flags
+  shown above it throughout the run (known before hashing starts, unlike everything from
+  `Created` itself). A cancelled or errored run replaces the summary with that outcome
+  instead, colored `warn`/`error` on the gauge to match.
+* **Check's table** skips `Padding` rows and appends `extra_local` as `EXTRA`, exactly like
+  `lh-gui`'s `report_rows` and `lh-cli`'s `cmd_torrent_check` — the same three renderings of
+  one `TorrentReport`, kept in step by eye since there is nowhere shared to put them
+  (`lh-tui` does not depend on `lh-gui`, and vice versa).
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (136 tests, unchanged)
+and `cargo clippy --all-targets` all clean; `cargo fmt --check` clean for `lh-cli`/`lh-tui`
+(pre-existing `lh-gui` diffs are unrelated to this change, from a rustfmt version drift).
+Run for real inside `tmux`: `lh-tui torrent create` against a two-file fixture folder wrote
+a `.torrent` whose infohash on screen matched `lh torrent info` read back off disk;
+`lh-tui torrent check` against that same torrent and payload reported both files `OK` with
+`1 of 1 pieces verified`; corrupting one file's size (appending bytes) turned the same check
+into `WRONG SIZE` for that file and `PARTIAL` for its piece-sharing neighbour, with the gauge
+turning red and the label reporting `0 of 1 pieces verified, 0 failed, 1 unverifiable`
+(matching `verify.rs`'s attribution rule: a shared piece convicts neither file outright);
+`--quick` against the same corrupted payload reported `WRONG SIZE` / `SIZE OK` with no piece
+count at all. `q` exited cleanly in every case (immediately for check, and — separately
+confirmed by inspection of the cancellation-wait logic, since the fixture pieces hash faster
+than a keypress — bounded by one piece for create).
+
+## 5. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
@@ -201,10 +254,6 @@ Named so the gap is visible, not to commit to an order:
   (`to_wav_with_progress`'s frame counts, `to_flac_cancellable`'s killable child — J2). The
   richest screen to build, and the reason §2 calls out progress rendering as the real
   per-screen variable.
-* **Torrent create / check** — `create_with_progress`'s piece counts, and `check`'s
-  per-file `TorrentReport` (already rendered as a table once, for `lh-gui` G4's
-  `TorrentFileRow`/`report_rows` — likely reusable as data even though the widget is
-  ratatui, not Iced).
 * **SBE, Check, Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really
   needed for a single pass (`sbe`, `check` don't decode audio; `info`/`tools`/`torrent
   info`/`trackers` don't even touch a `Queue` in `lh-cli` today). Plausibly fine as
@@ -214,7 +263,7 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 5. What has and has not been checked
+## 6. What has and has not been checked
 
 * **Verify and checksum screens**: both run for real in a `tmux` pty against the fixture
   corpus (§3's "Real evidence") — table, gauge, quit key and exit code all confirmed, closing
@@ -237,10 +286,10 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 6. Open questions
+## 7. Open questions
 
 1. **Do `info`, `tools`, `torrent info`/`trackers` ever get screens, or stay headless
-   forever?** §4 leans "stay headless" — a ratatui table over static, non-streaming output
+   forever?** §5 leans "stay headless" — a ratatui table over static, non-streaming output
    is not an obvious improvement over `lh`'s own text — but nobody has asked either way.
 2. **Does a screen need a `--no-tui` escape hatch** for scripting (piping `lh-tui verify`'s
    output, redirecting to a file where an alternate-screen ratatui app would misbehave)? The
