@@ -29,7 +29,7 @@ use lh_core::torrent::{
     Verdict, check_sizes, check_with_progress, create_with_progress, default_output, resolve,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
