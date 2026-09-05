@@ -219,6 +219,14 @@ Named so the gap is visible, not to commit to an order:
 * **Verify and checksum screens**: both run for real in a `tmux` pty against the fixture
   corpus (§3's "Real evidence") — table, gauge, quit key and exit code all confirmed, closing
   the gap this section used to flag ("compiled but never actually run").
+* **Verify screen against a real show, not just the fixture corpus.** Run against a genuine
+  17-track FLAC show (~600 MB, already carrying its own `.ffp`/`.md5`) sitting in
+  `~/Downloads`: all 17 decoded and reported `OK` live in the table, the gauge tracked
+  progress correctly across a run that took under a minute on 12 cores, `q` exited cleanly
+  (code 0), and `lh check` against that show's own committed `.ffp` and `.md5` independently
+  reported all 17 (and, for the `.md5`, all 20 including the artwork and info text) `OK` too
+  — three independent checks (the screen's own decode, and both sidecar files) agreeing on
+  real trader material, not synthetic fixtures.
 * **Headless passthrough**: `run_headless` is a two-line wrapper around an already-tested
   `lh_cli::run`, so the only real risk is argument parsing drift between `lh` and `lh-tui` —
   and there is none, since both parse the same `Cli` (§0).
