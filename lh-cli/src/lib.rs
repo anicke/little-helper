@@ -232,10 +232,10 @@ pub struct ConvertArgs {
 #[derive(clap::Args)]
 pub struct ChecksumArgs {
     #[command(flatten)]
-    paths: Paths,
+    pub paths: Paths,
     /// Write to this file instead of printing to stdout.
     #[arg(short, long)]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 }
 
 /// Returns whether every file passed.

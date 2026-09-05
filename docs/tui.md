@@ -145,9 +145,7 @@ sub-file progress exists for `checksum::compute` either.
 
 ---
 
-## 3. TUI2 — Checksum screen (ffp / md5 / st5)
-
-*Planned this session, next to build.*
+## 3. TUI2 — Checksum screen (ffp / md5 / st5) — done
 
 One screen serves `Command::Ffp`/`Md5`/`St5`, parameterized by `ChecksumKind`, exactly as
 `lh-cli`'s single `cmd_checksum(kind, args)` already serves all three (`lh-cli/src/lib.rs:376`)
@@ -179,6 +177,20 @@ One screen serves `Command::Ffp`/`Md5`/`St5`, parameterized by `ChecksumKind`, e
 * **Return value**: whether every file computed cleanly and (if `--output` was given) the
   write succeeded — same shape as `cmd_checksum`'s own `Ok(bool)`.
 
+**Real evidence.** `cargo test --workspace` (136 tests, unchanged, plus `lh-cli`'s existing
+suite covering `ChecksumArgs` now exposing public fields) and `cargo clippy --all-targets`
+both clean. The compiled binary was run for real inside `tmux` (a real pty — this sandbox has
+no screenshot tool for a native window, per every `gui.md`/`gui-shell.md` milestone, but a
+terminal screen can be captured as text, which §5 above flagged as the actual bar): `lh-tui
+ffp lh-core/tests/fixtures` showed the table filling in live (`running` → `OK`/`FAILED`),
+each `OK` row's digest matching what `lh ffp` prints for the same files, the gauge coloring
+red on the first failure, `q` restoring the terminal cleanly, and the post-quit stdout render
+(`name:hash` lines) exactly matching `ChecksumFile::render()`'s FFP format. `-o /tmp/out.ffp`
+against two fixtures wrote a file whose two lines matched submission order, not completion
+order. Verify's own screen (§0, previously untested per this doc's own §5) was run the same
+way over the same corpus: OK/NO MD5/MISMATCH/FAILED all rendered correctly and the gauge/exit
+code (`1`, matching the real mismatch+failure) were correct — closing the gap §5 named.
+
 ---
 
 ## 4. Screens not yet planned
@@ -204,15 +216,16 @@ Named so the gap is visible, not to commit to an order:
 
 ## 5. What has and has not been checked
 
-* **Verify screen**: compiled and run for real — the commits' own testing is unrecorded
-  beyond "it compiles," which this doc flags as a gap rather than papering over it, matching
-  every other doc's standard here. Before TUI2 lands, run it against the fixture corpus
-  (`lh-core/tests/fixtures`) with a real terminal and confirm the table, gauge and quit key
-  all behave, the same "compiles vs. was run" distinction `docs/job-queue.md` and `gui.md`
-  §G0 insist on elsewhere.
+* **Verify and checksum screens**: both run for real in a `tmux` pty against the fixture
+  corpus (§3's "Real evidence") — table, gauge, quit key and exit code all confirmed, closing
+  the gap this section used to flag ("compiled but never actually run").
 * **Headless passthrough**: `run_headless` is a two-line wrapper around an already-tested
   `lh_cli::run`, so the only real risk is argument parsing drift between `lh` and `lh-tui` —
   and there is none, since both parse the same `Cli` (§0).
+* **Not yet checked anywhere**: Ctrl-C specifically (only `q` has been pressed by hand so
+  far — the code path is identical, per §0/§2, but untried); any screen on a narrower
+  terminal than the 100–120 columns used above, where the fixed-width status column and
+  percentage-width columns have not been checked for wrapping or truncation.
 
 ---
 
