@@ -19,7 +19,8 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
 | M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; see [docs/job-queue.md](docs/job-queue.md) |
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
-| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell is being revamped: [docs/gui-shell.md](docs/gui-shell.md), S1 (rail + dock) done, S2–S4 not started |
+| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell is being revamped: [docs/gui-shell.md](docs/gui-shell.md), S1–S3 done, S4 not started |
+| `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify` and `ffp`/`md5`/`st5` have real live screens, everything else runs headless like `lh` itself |
 | M4 Packaging | not started |
 
 136 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
@@ -210,6 +211,11 @@ the CLI renders a progress bar from the same events.
 ---
 
 ## 4. GUI
+
+*There is also `lh-tui`, a terminal front end — independent screens invoked directly
+(`lh-tui verify`, `lh-tui ffp`, ...), not a menu-driven shell like the GUI below. It is not a
+numbered milestone here; its own scope and progress are tracked in
+[docs/tui.md](docs/tui.md), not in this section.*
 
 **Framework: Iced 0.14** (just released, so the API-churn risk that dogged Iced through the
 0.14 development cycle is at its low point). Its subscription / `Task` model is a natural fit
