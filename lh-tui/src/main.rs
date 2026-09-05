@@ -55,6 +55,21 @@ struct FileRow {
     status: Status,
 }
 
+/// Color themes this UI can draw with. `Default` relies on the terminal's own ANSI
+/// palette (see `Theme::new`'s doc comment); the rest are fixed RGB palettes already
+/// shipped by name in plenty of other Go/Rust TUIs (bottom, yazi, lazygit, bat, ...),
+/// so `--theme nord` etc. reads the same set of hues here as it does there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ThemeName {
+    Default,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    Nord,
+    Dracula,
+    Gruvbox,
+    TokyoNight,
+}
+
 /// Every color/style this UI uses, named once. Deliberately avoids inverted
 /// backgrounds (`.bg(Color::Cyan)`, `.bg(Color::DarkGray)`) — those assume a dark
 /// terminal and clash on a light one, since ratatui's named colors map to the
@@ -70,31 +85,88 @@ struct Theme {
 }
 
 impl Theme {
-    fn new() -> Self {
+    fn new(name: ThemeName) -> Self {
+        match name {
+            ThemeName::Default => Theme {
+                accent: Style::default().fg(Color::Cyan),
+                ok: Style::default().fg(Color::Green).bold(),
+                warn: Style::default().fg(Color::Yellow),
+                error: Style::default().fg(Color::Red).bold(),
+                dim: Style::default().fg(Color::DarkGray),
+                header: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            },
+            // Mauve, green, yellow, red, overlay0.
+            ThemeName::CatppuccinMocha => {
+                Theme::palette(0xcba6f7, 0xa6e3a1, 0xf9e2af, 0xf38ba8, 0x6c7086)
+            }
+            // Mauve, green, yellow, red, overlay0 (Latte's light-background variants).
+            ThemeName::CatppuccinLatte => {
+                Theme::palette(0x8839ef, 0x40a02b, 0xdf8e1d, 0xd20f39, 0x9ca0b0)
+            }
+            // Frost cyan (nord8), aurora green (nord14)/yellow (nord13)/red (nord11), nord3.
+            ThemeName::Nord => Theme::palette(0x88c0d0, 0xa3be8c, 0xebcb8b, 0xbf616a, 0x4c566a),
+            // Purple, green, yellow, red, comment.
+            ThemeName::Dracula => Theme::palette(0xbd93f9, 0x50fa7b, 0xf1fa8c, 0xff5555, 0x6272a4),
+            // Bright purple, green, yellow, red, gray.
+            ThemeName::Gruvbox => Theme::palette(0xd3869b, 0xb8bb26, 0xfabd2f, 0xfb4934, 0x928374),
+            // Purple, green, yellow, red (magenta/pink role omitted), comment.
+            ThemeName::TokyoNight => {
+                Theme::palette(0xbb9af7, 0x9ece6a, 0xe0af68, 0xf7768e, 0x565f89)
+            }
+        }
+    }
+
+    /// Builds a theme from five packed-RGB hex colors, one per role — the same five every
+    /// named palette above maps its own hues onto. `header` stays modifier-only regardless
+    /// of theme: nothing here ever sets a background, so bold+underline is what stays
+    /// legible no matter what the terminal's own background is.
+    fn palette(accent: u32, ok: u32, warn: u32, error: u32, dim: u32) -> Self {
         Theme {
-            accent: Style::default().fg(Color::Cyan),
-            ok: Style::default().fg(Color::Green).bold(),
-            warn: Style::default().fg(Color::Yellow),
-            error: Style::default().fg(Color::Red).bold(),
-            dim: Style::default().fg(Color::DarkGray),
+            accent: Style::default().fg(rgb(accent)),
+            ok: Style::default().fg(rgb(ok)).bold(),
+            warn: Style::default().fg(rgb(warn)),
+            error: Style::default().fg(rgb(error)).bold(),
+            dim: Style::default().fg(rgb(dim)),
             header: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         }
     }
 }
 
+fn rgb(hex: u32) -> Color {
+    Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// `lh-tui`'s own top-level args: the same subcommands `lh_cli::Cli` parses, plus a
+/// `--theme` flag that only makes sense for a screen-drawing binary, so it lives here
+/// rather than on the `Cli` shared with the headless `lh` binary.
+#[derive(Parser)]
+#[command(
+    name = "lh-tui",
+    version,
+    about = "Little Helper — lossless audio for traders, from a terminal UI"
+)]
+struct Args {
+    /// Color theme for the verify/checksum/torrent screens.
+    #[arg(long, value_enum, default_value = "default")]
+    theme: ThemeName,
+    #[command(subcommand)]
+    command: Command,
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Args::parse();
+    let theme = cli.theme;
     match cli.command {
-        Command::Verify(paths) => run_verify(paths),
-        Command::Ffp(args) => run_checksum(ChecksumKind::Ffp, args),
-        Command::Md5(args) => run_checksum(ChecksumKind::Md5, args),
-        Command::St5(args) => run_checksum(ChecksumKind::St5, args),
+        Command::Verify(paths) => run_verify(paths, theme),
+        Command::Ffp(args) => run_checksum(ChecksumKind::Ffp, args, theme),
+        Command::Md5(args) => run_checksum(ChecksumKind::Md5, args, theme),
+        Command::St5(args) => run_checksum(ChecksumKind::St5, args, theme),
         Command::Torrent {
             command: TorrentCommand::Create(args),
-        } => run_torrent_create(args),
+        } => run_torrent_create(args, theme),
         Command::Torrent {
             command: TorrentCommand::Check { file, path, quick },
-        } => run_torrent_check(file, path, quick),
+        } => run_torrent_check(file, path, quick, theme),
         other => run_headless(Cli { command: other }),
     }
 }
@@ -112,7 +184,7 @@ fn run_headless(cli: Cli) -> ExitCode {
     }
 }
 
-fn run_verify(paths: Paths) -> ExitCode {
+fn run_verify(paths: Paths, theme: ThemeName) -> ExitCode {
     let label = describe(&paths);
     let (files, mut clean) = match lh_cli::collect(&paths) {
         Ok(v) => v,
@@ -131,7 +203,7 @@ fn run_verify(paths: Paths) -> ExitCode {
     }
 
     let terminal = ratatui::init();
-    let result = run(terminal, &label, files);
+    let result = run(terminal, &label, files, Theme::new(theme));
     ratatui::restore();
 
     match result {
@@ -163,7 +235,12 @@ fn describe(paths: &Paths) -> String {
 /// Returns whether every file verified cleanly (no mismatches, no failures) — the same
 /// notion of "ok" `lh verify`'s exit code uses, so quitting the screen early still leaves
 /// scripts able to tell success from trouble via `$?`.
-fn run(mut terminal: DefaultTerminal, root: &str, files: Vec<AudioFile>) -> io::Result<bool> {
+fn run(
+    mut terminal: DefaultTerminal,
+    root: &str,
+    files: Vec<AudioFile>,
+    theme: Theme,
+) -> io::Result<bool> {
     let total = files.len();
     let mut rows: Vec<FileRow> = files
         .iter()
@@ -188,7 +265,6 @@ fn run(mut terminal: DefaultTerminal, root: &str, files: Vec<AudioFile>) -> io::
     let mut failed_count = 0usize;
     let start = Instant::now();
     let mut tick = 0usize;
-    let theme = Theme::new();
 
     loop {
         while let Ok(event) = events.try_recv() {
@@ -422,7 +498,7 @@ struct ChecksumRow {
     status: ChecksumStatus,
 }
 
-fn run_checksum(kind: ChecksumKind, args: ChecksumArgs) -> ExitCode {
+fn run_checksum(kind: ChecksumKind, args: ChecksumArgs, theme: ThemeName) -> ExitCode {
     let label = describe(&args.paths);
     let (files, mut clean) = match lh_cli::collect(&args.paths) {
         Ok(v) => v,
@@ -441,7 +517,7 @@ fn run_checksum(kind: ChecksumKind, args: ChecksumArgs) -> ExitCode {
     }
 
     let terminal = ratatui::init();
-    let result = run_checksum_screen(terminal, kind, &label, files);
+    let result = run_checksum_screen(terminal, kind, &label, files, Theme::new(theme));
     ratatui::restore();
 
     let (ok, entries) = match result {
@@ -488,6 +564,7 @@ fn run_checksum_screen(
     kind: ChecksumKind,
     root: &str,
     files: Vec<AudioFile>,
+    theme: Theme,
 ) -> io::Result<(bool, Vec<Entry>)> {
     let total = files.len();
     let mut rows: Vec<ChecksumRow> = files
@@ -515,7 +592,6 @@ fn run_checksum_screen(
         start: Instant::now(),
     };
     let mut tick = 0usize;
-    let theme = Theme::new();
 
     loop {
         while let Ok(event) = events.try_recv() {
@@ -774,7 +850,7 @@ enum CreateStage {
     Done(Box<lh_core::Result<Created>>),
 }
 
-fn run_torrent_create(args: TorrentCreateArgs) -> ExitCode {
+fn run_torrent_create(args: TorrentCreateArgs, theme: ThemeName) -> ExitCode {
     let source = match args.path.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -856,6 +932,7 @@ fn run_torrent_create(args: TorrentCreateArgs) -> ExitCode {
         &chosen,
         private,
         &source_tag,
+        Theme::new(theme),
     );
     ratatui::restore();
 
@@ -879,6 +956,7 @@ fn run_torrent_create(args: TorrentCreateArgs) -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_torrent_create_screen(
     mut terminal: DefaultTerminal,
     source: &Path,
@@ -887,6 +965,7 @@ fn run_torrent_create_screen(
     chosen: &Resolved,
     private: bool,
     source_tag: &Option<String>,
+    theme: Theme,
 ) -> io::Result<lh_core::Result<Created>> {
     let queue: Queue<lh_core::Result<Created>> = Queue::with_workers(1);
     let cancel = queue.cancel_token();
@@ -906,7 +985,6 @@ fn run_torrent_create_screen(
     let start = Instant::now();
     let mut tick = 0usize;
     let mut want_quit = false;
-    let theme = Theme::new();
 
     loop {
         while let Ok(event) = events.try_recv() {
@@ -1153,7 +1231,7 @@ struct TorrentFileRow {
     detail: String,
 }
 
-fn run_torrent_check(file: PathBuf, path: PathBuf, quick: bool) -> ExitCode {
+fn run_torrent_check(file: PathBuf, path: PathBuf, quick: bool, theme: ThemeName) -> ExitCode {
     let meta = match Metainfo::read(&file) {
         Ok(m) => m,
         Err(e) => {
@@ -1163,7 +1241,8 @@ fn run_torrent_check(file: PathBuf, path: PathBuf, quick: bool) -> ExitCode {
     };
 
     let terminal = ratatui::init();
-    let result = run_torrent_check_screen(terminal, meta, file, path.clone(), quick);
+    let result =
+        run_torrent_check_screen(terminal, meta, file, path.clone(), quick, Theme::new(theme));
     ratatui::restore();
 
     match result {
@@ -1191,6 +1270,7 @@ fn run_torrent_check_screen(
     torrent_path: PathBuf,
     given: PathBuf,
     quick: bool,
+    theme: Theme,
 ) -> io::Result<lh_core::Result<TorrentReport>> {
     let queue: Queue<lh_core::Result<TorrentReport>> = Queue::with_workers(1);
     let cancel = queue.cancel_token();
@@ -1209,7 +1289,6 @@ fn run_torrent_check_screen(
     let mut stage = CheckStage::Preparing;
     let start = Instant::now();
     let mut tick = 0usize;
-    let theme = Theme::new();
 
     loop {
         while let Ok(event) = events.try_recv() {
