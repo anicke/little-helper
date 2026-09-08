@@ -211,22 +211,22 @@ pub enum Target {
 #[derive(clap::Args)]
 pub struct ConvertArgs {
     #[command(flatten)]
-    paths: Paths,
+    pub paths: Paths,
     /// What to produce. Files already in that format are left alone.
     #[arg(long, value_enum)]
-    to: Target,
+    pub to: Target,
     /// Write outputs here instead of beside their sources.
     #[arg(long)]
-    out_dir: Option<PathBuf>,
+    pub out_dir: Option<PathBuf>,
     /// flac's compression level, 0 to 8. Only used when encoding.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(0..=8))]
-    level: u8,
+    pub level: u8,
     /// Overwrite outputs that already exist. Sources are never touched either way.
     #[arg(long)]
-    force: bool,
+    pub force: bool,
     /// Print the full provenance record for every file written.
     #[arg(long)]
-    provenance: bool,
+    pub provenance: bool,
 }
 
 #[derive(clap::Args)]

@@ -246,14 +246,55 @@ count at all. `q` exited cleanly in every case (immediately for check, and — s
 confirmed by inspection of the cancellation-wait logic, since the fixture pieces hash faster
 than a keypress — bounded by one piece for create).
 
-## 5. Screens not yet planned
+## 5. TUI4 — Convert screen — done
+
+Same per-file batch shape as verify/checksum (§2), not the single-job shape of torrent
+create/check (§4) — `convert` decodes or encodes N independent files, one job each, same as
+`cmd_convert`'s own `run_batch`. What makes it the richest screen (per the old note in this
+section) is that a row's own progress is worth showing, unlike verify/checksum:
+
+* **`ConvertOutcome`** mirrors `lh-cli`'s own (private) `ConvertOutcome` rather than
+  exporting it — `Skipped`, `NoFileName`, `Done(Box<Conversion>)`, `Failed(lh_core::Error)`,
+  the same small duplication every other screen's own `Status` enum already accepts (§0).
+* **The encoder is discovered once, before the screen opens**, exactly like `cmd_convert`:
+  `Target::Flac` with no `flac` found fails loudly (Principle 5) and exits before
+  `ratatui::init()` runs, rather than after converting half a batch. Confirmed with
+  `LH_FLAC=/nonexistent`: `lh-tui: encoding WAV to FLAC requires flac, which was not found
+  (...)`, exit code 2, no screen drawn.
+* **Rows show live sub-file progress where it exists.** `to_wav_with_progress`'s
+  `(frames done, frames total)` flows through `Progress::report` into `Event::Progress`,
+  and a decoding row's status cell shows a live percentage instead of a bare spinner.
+  `to_flac_cancellable` has no such number — `flac` only draws its own percentage when
+  stderr is a terminal, which piped through `Command` it never is (`convert/mod.rs`'s own
+  doc comment) — so an encoding row just spins, the same as every other screen's `Running`.
+* **The detail column carries the destination filename**, `-> name.ext`, and flags the
+  weaker "unchecked" result (`checked_against_source == false`, source had nothing to
+  compare against) in text rather than a separate status color — `OK` stays green either
+  way, matching checksum's own choice to keep the status word simple and put the interesting
+  content in the detail column (§3).
+* **`--provenance` prints after the screen exits**, not inline — a table cell is nowhere
+  near wide enough for `Provenance::render()`'s multi-line output. Every successful
+  conversion's record is kept in submission order (same `Vec` indexed by `JobId::index()`
+  pattern as checksum's entries, §3) purely so this post-loop dump can walk it.
+* **Return value**: whether every file converted without failure — a skip counts as clean,
+  the same notion `cmd_convert`'s own exit code uses.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (unchanged pass
+count) and `cargo clippy --all-targets` all clean; `cargo fmt --check` clean for
+`lh-cli`/`lh-tui`. Run for real inside `tmux`: `lh-tui convert --to wav` over a three-file
+fixture folder (two FLACs, one WAV already in the target format) showed both FLACs decode
+live to `OK` with the right `-> name.wav` detail and the WAV row as `SKIPPED (already WAV)`,
+gauge `written:2 skipped:1 failed:0`, `q` exited 0. `--force --provenance` re-run over the
+same now-mixed folder printed the full `Provenance::render()` block for each conversion
+after `q`. `lh-tui convert --to flac` over two WAVs (one carrying a `LIST`/`INFO` chunk)
+wrote both through the real `flac` binary and reported `OK` for both. Two known-bad fixtures
+(`wrong-md5.flac`, `truncated.flac`) both reported `FAILED` with no WAV written for either —
+Principle 1 held — and the screen's own exit code was `1`.
+
+## 6. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
-* **Convert** — the one screen that actually has sub-file progress to show
-  (`to_wav_with_progress`'s frame counts, `to_flac_cancellable`'s killable child — J2). The
-  richest screen to build, and the reason §2 calls out progress rendering as the real
-  per-screen variable.
 * **SBE, Check, Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really
   needed for a single pass (`sbe`, `check` don't decode audio; `info`/`tools`/`torrent
   info`/`trackers` don't even touch a `Queue` in `lh-cli` today). Plausibly fine as
@@ -263,11 +304,11 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 6. What has and has not been checked
+## 7. What has and has not been checked
 
-* **Verify and checksum screens**: both run for real in a `tmux` pty against the fixture
-  corpus (§3's "Real evidence") — table, gauge, quit key and exit code all confirmed, closing
-  the gap this section used to flag ("compiled but never actually run").
+* **Verify, checksum and convert screens**: all run for real in a `tmux` pty against the
+  fixture corpus (§3's and §5's "Real evidence") — table, gauge, quit key and exit code all
+  confirmed, closing the gap this section used to flag ("compiled but never actually run").
 * **Verify screen against a real show, not just the fixture corpus.** Run against a genuine
   17-track FLAC show (~600 MB, already carrying its own `.ffp`/`.md5`) sitting in
   `~/Downloads`: all 17 decoded and reported `OK` live in the table, the gauge tracked
@@ -286,15 +327,19 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 7. Open questions
+## 8. Open questions
 
 1. **Do `info`, `tools`, `torrent info`/`trackers` ever get screens, or stay headless
-   forever?** §5 leans "stay headless" — a ratatui table over static, non-streaming output
+   forever?** §6 leans "stay headless" — a ratatui table over static, non-streaming output
    is not an obvious improvement over `lh`'s own text — but nobody has asked either way.
 2. **Does a screen need a `--no-tui` escape hatch** for scripting (piping `lh-tui verify`'s
    output, redirecting to a file where an alternate-screen ratatui app would misbehave)? The
-   original `lh verify` already covers this case by existing as a separate binary; whether
-   `lh-tui verify` should also degrade gracefully when stdout is not a tty is untested.
+   original `lh verify` already covers this case by existing as a separate binary. No longer
+   entirely untested: running `lh-tui convert` with stdin redirected from `/dev/null` and no
+   pty at all (§5's testing) hit exactly this — `ratatui::init()` panics (`failed to
+   initialize terminal: ... No such device or address`) instead of degrading, the same as
+   every other screen would. Confirms the gap is real; still nothing decided about closing
+   it.
 3. **Should `Theme` gain a light/dark or no-color variant**, or does "no inverted
    backgrounds, only fg color + bold/underline" (§0) already cover every terminal this
    project cares about? No report of it looking wrong anywhere yet.
