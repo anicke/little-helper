@@ -291,12 +291,48 @@ wrote both through the real `flac` binary and reported `OK` for both. Two known-
 (`wrong-md5.flac`, `truncated.flac`) both reported `FAILED` with no WAV written for either —
 Principle 1 held — and the screen's own exit code was `1`.
 
-## 6. Screens not yet planned
+## 6. TUI5 — SBE screen — done
+
+Same per-file batch shape as verify/checksum (§2), placed right after Checksum in
+`lh-tui/src/main.rs` since both share the "no `Progress::report`" shape Convert's own section
+(§5) calls out as its point of difference.
+
+* **`T = Sbe`, not `Result<Sbe>`.** `analysis::sbe` is a pure, infallible function over a
+  `StreamInfo` `collect` already probed — no decode, no I/O — so the queue's job type is the
+  bare `Sbe` enum, mirroring `cmd_sbe`'s own `run_batch(&files, |f, _| sbe(&f.stream_info))`
+  (`lh-cli/src/lib.rs:354`), which also returns bare `T`. `Status`'s only failure variant
+  (`Failed(String)`) is reachable solely via `Event::Cancelled`, never from the job itself —
+  the same asymmetry checksum/verify's own `Cancelled` handling already has, just total here
+  since there is no other way for this operation to fail.
+* **`NotApplicable` is neutral, not a warning.** Colored `dim` and left out of the "clean"
+  check, the same treatment Convert gives `Skipped` rather than verify's `warn`-colored
+  `NoMd5` — most non-CDDA files hit this by design (`sbe.rs`'s own doc comment: "never a pass,
+  because 'pass' would imply we checked"), so it isn't something gone wrong.
+* **`Misaligned` is the one status that counts against "clean,"** matching `cmd_sbe` setting
+  `ok = false` for it; the detail column shows `+{remainder_frames} frames past a sector
+  boundary`, the same number `cmd_sbe`'s own `(+N frames)` prints.
+* **Return value**: `misaligned_count == 0 && failed_count == 0` — same "clean" contract
+  `cmd_sbe`'s own `ok` flag uses, so `$?` matches between `lh sbe` and `lh-tui sbe`.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (unchanged pass count —
+no `lh-core`/`lh-cli` logic changed) and `cargo clippy --all-targets` all clean; `cargo fmt`
+was needed once (a multi-line `format!` call) and is clean after. Run for real against
+`lh-core/tests/fixtures` (12 files): the table showed `ALIGNED` for 7 files, `MISALIGNED` for
+`cdda-sbe.flac`/`.wav` with `+137 frames past a sector boundary` in the detail column, and
+`N/A` for the three non-CDDA fixtures with the same reason text `lh sbe` prints; the gauge read
+`12/12 aligned:7 n/a:3 misaligned:2 failed:0`, colored red for the misalignment. Quitting with
+`q` under a real pty (Python's `pty.fork`, since `tmux`'s server did not survive between tool
+calls in this sandbox) exited `1`, matching `lh sbe`'s own exit code against the same corpus
+line for line.
+
+---
+
+## 7. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
-* **SBE, Check, Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really
-  needed for a single pass (`sbe`, `check` don't decode audio; `info`/`tools`/`torrent
+* **Check, Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really
+  needed for a single pass (`check` doesn't decode audio; `info`/`tools`/`torrent
   info`/`trackers` don't even touch a `Queue` in `lh-cli` today). Plausibly fine as
   `run_headless` forever (§1) rather than earning a screen — nobody has asked, and a
   ratatui table over already-known, non-streaming data is not obviously better than the
@@ -304,11 +340,11 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 7. What has and has not been checked
+## 8. What has and has not been checked
 
-* **Verify, checksum and convert screens**: all run for real in a `tmux` pty against the
-  fixture corpus (§3's and §5's "Real evidence") — table, gauge, quit key and exit code all
-  confirmed, closing the gap this section used to flag ("compiled but never actually run").
+* **Verify, checksum, convert and SBE screens**: all run for real against the fixture corpus
+  (§3's, §5's and §6's "Real evidence") — table, gauge, quit key and exit code all confirmed,
+  closing the gap this section used to flag ("compiled but never actually run").
 * **Verify screen against a real show, not just the fixture corpus.** Run against a genuine
   17-track FLAC show (~600 MB, already carrying its own `.ffp`/`.md5`) sitting in
   `~/Downloads`: all 17 decoded and reported `OK` live in the table, the gauge tracked
@@ -327,10 +363,10 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 8. Open questions
+## 9. Open questions
 
 1. **Do `info`, `tools`, `torrent info`/`trackers` ever get screens, or stay headless
-   forever?** §6 leans "stay headless" — a ratatui table over static, non-streaming output
+   forever?** §7 leans "stay headless" — a ratatui table over static, non-streaming output
    is not an obvious improvement over `lh`'s own text — but nobody has asked either way.
 2. **Does a screen need a `--no-tui` escape hatch** for scripting (piping `lh-tui verify`'s
    output, redirecting to a file where an alternate-screen ratatui app would misbehave)? The
