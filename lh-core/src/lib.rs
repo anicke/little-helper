@@ -20,6 +20,7 @@ pub mod format;
 pub mod job;
 pub mod model;
 pub mod output;
+pub mod rename;
 pub mod scan;
 pub mod tag;
 pub mod tools;
