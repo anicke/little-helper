@@ -12,18 +12,18 @@ for the live-music trading community: verify, checksum and convert lossless audi
 
 ## 0. Status
 
-*Updated 2026-08-30.*
+*Updated 2026-09-08.*
 
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; see [docs/job-queue.md](docs/job-queue.md) |
-| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
+| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; SBE repair (R1, R2 of [docs/sbe-repair.md](docs/sbe-repair.md)) done at the library level — plan a fix and execute one boundary between two files — not yet wired into a non-dry-run CLI or GUI/TUI screen |
+| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `sbe fix --dry-run`, `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
 | M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell is being revamped: [docs/gui-shell.md](docs/gui-shell.md), S1–S3 done, S4 not started |
 | `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `convert`, and `torrent create`/`check` have real live screens, everything else runs headless like `lh` itself |
 | M4 Packaging | not started |
 
-136 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+162 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 
@@ -118,8 +118,13 @@ These are the constraints every later decision is checked against.
 
 ### Explicitly deferred to v0.2+
 
-Tag editing (via reference `metaflac`), SBE repair, SHN via `shntool`, APE / TTA / WavPack,
+Tag editing (via reference `metaflac`), SHN via `shntool`, APE / TTA / WavPack,
 MP3 export, cue split & join, 24-bit→16-bit resample, batch rename.
+
+SBE *repair* (as opposed to the detection already in v0.1) is planned in
+[docs/sbe-repair.md](docs/sbe-repair.md). It shifts samples across track boundaries so splits
+land on sector boundaries — a whole-set operation, unlike every other v0.1 command — and pulls
+in tag preservation as a hard dependency rather than deferring it further.
 
 Torrent verification — checking a local fileset against a `.torrent` — is planned separately
 in [docs/torrent-verification.md](docs/torrent-verification.md). It is read-only and pure

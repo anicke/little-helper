@@ -65,6 +65,56 @@ pub fn audio_md5(path: &Path) -> Result<[u8; 16]> {
     Ok(hasher.finalize().into())
 }
 
+/// Decode a FLAC fully into memory: every sample, interleaved, alongside the
+/// [`StreamInfo`] read straight from the stream.
+///
+/// Repair (docs/sbe-repair.md §4 step 5a) needs a whole file as one buffer so it can move
+/// frames across a boundary; that is the one case in this codebase where holding an
+/// entire show's track in memory is the point, rather than something [`decode_to_wav`]'s
+/// block-by-block streaming is specifically written to avoid.
+pub fn decode_to_samples(path: &Path) -> Result<(StreamInfo, Vec<i32>)> {
+    let mut reader = claxon::FlacReader::open(path).map_err(|source| Error::Flac {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let si = reader.streaminfo();
+    let info = StreamInfo {
+        sample_rate: si.sample_rate,
+        channels: si.channels as u8,
+        bits_per_sample: si.bits_per_sample as u8,
+        total_frames: si.samples,
+        audio_md5: None,
+    };
+
+    let mut samples = Vec::new();
+    for sample in reader.samples() {
+        samples.push(sample.map_err(|source| Error::Flac {
+            path: path.to_path_buf(),
+            source,
+        })?);
+    }
+    Ok((info, samples))
+}
+
+/// MD5 of several buffers of interleaved samples, concatenated as if they were one
+/// continuous PCM stream — FLAC's own convention: signed, little-endian, `bits_per_sample`
+/// rounded up to whole bytes.
+///
+/// This is the whole-set invariant repair checks itself against (docs/sbe-repair.md §1):
+/// decode the set before a fix and after, concatenated, and the two digests must match —
+/// moving frames across a boundary must never add or drop a sample from the set as a
+/// whole, only reassign which file it belongs to.
+pub fn concatenated_pcm_md5(buffers: &[&[i32]], bits_per_sample: u8) -> [u8; 16] {
+    let bytes_per_sample = (bits_per_sample as usize).div_ceil(8);
+    let mut hasher = Md5::new();
+    for buf in buffers {
+        for &sample in *buf {
+            hasher.update(&sample.to_le_bytes()[..bytes_per_sample]);
+        }
+    }
+    hasher.finalize().into()
+}
+
 /// Decode a FLAC into `out`, returning the MD5 of the audio we actually produced.
 ///
 /// Lossless decoding is deterministic and bit-identical, so this is the in-process path

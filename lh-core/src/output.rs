@@ -62,11 +62,91 @@ impl Drop for TempOutput {
     }
 }
 
+/// Rename every staged output into place, or none of them.
+///
+/// [`TempOutput::commit`] is one file at a time; a repair touches two files (or a whole
+/// chain of them) at once, and the set must never be observed half fixed under real names
+/// (Principle 1, docs/sbe-repair.md §4 step 7). If a rename partway through fails, every
+/// output already renamed in this call is removed again before the error is returned.
+pub fn commit_all(outputs: Vec<TempOutput>) -> Result<Vec<PathBuf>> {
+    let mut done: Vec<PathBuf> = Vec::with_capacity(outputs.len());
+    for mut output in outputs {
+        match std::fs::rename(&output.temp, &output.final_path) {
+            Ok(()) => {
+                // Already moved out from under `output.temp`, so `Drop` has nothing left
+                // to clean up.
+                output.committed = true;
+                done.push(output.final_path.clone());
+            }
+            Err(e) => {
+                let failed_path = output.final_path.clone();
+                for path in done.into_iter().rev() {
+                    let _ = std::fs::remove_file(&path);
+                }
+                return Err(Error::io(&failed_path, e));
+            }
+        }
+    }
+    Ok(done)
+}
+
 /// True when both paths name a file that already exists and is the same one. A
 /// destination that does not exist yet cannot be the source.
 fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_all_renames_every_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("src_a");
+        let src_b = dir.path().join("src_b");
+        std::fs::write(&src_a, b"a").unwrap();
+        std::fs::write(&src_b, b"b").unwrap();
+        let dst_a = dir.path().join("dst_a");
+        let dst_b = dir.path().join("dst_b");
+
+        let a = TempOutput::stage(&src_a, &dst_a, false).unwrap();
+        std::fs::write(a.path(), b"fixed a").unwrap();
+        let b = TempOutput::stage(&src_b, &dst_b, false).unwrap();
+        std::fs::write(b.path(), b"fixed b").unwrap();
+
+        let committed = commit_all(vec![a, b]).unwrap();
+        assert_eq!(committed, vec![dst_a.clone(), dst_b.clone()]);
+        assert_eq!(std::fs::read(&dst_a).unwrap(), b"fixed a");
+        assert_eq!(std::fs::read(&dst_b).unwrap(), b"fixed b");
+    }
+
+    /// If a later output in the batch cannot be committed, an earlier one already renamed
+    /// into place in the same call must not survive under its real name either — the set
+    /// is fixed all at once or not at all.
+    #[test]
+    fn commit_all_undoes_earlier_renames_when_a_later_one_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("src_a");
+        let src_b = dir.path().join("src_b");
+        std::fs::write(&src_a, b"a").unwrap();
+        std::fs::write(&src_b, b"b").unwrap();
+        let dst_a = dir.path().join("dst_a");
+        let dst_b = dir.path().join("dst_b");
+
+        let a = TempOutput::stage(&src_a, &dst_a, false).unwrap();
+        std::fs::write(a.path(), b"fixed a").unwrap();
+        let b = TempOutput::stage(&src_b, &dst_b, false).unwrap();
+        std::fs::write(b.path(), b"fixed b").unwrap();
+        // Sabotage the second rename: remove the staged temp file out from under it.
+        std::fs::remove_file(b.path()).unwrap();
+
+        let err = commit_all(vec![a, b]).unwrap_err();
+        assert!(matches!(err, Error::Io { .. }), "{err}");
+        assert!(!dst_a.exists(), "the first file must not survive alone");
+        assert!(!dst_b.exists());
     }
 }

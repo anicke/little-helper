@@ -152,6 +152,32 @@ pub fn to_flac_cancellable(
     overwrite: bool,
     should_continue: &mut dyn FnMut() -> bool,
 ) -> Result<Conversion> {
+    let (temp, provenance, audio_md5, checked_against_source) =
+        encode_flac_staged(src, dst, tool, opts, overwrite, should_continue)?;
+    Ok(Conversion {
+        output: temp.commit()?,
+        provenance,
+        audio_md5,
+        checked_against_source,
+    })
+}
+
+/// [`to_flac_cancellable`], stopping short of the commit: the encoded, checked output is
+/// left staged under [`TempOutput`] rather than renamed into place.
+///
+/// Repair (docs/sbe-repair.md §4 step 5f) needs exactly this — two files encoded and
+/// verified independently, but renamed into place together or not at all, which is a
+/// commit `to_flac_cancellable` cannot defer once it has made it. Everything up to the
+/// decision to commit is identical, so it lives here once and `to_flac_cancellable` is the
+/// thin wrapper that always commits immediately.
+pub(crate) fn encode_flac_staged(
+    src: &Path,
+    dst: &Path,
+    tool: &Tool,
+    opts: &EncodeOpts,
+    overwrite: bool,
+    should_continue: &mut dyn FnMut() -> bool,
+) -> Result<(TempOutput, Provenance, [u8; 16], bool)> {
     if tool.id != ToolId::Flac {
         return Err(Error::ToolUnusable {
             tool: tool.id.name(),
@@ -202,17 +228,17 @@ pub fn to_flac_cancellable(
     // signed — so the digests legitimately disagree and there is nothing to compare.
     let comparable = probed.stream_info.bits_per_sample != 8;
     match written.audio_md5 {
-        Some(encoded) if !comparable || encoded == source_md5 => Ok(Conversion {
-            output: temp.commit()?,
-            provenance: Provenance {
+        Some(encoded) if !comparable || encoded == source_md5 => Ok((
+            temp,
+            Provenance {
                 operation: "WAV → FLAC".into(),
                 agent,
                 input: src.to_path_buf(),
                 output: dst.to_path_buf(),
             },
-            audio_md5: encoded,
-            checked_against_source: comparable,
-        }),
+            encoded,
+            comparable,
+        )),
         Some(encoded) => Err(Error::malformed(
             dst,
             format!(

@@ -164,7 +164,9 @@ fn main() -> ExitCode {
     let theme = cli.theme;
     match cli.command {
         Command::Verify(paths) => run_verify(paths, theme),
-        Command::Sbe(paths) => run_sbe(paths, theme),
+        // `sbe fix` has no screen yet, so it falls through to `other` below and runs
+        // exactly as `lh sbe fix` would.
+        Command::Sbe(a) if a.command.is_none() => run_sbe(a.paths, theme),
         Command::Ffp(args) => run_checksum(ChecksumKind::Ffp, args, theme),
         Command::Md5(args) => run_checksum(ChecksumKind::Md5, args, theme),
         Command::St5(args) => run_checksum(ChecksumKind::St5, args, theme),

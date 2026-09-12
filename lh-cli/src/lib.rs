@@ -9,7 +9,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use lh_core::analysis::{Sbe, Verification, sbe, verify};
+use lh_core::analysis::{
+    BoundaryDirection, FixPlan, Sbe, TailPolicy, Verification, plan_fix, sbe, verify,
+};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::convert::{
     Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
@@ -107,8 +109,8 @@ pub enum Command {
     Info(Paths),
     /// Decode each file and check it against the MD5 it carries.
     Verify(Paths),
-    /// Report sector boundary errors.
-    Sbe(Paths),
+    /// Report sector boundary errors, or plan a repair (`sbe fix`).
+    Sbe(SbeArgs),
     /// Write or print FFP checksums (audio MD5 from the FLAC header).
     Ffp(ChecksumArgs),
     /// Write or print MD5 checksums of the file bytes.
@@ -202,6 +204,47 @@ pub struct Paths {
     pub recursive: bool,
 }
 
+/// `lh sbe` with no subcommand reports (the existing behaviour); `lh sbe fix` plans a
+/// repair. Clap resolves `fix` as the subcommand before it would be swallowed by `paths`
+/// below, so both forms coexist under one command.
+#[derive(clap::Args)]
+pub struct SbeArgs {
+    #[command(subcommand)]
+    pub command: Option<SbeSub>,
+    #[command(flatten)]
+    pub paths: Paths,
+}
+
+#[derive(Subcommand)]
+pub enum SbeSub {
+    /// Plan (but do not yet perform) a sector-boundary repair for one directory's files,
+    /// taken in filename order (docs/sbe-repair.md).
+    Fix(SbeFixArgs),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Direction {
+    Backward,
+    Forward,
+    Nearest,
+}
+
+#[derive(clap::Args)]
+pub struct SbeFixArgs {
+    /// The directory whose files are one ordered set, in filename order.
+    pub dir: PathBuf,
+    /// Which way a misaligned boundary's remainder frames move (shntool's -b/-f/-u).
+    #[arg(long, value_enum, default_value = "backward")]
+    pub direction: Direction,
+    /// Close a misaligned last file by adding silence, instead of leaving it reported.
+    #[arg(long)]
+    pub pad_tail: bool,
+    /// Print the plan and write nothing. Required for now: only planning is implemented —
+    /// there is no execution yet (docs/sbe-repair.md R1).
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Target {
     Wav,
@@ -243,7 +286,10 @@ pub fn run(cli: Cli) -> Result<bool> {
     match cli.command {
         Command::Info(p) => cmd_info(&p),
         Command::Verify(p) => cmd_verify(&p),
-        Command::Sbe(p) => cmd_sbe(&p),
+        Command::Sbe(a) => match a.command {
+            Some(SbeSub::Fix(fix_args)) => cmd_sbe_fix(&fix_args),
+            None => cmd_sbe(&a.paths),
+        },
         Command::Ffp(a) => cmd_checksum(ChecksumKind::Ffp, &a),
         Command::Md5(a) => cmd_checksum(ChecksumKind::Md5, &a),
         Command::St5(a) => cmd_checksum(ChecksumKind::St5, &a),
@@ -371,6 +417,92 @@ fn cmd_sbe(p: &Paths) -> Result<bool> {
         }
     }
     Ok(ok)
+}
+
+/// Plan (never execute) a sector-boundary repair for one directory's files, in filename
+/// order. R1 of docs/sbe-repair.md: pure arithmetic over declared frame counts, no decode,
+/// nothing written — `--dry-run` is required until execution exists.
+fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
+    if !args.dry_run {
+        anyhow::bail!(
+            "sbe fix does not write anything yet — only planning is implemented; pass \
+             --dry-run to see the plan (docs/sbe-repair.md, milestone R1)"
+        );
+    }
+    if !args.dir.is_dir() {
+        anyhow::bail!("{} is not a directory", args.dir.display());
+    }
+    let set =
+        scan::scan(&args.dir, false).with_context(|| format!("scanning {}", args.dir.display()))?;
+    for (skipped, why) in &set.skipped {
+        eprintln!("skipped {}: {why}", skipped.display());
+    }
+    if set.files.is_empty() {
+        anyhow::bail!("no audio files found in {}", args.dir.display());
+    }
+
+    let direction = match args.direction {
+        Direction::Backward => BoundaryDirection::Backward,
+        Direction::Forward => BoundaryDirection::Forward,
+        Direction::Nearest => BoundaryDirection::Nearest,
+    };
+    let tail = if args.pad_tail {
+        TailPolicy::Pad
+    } else {
+        TailPolicy::Report
+    };
+
+    let plan = plan_fix(&set.files, direction, tail)
+        .with_context(|| format!("planning a fix for {}", args.dir.display()))?;
+
+    print_fix_plan(&args.dir, &set.files, &plan, args.pad_tail);
+    Ok(plan.fully_fixed)
+}
+
+fn print_fix_plan(dir: &Path, files: &[AudioFile], plan: &FixPlan, pad_tail: bool) {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dir.display().to_string());
+    println!("{name}");
+
+    let file_name = |i: usize| files[i].file_name();
+    for b in &plan.boundaries {
+        let a = file_name(b.index);
+        let bn = file_name(b.index + 1);
+        match b.shifted_frames.cmp(&0) {
+            std::cmp::Ordering::Equal => println!("  {a} → {bn}   already aligned"),
+            std::cmp::Ordering::Greater => println!(
+                "  {a} → {bn}   shift {n} frames backward   ({a} was +{n} past a sector)",
+                n = b.shifted_frames
+            ),
+            std::cmp::Ordering::Less => println!(
+                "  {a} → {bn}   shift {n} frames forward   ({a} borrows {n} frames from {bn})",
+                n = -b.shifted_frames
+            ),
+        }
+    }
+
+    let tail_name = file_name(files.len() - 1);
+    match plan.tail_padding_frames {
+        Some(pad) => println!(
+            "  {tail_name}        last file, would be padded with {pad} frames of silence \
+             (not written — planning only)"
+        ),
+        None if plan.fully_fixed => println!("  {tail_name}        last file, already aligned"),
+        None => println!(
+            "  {tail_name}        last file, still misaligned once every other boundary is \
+             fixed — rerun with --pad-tail to close it with silence"
+        ),
+    }
+
+    if plan.fully_fixed {
+        println!("plan only, nothing written — every file would end up aligned");
+    } else if pad_tail {
+        println!("plan only, nothing written");
+    } else {
+        println!("plan only, nothing written — pass --pad-tail to fully align the set");
+    }
 }
 
 fn cmd_checksum(kind: ChecksumKind, args: &ChecksumArgs) -> Result<bool> {
