@@ -430,7 +430,7 @@ signature has been read.
 | ~~**S1**~~ | ~~The shell~~ | **Done** — `Area`, the rail, the global path bar, the area pane, the dock with its `Jobs \| Log` toggle. Every existing panel moved into its area unchanged; `run_operation` takes its operation as an argument; `overwrite` split into `convert_overwrite`/`torrent_overwrite`; the window gained a 900×600 minimum size. **No behaviour change** — the existing 14 tests kept passing, five of them with a one-line edit each (§5). See §9 notes. |
 | ~~**S2**~~ | ~~Selection~~ | **Done** — `App::selected: HashSet<PathBuf>`, filled on every `scan`; a select-all checkbox in the file table's header, one per row wired to `Message::FileToggled`; `run_operation` skips any file not in `selected` before its existing per-operation checks. Torrent → Create still reads `working_root` alone. Two new tests: an unticked file gets no job, and clearing the selection entirely does not change what `run_torrent_create` writes. See §9 notes. |
 | ~~**S3**~~ | ~~The checksum areas~~ | **Done** — Checksum → Create (kind picker, output path, `ChecksumFile::write` after the digests land) and Checksum → Check (`ChecksumFile::read`, one job per entry, per-file results table reusing G4's `JobUpdate` boundary). Tests through the real queue against the fixture corpus and the committed `reference.ffp`/`reference.st5` goldens. See §9 notes. |
-| **S4** | The table widget | Replace the hand-rolled file table with `iced::widget::table`; give Files the wide column set including the encoder vendor string. |
+| ~~**S4**~~ | ~~The table widget~~ | **Done** — the hand-rolled `Column` of `row!`s replaced by `iced::widget::table`; Files gained an `Encoder` column carrying the vendor string. See §9 notes. |
 
 S1 before everything: it is the only one that touches every existing panel, and doing it
 first means S2–S4 each land in one area instead of in a ten-panel column.
@@ -529,6 +529,35 @@ predicted correctly:
   `DISPLAY=:0 timeout 6 ./target/debug/little-helper` run with no panic; the same
   screenshot-tool gap every milestone has hit means the two new panels' on-screen layout is
   unverified.
+
+### S4 notes
+
+Landed as planned. §7's own uncertainty — "neither the widget's real column sizing behaviour
+nor its scrolling has been checked" — is still true; nothing here resolves it, only builds on
+top of it.
+
+* **Rows are `AudioFile` directly, no wrapper type**, exactly as §7 predicted: it is already
+  `Clone` (`lh-core/src/model.rs:92`), and `table::column`'s view closure takes the row by
+  value, so every column — including the new `Encoder` one — reads straight off the domain
+  type instead of a GUI-local projection of it.
+* **The header widgets are the same values S1's `row!` used**, just handed to `table::column`
+  instead of a `row!` cell: the select-all checkbox is still `checkbox(all_selected)
+  .on_toggle(Message::SelectAllToggled)`, and every text header is still a bare `text("...")`.
+  `table::column`'s struct itself carries no `E` type parameter (the view closure's return
+  type is erased into `Box<dyn Fn(T) -> Element>` inside `column()`), so columns whose cells
+  are a `Checkbox` and columns whose cells are `Text` sit in the same `Vec` without a common
+  enum to wrap them in.
+* **`Column` (the vertical layout widget, already imported) and `table::column` (the new
+  per-column builder) share a name only at the module boundary** — importing `table` itself
+  rather than `table::column` into scope keeps both usable un-renamed, since the existing
+  code already has a `column` free function imported for the `column![...]` macro.
+* Real evidence, same bar as S1–S3: `cargo test -p lh-gui` (23 tests, the 22 from S1–S3 plus
+  one this milestone added — the table built over the real fixture corpus with one file
+  selected, so the checked-checkbox branch of the select column's view closure runs too, not
+  just the default-unselected path every other test's fresh `App` exercises) and a 6-second
+  `DISPLAY=:0 timeout 6 ./target/debug/little-helper` run with no panic. The same
+  screenshot-tool gap every milestone has hit means the table's actual on-screen column
+  widths and scrolling — the two things §7 flagged as unchecked — remain unverified here too.
 
 ---
 

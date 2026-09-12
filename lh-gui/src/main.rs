@@ -20,7 +20,8 @@
 mod job;
 
 use iced::widget::{
-    Column, button, checkbox, column, container, pick_list, row, scrollable, text, text_input,
+    Column, button, checkbox, column, container, pick_list, row, scrollable, table, text,
+    text_input,
 };
 use iced::{Element, Length, Subscription, Task};
 use job::JobOutcome;
@@ -28,7 +29,7 @@ use lh_core::analysis::{self, Sbe};
 use lh_core::checksum::{self, ChecksumFile, ChecksumKind, Entry};
 use lh_core::convert::{self, Conversion, EncodeOpts};
 use lh_core::job::{JobId, Queue};
-use lh_core::model::AudioFormat;
+use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::scan::{self, WorkingSet};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
@@ -1315,6 +1316,11 @@ fn dock_tab_button(label: &str, tab: DockTab, selected: bool) -> Element<'_, Mes
 /// checkbox so the two line up.
 const SELECT_COLUMN: Length = Length::Fixed(24.0);
 
+/// S4 (`docs/gui-shell.md` §7/§9): the hand-rolled `Column` of `row!`s from S1 replaced by
+/// `iced::widget::table`, new in 0.14 and left out of S1 deliberately so a regression there
+/// would be visibly the table's fault, not the shell move's. Rows are `AudioFile` itself —
+/// it is already `Clone` — so every column view closure gets the full record, which is what
+/// makes room for the encoder vendor string TLH's `lh info` has always had nowhere to put.
 fn file_table(app: &App) -> Element<'_, Message> {
     let Some(set) = app.working_set.as_ref() else {
         return text("Drop a folder here, or use Browse / Scan.").into();
@@ -1325,52 +1331,61 @@ fn file_table(app: &App) -> Element<'_, Message> {
     // after a partial selection clears the rest instead of leaving it stuck checked.
     let all_selected =
         !set.files.is_empty() && set.files.iter().all(|f| app.selected.contains(&f.path));
-    let header = row![
-        container(checkbox(all_selected).on_toggle(Message::SelectAllToggled))
-            .width(SELECT_COLUMN),
-        text("Name").width(Length::FillPortion(4)),
-        text("Format").width(Length::FillPortion(1)),
-        text("Duration").width(Length::FillPortion(1)),
-        text("Rate/Bits/Ch").width(Length::FillPortion(2)),
-        text("SBE").width(Length::FillPortion(2)),
-        text("Status").width(Length::FillPortion(3)),
-    ]
-    .spacing(8);
 
-    let mut rows = Column::new().spacing(4).push(header);
-    for file in &set.files {
-        let info = &file.stream_info;
-        let status = app
-            .latest_job_by_path
-            .get(&file.path)
-            .and_then(|id| app.jobs.get(id))
-            .map(|entry| status_label(&entry.status))
-            .unwrap_or_else(|| "—".to_string());
-        let path = file.path.clone();
-        let ticked = checkbox(app.selected.contains(&file.path))
-            .on_toggle(move |checked| Message::FileToggled(path.clone(), checked));
-        rows = rows.push(
-            row![
-                container(ticked).width(SELECT_COLUMN),
-                text(file.file_name()).width(Length::FillPortion(4)),
-                text(file.format.name()).width(Length::FillPortion(1)),
-                text(format_duration(info.duration_secs())).width(Length::FillPortion(1)),
-                text(format!(
-                    "{} Hz / {}-bit / {}ch",
-                    info.sample_rate, info.bits_per_sample, info.channels
-                ))
-                .width(Length::FillPortion(2)),
-                text(sbe_label(&analysis::sbe(info))).width(Length::FillPortion(2)),
-                text(status).width(Length::FillPortion(3)),
-            ]
-            .spacing(8),
-        );
-    }
+    let columns = vec![
+        table::column(
+            checkbox(all_selected).on_toggle(Message::SelectAllToggled),
+            |file: AudioFile| {
+                let path = file.path.clone();
+                checkbox(app.selected.contains(&file.path))
+                    .on_toggle(move |checked| Message::FileToggled(path.clone(), checked))
+            },
+        )
+        .width(SELECT_COLUMN),
+        table::column(text("Name"), |file: AudioFile| text(file.file_name()))
+            .width(Length::FillPortion(4)),
+        table::column(text("Format"), |file: AudioFile| text(file.format.name()))
+            .width(Length::FillPortion(1)),
+        table::column(text("Rate/Bits/Ch"), |file: AudioFile| {
+            let info = &file.stream_info;
+            text(format!(
+                "{} Hz / {}-bit / {}ch",
+                info.sample_rate, info.bits_per_sample, info.channels
+            ))
+        })
+        .width(Length::FillPortion(2)),
+        table::column(text("Duration"), |file: AudioFile| {
+            text(format_duration(file.stream_info.duration_secs()))
+        })
+        .width(Length::FillPortion(1)),
+        table::column(text("Encoder"), |file: AudioFile| {
+            text(file.encoder.clone().unwrap_or_else(|| "—".to_string()))
+        })
+        .width(Length::FillPortion(3)),
+        table::column(text("SBE"), |file: AudioFile| {
+            text(sbe_label(&analysis::sbe(&file.stream_info)))
+        })
+        .width(Length::FillPortion(2)),
+        table::column(text("Status"), |file: AudioFile| {
+            let status = app
+                .latest_job_by_path
+                .get(&file.path)
+                .and_then(|id| app.jobs.get(id))
+                .map(|entry| status_label(&entry.status))
+                .unwrap_or_else(|| "—".to_string());
+            text(status)
+        })
+        .width(Length::FillPortion(3)),
+    ];
+
+    let mut content = Column::new()
+        .spacing(4)
+        .push(table::table(columns, set.files.iter().cloned()));
     for (path, reason) in &set.skipped {
-        rows = rows.push(text(format!("{} — skipped: {reason}", path.display())));
+        content = content.push(text(format!("{} — skipped: {reason}", path.display())));
     }
 
-    scrollable(rows).height(Length::FillPortion(3)).into()
+    scrollable(content).height(Length::FillPortion(3)).into()
 }
 
 /// `docs/torrent-creation.md` C5: folder (`App::working_root`, already scanned above) →
@@ -1668,6 +1683,29 @@ mod tests {
             label.starts_with("misaligned"),
             "cdda-sbe.flac should report misaligned SBE, got {label:?}"
         );
+    }
+
+    /// S4 (`docs/gui-shell.md` §7/§9): builds the `iced::widget::table` over the real
+    /// fixture corpus, one file selected so the per-row checkbox closure's "checked" branch
+    /// runs too, not just the empty/unselected default every other test's fresh `App` has.
+    /// No widget tree inspection is possible from here (`Element` exposes nothing to
+    /// assert on), so this is the same bar S1's own notes name: proof it does not panic
+    /// with real data through every column's view closure, not proof of on-screen layout.
+    #[test]
+    fn file_table_builds_over_the_real_fixture_corpus_without_panicking() {
+        let (mut app, _) = App::boot();
+        app.scan(&fixtures_dir());
+        let first = app
+            .working_set
+            .as_ref()
+            .expect("fixtures dir must scan")
+            .files
+            .first()
+            .expect("fixture corpus must not be empty")
+            .path
+            .clone();
+        app.selected.insert(first);
+        let _ = file_table(&app);
     }
 
     #[test]
