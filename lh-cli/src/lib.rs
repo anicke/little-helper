@@ -13,12 +13,15 @@ use lh_core::analysis::{
     BoundaryDirection, FixPlan, RepairEncode, Sbe, TailPolicy, Verification, execute_fix, plan_fix,
     sbe, verify,
 };
-use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
+use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute, ffp};
 use lh_core::convert::{
     Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
 };
+use lh_core::etree::{ShowDate, ShowName};
 use lh_core::job::{CancelToken, Event, Progress, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
+use lh_core::rename::{NameSpec, RenamePlan, RenameStatus, execute_rename, plan_rename};
+use lh_core::tag::{self, Tags};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
     Chosen, CreateOpts, Created, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList,
@@ -132,6 +135,10 @@ pub enum Command {
         /// The checksum file. Its kind is taken from the extension.
         file: PathBuf,
     },
+    /// Write the etree Vorbis-comment tags for one show (docs/tagging.md §5).
+    Tag(TagArgs),
+    /// Rename one show's files to the etree track-name standard (docs/tagging.md §5).
+    Rename(RenameArgs),
 }
 
 #[derive(Subcommand)]
@@ -289,6 +296,54 @@ pub struct ChecksumArgs {
     pub output: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+pub struct TagArgs {
+    /// The show's folder. A show is the unit: a track number only means something
+    /// relative to its siblings.
+    pub dir: PathBuf,
+    #[arg(long)]
+    pub artist: Option<String>,
+    #[arg(long)]
+    pub album: Option<String>,
+    #[arg(long)]
+    pub date: Option<String>,
+    #[arg(long)]
+    pub genre: Option<String>,
+    #[arg(long)]
+    pub comment: Option<String>,
+    #[arg(long)]
+    pub location: Option<String>,
+    /// One title per line, in file order (the same order the diff and the write use).
+    /// `-` reads stdin.
+    #[arg(long)]
+    pub titles: Option<PathBuf>,
+    /// Write the changes. Without it, the full diff is printed and nothing is touched —
+    /// there is deliberately no separate `--dry-run`, since the preview already is one.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(clap::Args)]
+pub struct RenameArgs {
+    /// The show's folder. Renaming touches the files in it, never the folder itself.
+    pub dir: PathBuf,
+    /// Defaults from the folder's own name when it is an etree show name.
+    #[arg(long)]
+    pub band: Option<String>,
+    /// `YYYY-MM-DD` or `YY-MM-DD`. Defaults from the folder's own name when it is an
+    /// etree show name.
+    #[arg(long)]
+    pub date: Option<String>,
+    /// Render `77-05-08` instead of `1977-05-08`.
+    #[arg(long)]
+    pub short_year: bool,
+    #[arg(long)]
+    pub disc: Option<u32>,
+    /// Write the renames. Without it, the full diff is printed and nothing is touched.
+    #[arg(long)]
+    pub yes: bool,
+}
+
 /// Returns whether every file passed.
 pub fn run(cli: Cli) -> Result<bool> {
     match cli.command {
@@ -304,6 +359,8 @@ pub fn run(cli: Cli) -> Result<bool> {
         Command::Check { file } => cmd_check(&file),
         Command::Convert(a) => cmd_convert(&a),
         Command::Tools => cmd_tools(),
+        Command::Tag(a) => cmd_tag(&a),
+        Command::Rename(a) => cmd_rename(&a),
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
             TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),
@@ -651,6 +708,212 @@ fn cmd_check(file: &Path) -> Result<bool> {
     }
     println!("{} {} entries checked", list.entries.len(), kind.label());
     Ok(ok)
+}
+
+/// Write the etree Vorbis-comment tags for one show (docs/tagging.md §1, §4, §5).
+///
+/// `TRACKNUMBER` always comes from position in the scan, never typed. Every other field
+/// is show-level — one value applied to every taggable file — except `TITLE`, which comes
+/// from `--titles` in file order when given. The full diff is always printed; nothing is
+/// written unless `--yes` is given, and a write is followed immediately by the
+/// audio-MD5 recheck docs/tagging.md §1's contract requires — a mismatch aborts the rest
+/// of the run rather than being treated as one file's failure, because it means a bug in
+/// us, not in the input.
+fn cmd_tag(args: &TagArgs) -> Result<bool> {
+    if !args.dir.is_dir() {
+        anyhow::bail!("{} is not a directory", args.dir.display());
+    }
+    let set =
+        scan::scan(&args.dir, false).with_context(|| format!("scanning {}", args.dir.display()))?;
+    for (skipped, why) in &set.skipped {
+        eprintln!("skipped {}: {why}", skipped.display());
+    }
+    if set.files.is_empty() {
+        anyhow::bail!("no audio files found in {}", args.dir.display());
+    }
+
+    let titles = match &args.titles {
+        Some(path) if path == Path::new("-") => Some(read_titles(
+            std::io::read_to_string(std::io::stdin()).context("reading titles from stdin")?,
+        )),
+        Some(path) => Some(read_titles(
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+        )),
+        None => None,
+    };
+    if let Some(titles) = &titles {
+        if titles.len() != set.files.len() {
+            anyhow::bail!(
+                "{} titles given but {} files in {}",
+                titles.len(),
+                set.files.len(),
+                args.dir.display()
+            );
+        }
+    }
+
+    let show_edit = Tags {
+        artist: args.artist.clone(),
+        album: args.album.clone(),
+        date: args.date.clone(),
+        genre: args.genre.clone(),
+        comment: args.comment.clone(),
+        location: args.location.clone(),
+        title: None,
+        track_number: None,
+    };
+
+    let mut any_change = false;
+    let mut wrote = 0usize;
+    for (i, f) in set.files.iter().enumerate() {
+        if !tag::is_taggable(f.format) {
+            println!(
+                "N/A       {} ({} carries no Vorbis comments)",
+                f.file_name(),
+                f.format
+            );
+            continue;
+        }
+        let mut edit = show_edit.clone();
+        edit.track_number = Some((i + 1).to_string());
+        if let Some(titles) = &titles {
+            edit.title = Some(titles[i].clone());
+        }
+
+        let before = tag::read(&f.path)
+            .with_context(|| format!("reading tags from {}", f.path.display()))?;
+        let changes = before.changes(&edit);
+        if changes.is_empty() {
+            println!("{}   unchanged", f.file_name());
+            continue;
+        }
+        any_change = true;
+        println!("{}", f.file_name());
+        for (field, old, new) in &changes {
+            println!("  {:<12} {:?} -> {:?}", field.key(), old.unwrap_or(""), new);
+        }
+
+        if args.yes {
+            let audio_before = ffp(&f.path)
+                .with_context(|| format!("reading the audio MD5 of {}", f.path.display()))?;
+            tag::apply(&f.path, &edit)
+                .with_context(|| format!("writing tags to {}", f.path.display()))?;
+            tag::assert_audio_unchanged(&f.path, audio_before)
+                .with_context(|| format!("checking {} after the write", f.path.display()))?;
+            wrote += 1;
+        }
+    }
+
+    if !any_change {
+        println!("nothing to change");
+        return Ok(true);
+    }
+    if !args.yes {
+        println!("plan only, nothing written — pass --yes to write");
+        return Ok(true);
+    }
+    println!("wrote {wrote} files");
+    Ok(true)
+}
+
+fn read_titles(text: String) -> Vec<String> {
+    text.lines().map(str::to_string).collect()
+}
+
+/// Rename one show's files to the etree track-name standard (docs/tagging.md §4, §5).
+///
+/// `--band`/`--date` default from `ShowName::parse` of the folder's own name, and are a
+/// command failure — naming exactly what is missing — when neither the flag nor the
+/// folder name supplies them. The full diff is always printed; nothing is written unless
+/// `--yes`, and a plan holding any collision is refused outright, before anything is
+/// written, even for the files that would have been fine.
+fn cmd_rename(args: &RenameArgs) -> Result<bool> {
+    if !args.dir.is_dir() {
+        anyhow::bail!("{} is not a directory", args.dir.display());
+    }
+    let show_name = args
+        .dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(ShowName::parse);
+
+    let band = args
+        .band
+        .clone()
+        .or_else(|| show_name.as_ref().map(|s| s.band.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --band given, and {} is not an etree show folder name to read one from",
+                args.dir.display()
+            )
+        })?;
+    let date = match &args.date {
+        Some(s) => ShowDate::parse(s)
+            .map(|(d, _)| d)
+            .ok_or_else(|| anyhow::anyhow!("--date {s:?} is not YYYY-MM-DD or YY-MM-DD"))?,
+        None => show_name.as_ref().map(|s| s.date).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --date given, and {} is not an etree show folder name to read one from",
+                args.dir.display()
+            )
+        })?,
+    };
+
+    let set =
+        scan::scan(&args.dir, false).with_context(|| format!("scanning {}", args.dir.display()))?;
+    for (skipped, why) in &set.skipped {
+        eprintln!("skipped {}: {why}", skipped.display());
+    }
+    if set.files.is_empty() {
+        anyhow::bail!("no audio files found in {}", args.dir.display());
+    }
+
+    let spec = NameSpec {
+        band,
+        date,
+        short_year: args.short_year,
+        disc: args.disc,
+        // No `--keep-suffix` flag (docs/tagging.md §5): keeping a title suffix a file
+        // already carries costs nothing when there is none, so it is always on here.
+        keep_suffix: true,
+    };
+    let files: Vec<PathBuf> = set.files.iter().map(|f| f.path.clone()).collect();
+    let plan = plan_rename(&files, &spec);
+    print_rename_plan(&plan);
+
+    if plan.has_collisions() {
+        println!("refusing: more than one file would end up with the same name");
+        return Ok(false);
+    }
+    let changed = plan
+        .entries
+        .iter()
+        .filter(|e| e.status == RenameStatus::Changed)
+        .count();
+    if changed == 0 {
+        println!("nothing to rename");
+        return Ok(true);
+    }
+    if !args.yes {
+        println!("plan only, nothing written — pass --yes to rename");
+        return Ok(true);
+    }
+
+    execute_rename(&plan).with_context(|| format!("renaming {}", args.dir.display()))?;
+    println!("renamed {changed} of {} files", plan.entries.len());
+    Ok(true)
+}
+
+fn print_rename_plan(plan: &RenamePlan) {
+    for e in &plan.entries {
+        let from = e.from.file_name().unwrap_or_default().to_string_lossy();
+        let to = e.to.file_name().unwrap_or_default().to_string_lossy();
+        match e.status {
+            RenameStatus::Unchanged => println!("{from}   unchanged"),
+            RenameStatus::Changed => println!("{from} -> {to}"),
+            RenameStatus::Collision => println!("{from} -> {to}   COLLISION"),
+        }
+    }
 }
 
 /// `m:ss.mmm`, the layout shntool uses — sub-second precision matters when the question

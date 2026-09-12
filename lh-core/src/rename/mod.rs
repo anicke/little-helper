@@ -144,6 +144,14 @@ fn target_path(from: &Path, spec: &NameSpec, track: u32) -> PathBuf {
 /// A failure at either phase rolls every rename already completed *in this call* back to
 /// its original name before the error is returned — the same all-or-nothing shape
 /// `output::commit_all` gives `sbe fix`.
+///
+/// Also refuses, before touching anything, a target that already exists on disk and is
+/// not itself one of this plan's own sources. `fs::rename`'s final move replaces an
+/// existing destination without asking — that is standard rename behaviour, not a bug in
+/// it — so left unchecked it would silently destroy a file this plan never mentioned
+/// (Principle 1). This is not something [`plan_rename`] can see: a file that failed to
+/// probe never becomes one of its `from` entries, but it can still be sitting on disk
+/// under a name a healthy file now computes as its own target.
 pub fn execute_rename(plan: &RenamePlan) -> Result<Vec<PathBuf>> {
     if plan.has_collisions() {
         return Err(Error::malformed(
@@ -157,6 +165,15 @@ pub fn execute_rename(plan: &RenamePlan) -> Result<Vec<PathBuf>> {
         .iter()
         .filter(|e| e.status == RenameStatus::Changed)
         .collect();
+
+    for e in &changed {
+        if e.to.exists() && !plan.entries.iter().any(|other| other.from == e.to) {
+            return Err(Error::malformed(
+                &e.to,
+                "already exists and is not part of this rename; refusing to overwrite it",
+            ));
+        }
+    }
 
     let pid = std::process::id();
     let temps: Vec<PathBuf> = changed
@@ -375,9 +392,10 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"audio");
     }
 
-    /// A failure partway through phase 2 must leave every file back where it started —
-    /// the third target is blocked by a pre-existing directory, forcing that rename to
-    /// fail after the first two have already succeeded.
+    /// A failure partway through phase 1 must leave every file back where it started:
+    /// the third file is missing (simulating one vanishing between planning and
+    /// execution), so its rename fails only after the first two have already been moved
+    /// to their temp names.
     #[test]
     fn a_failure_rolls_back_every_completed_rename() {
         let dir = tempfile::tempdir().unwrap();
@@ -388,13 +406,12 @@ mod tests {
         );
         std::fs::write(&a, b"a").unwrap();
         std::fs::write(&b, b"b").unwrap();
-        std::fs::write(&c, b"c").unwrap();
+        // `c` is deliberately never created.
         let (to_a, to_b, to_c) = (
             dir.path().join("a-new"),
             dir.path().join("b-new"),
             dir.path().join("c-new"),
         );
-        std::fs::create_dir(&to_c).unwrap(); // blocks the third rename in phase 2
 
         let plan = RenamePlan {
             entries: vec![
@@ -420,9 +437,36 @@ mod tests {
         assert!(matches!(err, Error::Io { .. }), "{err}");
         assert_eq!(std::fs::read(&a).unwrap(), b"a");
         assert_eq!(std::fs::read(&b).unwrap(), b"b");
-        assert_eq!(std::fs::read(&c).unwrap(), b"c");
+        assert!(!c.exists());
         assert!(!to_a.exists());
         assert!(!to_b.exists());
-        assert!(to_c.is_dir()); // untouched, never renamed onto
+        assert!(!to_c.exists());
+    }
+
+    /// `fs::rename` would otherwise silently replace an existing file with no warning at
+    /// all (Principle 1) — a target that already exists and is not itself one of this
+    /// plan's own sources must refuse rather than destroy it. This is the realistic way a
+    /// "two files, one name" collision reaches `execute_rename` in practice: a file that
+    /// failed to probe never becomes part of a `plan_rename`d set, but it is still sitting
+    /// on disk under a name a healthy file can compute as its own target.
+    #[test]
+    fn execute_rename_refuses_to_overwrite_a_file_outside_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.flac");
+        let stray = dir.path().join("gd1977-05-08t01.flac");
+        std::fs::write(&from, b"real track").unwrap();
+        std::fs::write(&stray, b"unrelated file").unwrap();
+
+        let plan = RenamePlan {
+            entries: vec![RenameEntry {
+                from: from.clone(),
+                to: stray.clone(),
+                status: RenameStatus::Changed,
+            }],
+        };
+        let err = execute_rename(&plan).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(from.exists(), "the source must be untouched");
+        assert_eq!(std::fs::read(&stray).unwrap(), b"unrelated file");
     }
 }

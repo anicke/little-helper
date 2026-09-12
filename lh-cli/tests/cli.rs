@@ -521,3 +521,209 @@ fn sbe_fix_executes_a_chained_three_file_set() {
     assert!(out.join("t02.flac").exists());
     assert!(out.join("t03.flac").exists());
 }
+
+/// The preview is the command: without `--yes`, the diff is printed and nothing is
+/// written (docs/tagging.md §5).
+#[test]
+fn tag_without_yes_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
+    let before = std::fs::read(dir.path().join("t01.flac")).unwrap();
+
+    lh().arg("tag")
+        .arg(dir.path())
+        .args(["--artist", "Grateful Dead"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ARTIST"))
+        .stdout(predicates::str::contains(
+            "plan only, nothing written — pass --yes to write",
+        ));
+
+    assert_eq!(std::fs::read(dir.path().join("t01.flac")).unwrap(), before);
+}
+
+/// `--yes` writes the show-level fields to every taggable file plus the position-derived
+/// `TRACKNUMBER`, and the audio survives untouched (docs/tagging.md §1 contract point 2).
+#[test]
+fn tag_yes_writes_artist_and_track_number() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
+
+    lh().arg("tag")
+        .arg(dir.path())
+        .args(["--artist", "Grateful Dead"])
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("wrote 1 files"));
+
+    let tags = lh_core::tag::read(&dir.path().join("t01.flac")).unwrap();
+    assert_eq!(tags.get(lh_core::tag::Field::Artist), Some("Grateful Dead"));
+    assert_eq!(tags.get(lh_core::tag::Field::TrackNumber), Some("1"));
+    assert_eq!(
+        lh_core::analysis::verify(&dir.path().join("t01.flac")).unwrap(),
+        lh_core::analysis::Verification::Ok
+    );
+}
+
+/// A WAV in the same show folder has nowhere to put a Vorbis comment; it is reported as
+/// not applicable rather than failing the whole run (docs/tagging.md §4).
+#[test]
+fn tag_reports_a_non_flac_member_as_not_applicable_rather_than_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.wav"),
+        dir.path().join("t02.wav"),
+    )
+    .unwrap();
+
+    lh().arg("tag")
+        .arg(dir.path())
+        .args(["--artist", "Grateful Dead"])
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("N/A       t02.wav"))
+        .stdout(predicates::str::contains("wrote 1 files"));
+}
+
+/// A titles file with the wrong number of lines is a command failure naming both counts —
+/// never a best-effort partial apply (docs/tagging.md §5).
+#[test]
+fn tag_titles_count_mismatch_is_a_command_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-sbe.flac"),
+        dir.path().join("t02.flac"),
+    )
+    .unwrap();
+    let titles = dir.path().join("titles.txt");
+    std::fs::write(&titles, "Only One Title\n").unwrap();
+
+    lh().arg("tag")
+        .arg(dir.path())
+        .args(["--titles"])
+        .arg(&titles)
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("1 titles given but 2 files"));
+}
+
+/// The preview is the command here too: without `--yes` nothing is renamed.
+#[test]
+fn rename_without_yes_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("a.flac"),
+    )
+    .unwrap();
+
+    lh().arg("rename")
+        .arg(dir.path())
+        .args(["--band", "gd", "--date", "1977-05-08"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("a.flac -> gd1977-05-08t01.flac"))
+        .stdout(predicates::str::contains(
+            "plan only, nothing written — pass --yes to rename",
+        ));
+
+    assert!(dir.path().join("a.flac").exists());
+    assert!(!dir.path().join("gd1977-05-08t01.flac").exists());
+}
+
+/// `--yes` renames for real, numbering tracks by position, and band/date default from an
+/// etree show folder name when not given explicitly (docs/tagging.md §5).
+#[test]
+fn rename_yes_renames_using_the_folder_name_for_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("gd1977-05-08.sbd.unknown");
+    std::fs::create_dir(&show).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), show.join("a.flac")).unwrap();
+    std::fs::copy(fixtures().join("cdda-sbe.flac"), show.join("b.flac")).unwrap();
+
+    lh().arg("rename")
+        .arg(&show)
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("renamed 2 of 2 files"));
+
+    assert!(show.join("gd1977-05-08t01.flac").exists());
+    assert!(show.join("gd1977-05-08t02.flac").exists());
+}
+
+/// Neither the folder name nor a flag supplies the band: a specific command failure,
+/// naming what is missing, not a silent guess (Principle 5).
+#[test]
+fn rename_without_band_or_an_etree_folder_name_is_a_command_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let show = dir.path().join("not_an_etree_name");
+    std::fs::create_dir(&show).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), show.join("a.flac")).unwrap();
+
+    lh().arg("rename")
+        .arg(&show)
+        .args(["--date", "1977-05-08"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("no --band given"));
+}
+
+/// A target that already exists and is not part of this rename must be refused, not
+/// silently overwritten (Principle 1). The realistic way this happens: a file that failed
+/// to probe is left out of the plan entirely, but is still sitting on disk under a name a
+/// healthy file now computes as its own target.
+#[test]
+fn rename_refuses_to_overwrite_a_file_outside_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    // Not a real FLAC file, so it fails to probe and is left out of the rename plan
+    // entirely — but it already occupies the name "z.flac" would compute to.
+    std::fs::write(
+        dir.path().join("gd1977-05-08t01.flac"),
+        b"not really a flac file",
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("z.flac"),
+    )
+    .unwrap();
+
+    lh().arg("rename")
+        .arg(dir.path())
+        .args(["--band", "gd", "--date", "1977-05-08"])
+        .arg("--yes")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("already exists"));
+
+    assert!(
+        dir.path().join("z.flac").exists(),
+        "the source is untouched"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("gd1977-05-08t01.flac")).unwrap(),
+        b"not really a flac file"
+    );
+}
