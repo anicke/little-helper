@@ -314,15 +314,21 @@ or a non-FLAC member of the set.
 
 ## 7. TUI / GUI
 
-Follows `docs/tui.md` §2's per-screen pattern (input → `Queue<T>` → table + gauge), with one
-real difference from every screen that pattern was written for: those screens' `Queue` jobs
+**TUI: done.** `run_sbe_fix` (`lh-tui/src/main.rs`) still follows `docs/tui.md` §2's overall
+shape (input → table + gauge), but not its `Queue<T>`-per-file mechanics: those screens' jobs
 are independent files, submitted and reported one row per file with no relationship between
-rows. A fix screen's rows are **boundaries**, not files, and boundary *N*'s row can't start
-until boundary *N-1*'s plan is known — not merely "not yet run", but genuinely sequential,
-which none of TUI2–TUI5 needed. This likely means `Queue<T>` gets a second submission mode
-(a chain rather than an independent pool) or the fix screen builds its own small sequential
-runner beside it rather than forcing the shared abstraction to bend. Worth deciding once the
-CLI (§6) exists and there's a real `FixPlan` to draw a screen around, not before.
+rows, and a fix's boundaries are the opposite — boundary *N*'s outcome depends on boundary
+*N-1*'s, and `execute_fix` computes/writes the whole set as one atomic call, not a pool of
+independent per-file jobs. Rather than growing `Queue<T>` a chained-submission mode nothing
+else needs, the fix screen routes around it: `plan_fix` runs before the terminal even opens
+(pure arithmetic, no decode) and renders as a static per-file table for `--dry-run`;
+executing submits `execute_fix` itself as the single job on a `Queue::with_workers(1)`, the
+same "one job on a queue of one" shape `torrent create`/`check` already use for a single
+sequential operation over a whole set. Every row updates together when the one `Finished`
+event lands, because the underlying operation is atomic — there is no meaningful per-file
+"running" state to show in between.
+
+**GUI: still open.** The GUI's own "Tools" menu (below) is unclaimed territory.
 
 The GUI's own "Tools" menu — the name TLH itself uses for exactly this kind of repair, per
 PLAN.md §4's note distinguishing it from the discovered-binary "Binaries" panel — is where
@@ -337,7 +343,7 @@ this belongs once it exists.
 | ~~**R1**~~ | ~~Plan, no execution~~ | **Done** — `analysis::sbe_fix::plan_fix` (§3, §4 steps 1–4): left-to-right arithmetic over `StreamInfo.total_frames`, no decode, refuses a non-CD-audio member. `lh sbe fix <DIR> --dry-run [--direction] [--pad-tail]`; bare `lh sbe <paths>` is unchanged. 10 tests (aligned/misaligned/chained boundaries, all three directions, tail report vs. pad). |
 | ~~**R2**~~ | ~~Two-file execution~~ | **Done** — `analysis::sbe_fix::execute_single_boundary` (§4 steps 5–7), the one-boundary entry point now built on top of `execute_fix` (R3): decode both neighbours in full (`format::flac::decode_to_samples`), shift frames across the split, re-encode each through the reference `flac` binary (`convert::encode_flac_staged`, the staged-not-committed half of `to_flac_cancellable`), restore original Vorbis comments via `metaflac`, verify the round-trip PCM MD5 invariant (§1, §5, `format::flac::concatenated_pcm_md5`) unconditionally, then commit both outputs atomically (`output::commit_all`, all-or-nothing with rollback). `-o` is mandatory to execute (open question 4 resolved this way: never an implicit default of overwriting the originals). |
 | ~~**R3**~~ | ~~Chained sets~~ | **Done** — `analysis::sbe_fix::execute_fix` generalizes R2 to any number of files: every boundary in `FixPlan.boundaries` applied left to right against a `Vec<Vec<i32>>` of decoded buffers (chaining falls out for free, since each boundary reads whatever the previous one already wrote into the shared buffer), `TailPolicy::Pad`'s silence appended to the last buffer and excluded from the invariant's "after" side, then every file encoded, tag-restored, checked and committed exactly as R2 did per pair. `lh sbe fix <DIR> -o <OUT> [--direction] [--pad-tail] [--overwrite]` (no `--dry-run`) now executes a directory of any size, per §6. 3 more tests in `lh-core/tests/sbe_fix.rs` (a real three-file chain verified end to end, tail padding executed and excluded from the invariant, atomic rollback across three staged outputs), 3 unit tests for `execute_fix`'s own shape checks, and 2 more CLI tests (`--pad-tail` fully aligning a set, a chained three-file directory). |
-| **R4** | TUI / GUI | Once §7's sequential-vs-pooled `Queue` question is settled. |
+| ~~**R4**~~ | ~~TUI~~ | **Done** — `run_sbe_fix` (`lh-tui/src/main.rs`): §9 open question 3 resolved by routing around `Queue<T>` rather than growing it a chained-submission mode, since a fix's unit of work is the whole ordered set, not an independent file. `plan_fix` runs before the terminal opens (pure arithmetic, no decode) and is shown as a static per-file table for `--dry-run`; executing submits `execute_fix` as the one job on a `Queue::with_workers(1)`, the same "one job on a queue of one" shape `torrent create`/`check` use for a single sequential operation — quitting breaks the screen immediately rather than waiting for `Done`, since `execute_fix` has no cancellation checkpoint to honor, matching `run_torrent_check_screen`'s own acceptance of that gap. GUI screen remains open. |
 
 ---
 
@@ -351,8 +357,9 @@ this belongs once it exists.
    TLH exposes backward/forward/nearest because different trading circles have different
    conventions for where a "correct" split falls. Nothing about this codebase's own principles
    picks one over the others — this is a community-convention question, not an engineering one.
-3. **Does `Queue<T>` grow a sequential mode, or does the fix screen route around it?** (§7)
-   Affects R4 only; nothing in R1–R3 depends on the answer.
+3. ~~**Does `Queue<T>` grow a sequential mode, or does the fix screen route around it?**~~
+   **Resolved in R4** (§7): it routes around `Queue<T>` — `execute_fix` runs as the one job
+   on a `Queue::with_workers(1)`, the shape `torrent create`/`check` already use.
 4. **In-place by default, or always a new directory?** `convert` defaults beside the source
    with a new extension, never overwriting without `--overwrite`, and `TempOutput::stage`
    actively refuses `src == dst`. A "fix" conceptually replaces the same track in place, which
