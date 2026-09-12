@@ -1,14 +1,14 @@
-//! R2 of docs/sbe-repair.md: executing a single boundary fix between two files. The
-//! round-trip PCM invariant (§1, §5) is the correctness argument, so it is the spine of
-//! every test here — plus tag survival and the atomic-commit guarantee, the two other
-//! things §1/§4 call out as non-negotiable.
+//! R2 (single boundary between two files) and R3 (a whole chained set, tail padding) of
+//! docs/sbe-repair.md. The round-trip PCM invariant (§1, §5) is the correctness argument,
+//! so it is the spine of every test here — plus tag survival and the atomic-commit
+//! guarantee, the two other things §1/§4 call out as non-negotiable.
 //!
 //! Tests needing `flac` skip when it is absent, the same convention `convert.rs` uses.
 
 use lh_core::analysis::{
-    BoundaryDirection, RepairEncode, TailPolicy, execute_single_boundary, plan_fix,
+    BoundaryDirection, RepairEncode, TailPolicy, execute_fix, execute_single_boundary, plan_fix,
 };
-use lh_core::convert::EncodeOpts;
+use lh_core::convert::{EncodeOpts, to_flac_cancellable};
 use lh_core::format;
 use lh_core::model::AudioFile;
 use lh_core::tools::{Registry, Tool, ToolId};
@@ -45,6 +45,62 @@ fn ordered_pair(dir: &Path) -> (AudioFile, AudioFile) {
     (probe(&a), probe(&b))
 }
 
+/// A canonical 44.1/16/2 WAV of exactly `frames` frames, filled with deterministic noise
+/// (xorshift32, seeded per file so adjacent tracks are not accidentally identical) rather
+/// than silence — a bug that shifted the wrong samples would still pass a silence-only
+/// invariant check.
+fn synth_wav(path: &Path, frames: u64, seed: u32) {
+    let channels: u32 = 2;
+    let sample_rate: u32 = 44_100;
+    let data_len = frames as u32 * channels * 2;
+
+    let mut w = Vec::with_capacity(44 + data_len as usize);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + data_len).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    w.extend_from_slice(&(channels as u16).to_le_bytes());
+    w.extend_from_slice(&sample_rate.to_le_bytes());
+    w.extend_from_slice(&(sample_rate * channels * 2).to_le_bytes());
+    w.extend_from_slice(&((channels * 2) as u16).to_le_bytes());
+    w.extend_from_slice(&16u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&data_len.to_le_bytes());
+
+    let mut state: u32 = seed | 1;
+    for _ in 0..frames * channels as u64 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        w.extend_from_slice(&(state as i16).to_le_bytes());
+    }
+    std::fs::write(path, w).unwrap();
+}
+
+/// A synthetic FLAC of exactly `frames` frames, encoded through the reference `flac`
+/// binary — real audio for an R3 chain test, without depending on a fixture of exactly
+/// the right length existing on disk.
+fn synth_flac(flac: &Tool, dir: &Path, name: &str, frames: u64, seed: u32) -> AudioFile {
+    let wav = dir.join(format!("{name}.wav"));
+    synth_wav(&wav, frames, seed);
+    let dst = dir.join(format!("{name}.flac"));
+    to_flac_cancellable(&wav, &dst, flac, &EncodeOpts::default(), false, &mut || {
+        true
+    })
+    .unwrap();
+    probe(&dst)
+}
+
+fn concatenated_md5_of(paths: &[PathBuf]) -> [u8; 16] {
+    let bufs: Vec<Vec<i32>> = paths
+        .iter()
+        .map(|p| format::flac::decode_to_samples(p).unwrap().1)
+        .collect();
+    let refs: Vec<&[i32]> = bufs.iter().map(Vec::as_slice).collect();
+    format::flac::concatenated_pcm_md5(&refs, 16)
+}
+
 #[test]
 fn single_boundary_shifts_exactly_the_planned_remainder() {
     let Some(flac) = reference_flac() else { return };
@@ -52,8 +108,12 @@ fn single_boundary_shifts_exactly_the_planned_remainder() {
     let (a, b) = ordered_pair(dir.path());
     assert_eq!(a.stream_info.total_frames.unwrap() % 588, 137);
 
-    let plan = plan_fix(&[a.clone(), b.clone()], BoundaryDirection::Backward, TailPolicy::Report)
-        .unwrap();
+    let plan = plan_fix(
+        &[a.clone(), b.clone()],
+        BoundaryDirection::Backward,
+        TailPolicy::Report,
+    )
+    .unwrap();
     assert_eq!(plan.boundaries.len(), 1);
     let shifted = plan.boundaries[0].shifted_frames;
     assert_eq!(shifted, 137, "backward must move exactly the remainder");
@@ -84,7 +144,9 @@ fn single_boundary_shifts_exactly_the_planned_remainder() {
         "the earlier file must now be sector-aligned"
     );
     // The later file absorbed 137 frames it did not have before.
-    let orig_b_frames = probe(&fixture("cdda-aligned.flac")).stream_info.total_frames;
+    let orig_b_frames = probe(&fixture("cdda-aligned.flac"))
+        .stream_info
+        .total_frames;
     assert_eq!(
         probed_b.stream_info.total_frames,
         orig_b_frames.map(|f| f + 137)
@@ -128,7 +190,10 @@ fn round_trip_pcm_is_unchanged_by_the_shift() {
     let (_, after_b) = format::flac::decode_to_samples(&out_b).unwrap();
     let after = format::flac::concatenated_pcm_md5(&[&after_a, &after_b], 16);
 
-    assert_eq!(before, after, "concatenated audio changed across the repair");
+    assert_eq!(
+        before, after,
+        "concatenated audio changed across the repair"
+    );
 }
 
 /// Repair inherits `convert`'s tag-dropping round trip unless it explicitly restores tags
@@ -225,4 +290,156 @@ fn non_cdda_pair_is_refused() {
     let err = execute_single_boundary(&a, &b, 137, &out_a, &out_b, &encode).unwrap_err();
     assert!(err.to_string().contains("not CD audio"), "{err}");
     assert!(!out_a.exists());
+}
+
+/// R3: three files where fixing boundary 0 changes what boundary 1 needs — the case that
+/// makes this a left-to-right pass rather than independent per-boundary fixes (the same
+/// scenario `chained_boundaries_carry_the_remainder_forward` covers for planning alone,
+/// executed here for real).
+#[test]
+fn chained_boundaries_execute_left_to_right() {
+    let Some(flac) = reference_flac() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    let a = synth_flac(&flac, dir.path(), "src-t01", 588 * 10 + 3, 1);
+    let b = synth_flac(&flac, dir.path(), "src-t02", 588 * 20, 2);
+    let c = synth_flac(&flac, dir.path(), "src-t03", 588 * 5, 3);
+    let files = [a.clone(), b.clone(), c.clone()];
+    let before_md5 = concatenated_md5_of(&[a.path.clone(), b.path.clone(), c.path.clone()]);
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    assert_eq!(plan.boundaries.len(), 2);
+    assert_eq!(
+        plan.boundaries[0].shifted_frames, 3,
+        "t01 hands its +3 to t02"
+    );
+    assert_eq!(
+        plan.boundaries[1].shifted_frames, 3,
+        "t02, now +3 in turn, hands the same 3 frames on to t03"
+    );
+    assert!(!plan.fully_fixed, "t03 ends up +3, still misaligned");
+
+    let out = dir.path().join("out");
+    let dsts = vec![
+        out.join("t01.flac"),
+        out.join("t02.flac"),
+        out.join("t03.flac"),
+    ];
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: false,
+    };
+
+    let fixed = execute_fix(&files, &plan, &dsts, &encode).unwrap();
+    assert_eq!(fixed.len(), 3);
+    assert_eq!(fixed[0].shifted_in, 0);
+    assert_eq!(fixed[0].shifted_out, 3);
+    assert_eq!(fixed[1].shifted_in, 3);
+    assert_eq!(fixed[1].shifted_out, 3);
+    assert_eq!(fixed[2].shifted_in, 3);
+    assert_eq!(fixed[2].shifted_out, 0);
+
+    let probed: Vec<AudioFile> = dsts.iter().map(|d| probe(d)).collect();
+    assert_eq!(probed[0].stream_info.total_frames.unwrap() % 588, 0);
+    assert_eq!(probed[1].stream_info.total_frames.unwrap() % 588, 0);
+    assert_eq!(
+        probed[2].stream_info.total_frames.unwrap() % 588,
+        3,
+        "t03 carries the same remainder the chain handed it"
+    );
+
+    let after_md5 = concatenated_md5_of(&dsts);
+    assert_eq!(
+        before_md5, after_md5,
+        "concatenated audio changed across the chained repair"
+    );
+}
+
+/// R3: executing `TailPolicy::Pad` actually adds silence to close the last file's gap,
+/// and the invariant check correctly excludes that added silence rather than failing on
+/// it (docs/sbe-repair.md §1, §6 step 6).
+#[test]
+fn tail_padding_executes_and_is_excluded_from_the_invariant() {
+    let Some(flac) = reference_flac() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    let short_by = 141;
+    let a = synth_flac(&flac, dir.path(), "src-t01", 588 * 4 + short_by, 7);
+    let files = [a.clone()];
+    let before_md5 = concatenated_md5_of(std::slice::from_ref(&a.path));
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Pad).unwrap();
+    assert!(plan.boundaries.is_empty());
+    let pad = 588 - short_by;
+    assert_eq!(plan.tail_padding_frames, Some(pad));
+    assert!(plan.fully_fixed);
+
+    let dsts = vec![dir.path().join("out/t01.flac")];
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: false,
+    };
+    let fixed = execute_fix(&files, &plan, &dsts, &encode).unwrap();
+    assert_eq!(fixed.len(), 1);
+
+    let probed = probe(&dsts[0]);
+    assert_eq!(probed.stream_info.total_frames.unwrap() % 588, 0);
+    assert_eq!(
+        probed.stream_info.total_frames.unwrap(),
+        a.stream_info.total_frames.unwrap() + pad,
+        "the tail grew by exactly the padding, the one operation allowed to add samples"
+    );
+
+    let (_, after_samples) = format::flac::decode_to_samples(&dsts[0]).unwrap();
+    let pad_samples = pad as usize * 2;
+    let (original_part, silence) = after_samples.split_at(after_samples.len() - pad_samples);
+    assert!(
+        silence.iter().all(|&s| s == 0),
+        "the padding itself must be silence"
+    );
+    let after_md5_excluding_pad =
+        format::flac::concatenated_pcm_md5(&[original_part], probed.stream_info.bits_per_sample);
+    assert_eq!(
+        before_md5, after_md5_excluding_pad,
+        "the original audio, excluding the padding, must be untouched"
+    );
+}
+
+/// R3's own atomic-commit guarantee: with three files staged, sabotaging the last one's
+/// destination must leave none of the first two committed either — extending
+/// `a_failed_second_output_leaves_neither_file_committed` from two files to a real chain.
+#[test]
+fn a_failed_third_output_in_a_chain_leaves_nothing_committed() {
+    let Some(flac) = reference_flac() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    let a = synth_flac(&flac, dir.path(), "src-t01", 588 * 10 + 3, 11);
+    let b = synth_flac(&flac, dir.path(), "src-t02", 588 * 20, 12);
+    let c = synth_flac(&flac, dir.path(), "src-t03", 588 * 5, 13);
+    let files = [a, b, c];
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    let out_a = dir.path().join("out_a.flac");
+    let out_b = dir.path().join("out_b.flac");
+    let out_c = dir.path().join("out_c.flac");
+    // Sabotage: a directory sits where the third output wants to write, so encoding it
+    // fails outright, after the first two have already been staged.
+    std::fs::create_dir_all(&out_c).unwrap();
+    let dsts = vec![out_a.clone(), out_b.clone(), out_c];
+
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: false,
+    };
+    let err = execute_fix(&files, &plan, &dsts, &encode).unwrap_err();
+    eprintln!("expected failure: {err}");
+
+    assert!(!out_a.exists(), "the first output must not survive alone");
+    assert!(!out_b.exists(), "the second output must not survive alone");
 }

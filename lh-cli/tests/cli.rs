@@ -427,7 +427,11 @@ fn sbe_fix_executes_a_single_boundary() {
 #[test]
 fn sbe_fix_without_output_dir_is_a_command_failure() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(fixtures().join("cdda-sbe.flac"), dir.path().join("t01.flac")).unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-sbe.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
     std::fs::copy(
         fixtures().join("cdda-aligned.flac"),
         dir.path().join("t02.flac"),
@@ -442,27 +446,78 @@ fn sbe_fix_without_output_dir_is_a_command_failure() {
         .stderr(predicates::str::contains("-o/--output"));
 }
 
-/// `--pad-tail` execution is R3, not implemented yet — it must fail loudly, not silently
-/// fall back to an unpadded fix.
+/// R3: `--pad-tail` at execution time actually closes the last file's gap with silence,
+/// leaving the whole set aligned (exit `0`), not just reported.
 #[test]
-fn sbe_fix_pad_tail_execution_is_refused() {
+fn sbe_fix_pad_tail_executes_and_fully_aligns_the_set() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(fixtures().join("cdda-sbe.flac"), dir.path().join("t01.flac")).unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-sbe.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
     std::fs::copy(
         fixtures().join("cdda-aligned.flac"),
         dir.path().join("t02.flac"),
     )
     .unwrap();
+    let out = dir.path().join("out");
 
     lh().arg("sbe")
         .arg("fix")
         .arg(dir.path())
         .args(["-o"])
-        .arg(dir.path().join("out"))
+        .arg(&out)
         .arg("--pad-tail")
         .assert()
-        .code(2)
-        .stderr(predicates::str::contains("R2"));
+        .success()
+        .stdout(predicates::str::contains("FIXED     t01.flac"))
+        .stdout(predicates::str::contains("FIXED     t02.flac"));
 
-    assert!(!dir.path().join("out").exists());
+    lh().arg("sbe")
+        .arg(out.join("t01.flac"))
+        .arg(out.join("t02.flac"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ALIGNED   t01.flac"))
+        .stdout(predicates::str::contains("ALIGNED   t02.flac"));
+}
+
+/// R3: a directory with more than two files chains every boundary left to right instead
+/// of being refused, the way R2 alone had to.
+#[test]
+fn sbe_fix_executes_a_chained_three_file_set() {
+    let dir = tempfile::tempdir().unwrap();
+    // Same fixtures reused for a third track: the point here is chaining through the CLI,
+    // not this specific misalignment, and cdda-aligned.flac stays a stable "no-op" link.
+    std::fs::copy(
+        fixtures().join("cdda-sbe.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t02.flac"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t03.flac"),
+    )
+    .unwrap();
+    let out = dir.path().join("out");
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .args(["-o"])
+        .arg(&out)
+        .assert()
+        .stdout(predicates::str::contains("FIXED     t01.flac"))
+        .stdout(predicates::str::contains("FIXED     t02.flac"))
+        .stdout(predicates::str::contains("FIXED     t03.flac"));
+
+    assert!(out.join("t01.flac").exists());
+    assert!(out.join("t02.flac").exists());
+    assert!(out.join("t03.flac").exists());
 }

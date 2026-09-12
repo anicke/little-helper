@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lh_core::analysis::{
-    BoundaryDirection, FixPlan, RepairEncode, Sbe, TailPolicy, Verification,
-    execute_single_boundary, plan_fix, sbe, verify,
+    BoundaryDirection, FixPlan, RepairEncode, Sbe, TailPolicy, Verification, execute_fix, plan_fix,
+    sbe, verify,
 };
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::convert::{
@@ -238,8 +238,6 @@ pub struct SbeFixArgs {
     #[arg(long, value_enum, default_value = "backward")]
     pub direction: Direction,
     /// Close a misaligned last file by adding silence, instead of leaving it reported.
-    /// Planning honours this; execution does not yet (docs/sbe-repair.md R3) and refuses
-    /// to run when it is set.
     #[arg(long)]
     pub pad_tail: bool,
     /// Print the plan and write nothing.
@@ -430,9 +428,8 @@ fn cmd_sbe(p: &Paths) -> Result<bool> {
 }
 
 /// Plan a sector-boundary repair for one directory's files, in filename order, and — unless
-/// `--dry-run` — execute it. Execution (R2 of docs/sbe-repair.md) only covers the single-
-/// boundary case today: exactly two files, no `--pad-tail`. A whole ordered set with
-/// chained boundaries is R3, not implemented yet.
+/// `--dry-run` — execute it: every boundary shift chained left to right, and the tail
+/// padded with silence when `--pad-tail` is given (docs/sbe-repair.md R1–R3).
 fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
     if !args.dir.is_dir() {
         anyhow::bail!("{} is not a directory", args.dir.display());
@@ -465,22 +462,6 @@ fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         return Ok(plan.fully_fixed);
     }
 
-    if args.pad_tail {
-        anyhow::bail!(
-            "sbe fix cannot execute --pad-tail yet — only the boundary shift between two \
-             files is implemented (docs/sbe-repair.md R2); padding the tail with silence is \
-             R3. Use --dry-run to see the plan without it."
-        );
-    }
-    if set.files.len() != 2 {
-        anyhow::bail!(
-            "sbe fix can only execute a single two-file boundary today (docs/sbe-repair.md \
-             R2); {} has {} files. Chaining a whole set is R3, not implemented yet — use \
-             --dry-run to see the full plan.",
-            args.dir.display(),
-            set.files.len()
-        );
-    }
     let out_dir = args.output.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "sbe fix needs -o/--output to execute — it never writes over the originals \
@@ -508,24 +489,19 @@ fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         overwrite: args.overwrite,
     };
 
-    let a = &set.files[0];
-    let b = &set.files[1];
-    let dst_a = destination(&a.path, "flac", Some(out_dir))
-        .ok_or_else(|| anyhow::anyhow!("{} has no file name", a.path.display()))?;
-    let dst_b = destination(&b.path, "flac", Some(out_dir))
-        .ok_or_else(|| anyhow::anyhow!("{} has no file name", b.path.display()))?;
+    let dsts = set
+        .files
+        .iter()
+        .map(|f| {
+            destination(&f.path, "flac", Some(out_dir))
+                .ok_or_else(|| anyhow::anyhow!("{} has no file name", f.path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    let shifted = plan.boundaries[0].shifted_frames;
-    let (fixed_a, fixed_b) = execute_single_boundary(a, b, shifted, &dst_a, &dst_b, &encode)
-        .with_context(|| {
-            format!(
-                "repairing the boundary between {} and {}",
-                a.file_name(),
-                b.file_name()
-            )
-        })?;
+    let fixed = execute_fix(&set.files, &plan, &dsts, &encode)
+        .with_context(|| format!("repairing {}", args.dir.display()))?;
 
-    for (f, fixed) in [(a, &fixed_a), (b, &fixed_b)] {
+    for (f, fixed) in set.files.iter().zip(&fixed) {
         println!(
             "FIXED     {} -> {}   audio md5 {}",
             f.file_name(),
@@ -535,9 +511,11 @@ fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
     }
     if !plan.fully_fixed {
         println!(
-            "{}   still misaligned once the boundary above is fixed — rerun with --pad-tail \
-             once tail padding is implemented (R3)",
-            b.file_name()
+            "{}   still misaligned — rerun with --pad-tail to close it with silence",
+            set.files
+                .last()
+                .expect("checked non-empty above")
+                .file_name()
         );
     }
 

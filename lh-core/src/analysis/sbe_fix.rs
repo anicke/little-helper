@@ -4,11 +4,10 @@
 //! header-only read [`super::sbe::sbe`] already does, so a plan can be shown to a user with
 //! no decode.
 //!
-//! R2 is [`execute_single_boundary`]: decode, shift, re-encode, restore tags, and commit
-//! two files at once for a single boundary. Chaining that across a whole ordered set, and
-//! the tail's own `--pad-tail` policy, are later milestones (R3) — this executes one
-//! [`BoundaryFix`] at a time, which already covers the common case of a single split a few
-//! frames off.
+//! R2/R3 is [`execute_fix`]: decode, shift (chained left to right across as many files as
+//! the plan has), pad the tail when asked, re-encode, restore tags, and commit every file
+//! atomically. [`execute_single_boundary`] is the R2-shaped entry point for the common case
+//! of one boundary between two adjacent files, built on top of it.
 
 use crate::convert::{self, EncodeOpts};
 use crate::error::{Error, Result};
@@ -179,24 +178,41 @@ pub struct RepairEncode<'a> {
     pub overwrite: bool,
 }
 
-/// Execute one [`BoundaryFix`] between exactly two files: decode both fully, move
-/// `shifted_frames` across the split (its sign convention is [`BoundaryFix`]'s), re-encode
-/// both through the reference `flac` binary, restore each file's original Vorbis comments,
-/// verify the round-trip PCM invariant across the pair (docs/sbe-repair.md §1, §5), and
-/// commit both outputs atomically — both or neither ([`output::commit_all`]).
+/// Execute a whole [`FixPlan`] over an ordered set of files (R3): apply every boundary
+/// shift left to right, chaining as each one changes what the next file starts with, add
+/// the tail's silence when [`FixPlan::tail_padding_frames`] asks for it, re-encode every
+/// file through the reference `flac` binary, restore each file's original Vorbis comments,
+/// verify the round-trip PCM invariant across the *whole* set (docs/sbe-repair.md §1, §5,
+/// excluding a padded tail's added silence from the comparison), and commit every output
+/// atomically — all of it or none ([`output::commit_all`]).
 ///
-/// `a` and `b` must be adjacent files from a [`plan_fix`]'d set — CD audio, `shifted_frames`
-/// no larger than what either file actually has to give. `dst_a`/`dst_b` are never `a.path`
-/// /`b.path` themselves: repair produces new files the same way `convert` does (Principle 1).
-pub fn execute_single_boundary(
-    a: &AudioFile,
-    b: &AudioFile,
-    shifted_frames: i64,
-    dst_a: &Path,
-    dst_b: &Path,
+/// `files` and `dsts` must be the same length, in the same order `plan` was computed for by
+/// [`plan_fix`] — this does not re-derive the plan, it only executes the one given. `dsts`
+/// are never any `files[i].path` itself: repair produces new files the same way `convert`
+/// does (Principle 1). A set of exactly one file is legal — no boundaries, tail padding
+/// only.
+pub fn execute_fix(
+    files: &[AudioFile],
+    plan: &FixPlan,
+    dsts: &[PathBuf],
     encode: &RepairEncode,
-) -> Result<(Fixed, Fixed)> {
-    for f in [a, b] {
+) -> Result<Vec<Fixed>> {
+    if files.is_empty() {
+        return Err(Error::malformed("<set>", "no files to fix"));
+    }
+    if files.len() != dsts.len() {
+        return Err(Error::malformed(
+            "<set>",
+            "files and destinations must be the same length",
+        ));
+    }
+    if plan.boundaries.len() != files.len() - 1 {
+        return Err(Error::malformed(
+            "<set>",
+            "this plan was not computed for this file set",
+        ));
+    }
+    for f in files {
         if !f.stream_info.is_cdda() {
             return Err(Error::malformed(
                 &f.path,
@@ -204,79 +220,102 @@ pub fn execute_single_boundary(
             ));
         }
     }
-    let channels = a.stream_info.channels as usize;
-    let bits_per_sample = a.stream_info.bits_per_sample;
+    let channels = files[0].stream_info.channels as usize;
+    let bits_per_sample = files[0].stream_info.bits_per_sample;
 
-    // §4 step 5c: tags are read before anything else touches either file.
-    let tags_a = read_vorbis_comments(&a.path)?;
-    let tags_b = read_vorbis_comments(&b.path)?;
+    // §4 step 5c: tags are read before anything else touches any file.
+    let tags = files
+        .iter()
+        .map(|f| read_vorbis_comments(&f.path))
+        .collect::<Result<Vec<_>>>()?;
 
     // §4 step 5a.
-    let (_, orig_a) = format::flac::decode_to_samples(&a.path)?;
-    let (_, orig_b) = format::flac::decode_to_samples(&b.path)?;
+    let mut buffers = files
+        .iter()
+        .map(|f| Ok(format::flac::decode_to_samples(&f.path)?.1))
+        .collect::<Result<Vec<Vec<i32>>>>()?;
 
-    let a_frames = orig_a.len() / channels;
-    let b_frames = orig_b.len() / channels;
-    if shifted_frames > 0 && shifted_frames as usize > a_frames {
-        return Err(Error::malformed(
-            &a.path,
-            format!(
-                "cannot shift {shifted_frames} frames off a file that only has {a_frames}"
-            ),
-        ));
+    // The whole-set invariant's "before": every file's audio, concatenated, as it is now —
+    // untouched by anything below.
+    let before_md5 = {
+        let refs: Vec<&[i32]> = buffers.iter().map(Vec::as_slice).collect();
+        format::flac::concatenated_pcm_md5(&refs, bits_per_sample)
+    };
+
+    // §4 step 5b, left to right — fixing boundary i changes how many frames file i+1
+    // starts with, which is exactly what boundary i+1's own shift already accounts for
+    // (plan_fix computed it that way), so applying them in order is what makes this correct.
+    for b in &plan.boundaries {
+        let i = b.index;
+        if b.shifted_frames > 0 && b.shifted_frames as usize * channels > buffers[i].len() {
+            return Err(Error::malformed(
+                &files[i].path,
+                format!(
+                    "cannot shift {} frames off a file whose decoded audio is shorter than \
+                     its header claims",
+                    b.shifted_frames
+                ),
+            ));
+        }
+        if b.shifted_frames < 0 && (-b.shifted_frames) as usize * channels > buffers[i + 1].len() {
+            return Err(Error::malformed(
+                &files[i + 1].path,
+                format!(
+                    "cannot borrow {} frames from a file whose decoded audio is shorter than \
+                     its header claims",
+                    -b.shifted_frames
+                ),
+            ));
+        }
+        let (left, right) = buffers.split_at_mut(i + 1);
+        move_boundary(&mut left[i], &mut right[0], b.shifted_frames, channels);
     }
-    if shifted_frames < 0 && (-shifted_frames) as usize > b_frames {
-        return Err(Error::malformed(
-            &b.path,
-            format!(
-                "cannot borrow {} frames from a file that only has {b_frames}",
-                -shifted_frames
-            ),
-        ));
+
+    // The one operation here that adds samples instead of reassigning them (§1).
+    if let Some(pad) = plan.tail_padding_frames {
+        let last = buffers.last_mut().expect("checked non-empty above");
+        last.extend(std::iter::repeat_n(0i32, pad as usize * channels));
     }
 
-    // The whole-set invariant's "before": the two files' audio, concatenated, as they are
-    // now — untouched by the shift below.
-    let before_md5 = format::flac::concatenated_pcm_md5(&[&orig_a, &orig_b], bits_per_sample);
-
-    // §4 step 5b.
-    let mut shifted_a = orig_a;
-    let mut shifted_b = orig_b;
-    move_boundary(&mut shifted_a, &mut shifted_b, shifted_frames, channels);
-
-    // §4 step 5d: re-encode through the reference binary. Staged, not yet committed.
-    let scratch_a = write_scratch_wav(dst_a, &shifted_a, &a.stream_info)?;
-    let scratch_b = write_scratch_wav(dst_b, &shifted_b, &b.stream_info)?;
-    let (temp_a, prov_a, _, _) = convert::encode_flac_staged(
-        scratch_a.path(),
-        dst_a,
-        encode.flac,
-        encode.opts,
-        encode.overwrite,
-        &mut || true,
-    )?;
-    let (temp_b, prov_b, _, _) = convert::encode_flac_staged(
-        scratch_b.path(),
-        dst_b,
-        encode.flac,
-        encode.opts,
-        encode.overwrite,
-        &mut || true,
-    )?;
-
-    // §4 step 5e: restore tags on the staged files, still before commit.
-    write_vorbis_comments(temp_a.path(), &tags_a)?;
-    write_vorbis_comments(temp_b.path(), &tags_b)?;
+    // §4 step 5d: re-encode every buffer through the reference binary. Staged, not yet
+    // committed.
+    let mut temps = Vec::with_capacity(files.len());
+    let mut provenance = Vec::with_capacity(files.len());
+    for i in 0..files.len() {
+        let scratch = write_scratch_wav(&dsts[i], &buffers[i], &files[i].stream_info)?;
+        let (temp, prov, _, _) = convert::encode_flac_staged(
+            scratch.path(),
+            &dsts[i],
+            encode.flac,
+            encode.opts,
+            encode.overwrite,
+            &mut || true,
+        )?;
+        // §4 step 5e: restore tags on the staged file, still before commit.
+        write_vorbis_comments(temp.path(), &tags[i])?;
+        temps.push(temp);
+        provenance.push(prov);
+    }
 
     // §4 step 6 / §5: decode what was actually staged and compare against the "before" —
     // this is the whole correctness argument, and it catches an encode-side mistake that
     // aligning-per-`sbe()` alone would not: wrong output that happens to land on a sector.
-    let (_, check_a) = format::flac::decode_to_samples(temp_a.path())?;
-    let (_, check_b) = format::flac::decode_to_samples(temp_b.path())?;
-    let after_md5 = format::flac::concatenated_pcm_md5(&[&check_a, &check_b], bits_per_sample);
+    let mut checked = temps
+        .iter()
+        .map(|t| Ok(format::flac::decode_to_samples(t.path())?.1))
+        .collect::<Result<Vec<Vec<i32>>>>()?;
+    if let Some(pad) = plan.tail_padding_frames {
+        let last = checked.last_mut().expect("checked non-empty above");
+        let cut = pad as usize * channels;
+        last.truncate(last.len().saturating_sub(cut));
+    }
+    let after_md5 = {
+        let refs: Vec<&[i32]> = checked.iter().map(Vec::as_slice).collect();
+        format::flac::concatenated_pcm_md5(&refs, bits_per_sample)
+    };
     if after_md5 != before_md5 {
         return Err(Error::malformed(
-            dst_a,
+            &dsts[0],
             format!(
                 "round-trip audio MD5 mismatch after repair (before {}, after {}); \
                  nothing was committed",
@@ -285,28 +324,62 @@ pub fn execute_single_boundary(
             ),
         ));
     }
-    let audio_md5_a = format::flac::audio_md5(temp_a.path())?;
-    let audio_md5_b = format::flac::audio_md5(temp_b.path())?;
+    let audio_md5s = temps
+        .iter()
+        .map(|t| format::flac::audio_md5(t.path()))
+        .collect::<Result<Vec<_>>>()?;
 
-    // §4 step 7: both or neither.
-    let committed = output::commit_all(vec![temp_a, temp_b])?;
+    // §4 step 7: all or nothing.
+    let committed = output::commit_all(temps)?;
 
-    Ok((
-        Fixed {
-            path: committed[0].clone(),
-            shifted_in: 0,
-            shifted_out: shifted_frames,
-            audio_md5: audio_md5_a,
-            provenance: prov_a,
-        },
-        Fixed {
-            path: committed[1].clone(),
-            shifted_in: shifted_frames,
-            shifted_out: 0,
-            audio_md5: audio_md5_b,
-            provenance: prov_b,
-        },
-    ))
+    Ok((0..files.len())
+        .map(|i| Fixed {
+            path: committed[i].clone(),
+            shifted_in: if i == 0 {
+                0
+            } else {
+                plan.boundaries[i - 1].shifted_frames
+            },
+            shifted_out: plan
+                .boundaries
+                .get(i)
+                .map(|b| b.shifted_frames)
+                .unwrap_or(0),
+            audio_md5: audio_md5s[i],
+            provenance: provenance[i].clone(),
+        })
+        .collect())
+}
+
+/// [`execute_fix`] for exactly one boundary between two files — the R2 case, kept as its
+/// own entry point because "one boundary between two adjacent files" is the common shape
+/// callers reach for without building a whole-set [`FixPlan`] by hand.
+///
+/// `a` and `b` must be adjacent files from a [`plan_fix`]'d set — CD audio, `shifted_frames`
+/// no larger than what either file actually has to give. `dst_a`/`dst_b` are never `a.path`
+/// /`b.path` themselves (Principle 1).
+pub fn execute_single_boundary(
+    a: &AudioFile,
+    b: &AudioFile,
+    shifted_frames: i64,
+    dst_a: &Path,
+    dst_b: &Path,
+    encode: &RepairEncode,
+) -> Result<(Fixed, Fixed)> {
+    let plan = FixPlan {
+        boundaries: vec![BoundaryFix {
+            index: 0,
+            shifted_frames,
+        }],
+        tail_padding_frames: None,
+        fully_fixed: false,
+    };
+    let files = [a.clone(), b.clone()];
+    let dsts = [dst_a.to_path_buf(), dst_b.to_path_buf()];
+    let mut fixed = execute_fix(&files, &plan, &dsts, encode)?;
+    let fixed_b = fixed.pop().expect("execute_fix returns one Fixed per file");
+    let fixed_a = fixed.pop().expect("execute_fix returns one Fixed per file");
+    Ok((fixed_a, fixed_b))
 }
 
 /// Move `shifted_frames` (see [`BoundaryFix`]'s sign convention) between two interleaved
@@ -351,8 +424,7 @@ fn write_scratch_wav(dst_hint: &Path, samples: &[i32], info: &StreamInfo) -> Res
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }
     let file = File::create(&path).map_err(|e| Error::io(&path, e))?;
-    let mut writer =
-        WavWriter::new(BufWriter::new(file), info).map_err(|e| Error::io(&path, e))?;
+    let mut writer = WavWriter::new(BufWriter::new(file), info).map_err(|e| Error::io(&path, e))?;
     writer
         .write_samples(samples)
         .map_err(|e| Error::io(&path, e))?;
@@ -376,7 +448,10 @@ fn read_vorbis_comments(path: &Path) -> Result<Option<metaflac::block::VorbisCom
 /// Restore comment fields onto a freshly encoded FLAC, keeping the vendor string `flac`
 /// just wrote — that string is Principle 2's provenance marker, not part of what repair is
 /// meant to preserve from the source.
-fn write_vorbis_comments(path: &Path, original: &Option<metaflac::block::VorbisComment>) -> Result<()> {
+fn write_vorbis_comments(
+    path: &Path,
+    original: &Option<metaflac::block::VorbisComment>,
+) -> Result<()> {
     let Some(original) = original else {
         return Ok(());
     };
@@ -538,5 +613,83 @@ mod tests {
         let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Pad).unwrap();
         assert_eq!(plan.tail_padding_frames, None);
         assert!(plan.fully_fixed);
+    }
+
+    fn dummy_tool() -> Tool {
+        Tool {
+            id: crate::tools::ToolId::Flac,
+            path: PathBuf::from("flac"),
+            source: crate::tools::ToolSource::Path,
+            version: "test".into(),
+            sha256: String::new(),
+        }
+    }
+
+    /// `execute_fix`'s own shape checks run before any file is touched, so they are
+    /// testable without a real `flac` binary or real audio on disk.
+    #[test]
+    fn execute_fix_refuses_a_destination_count_that_does_not_match() {
+        let files = [file("t01.flac", 588 * 10), file("t02.flac", 588 * 20)];
+        let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+        let tool = dummy_tool();
+        let opts = EncodeOpts::default();
+        let encode = RepairEncode {
+            flac: &tool,
+            opts: &opts,
+            overwrite: false,
+        };
+        let dsts = [PathBuf::from("out/t01.flac")]; // one destination, two files
+        let err = execute_fix(&files, &plan, &dsts, &encode).unwrap_err();
+        assert!(err.to_string().contains("same length"), "{err}");
+    }
+
+    #[test]
+    fn execute_fix_refuses_a_plan_computed_for_a_different_file_count() {
+        let files = [file("t01.flac", 588 * 10), file("t02.flac", 588 * 20)];
+        // A plan for three files, deliberately mismatched to this two-file set.
+        let plan = FixPlan {
+            boundaries: vec![
+                BoundaryFix {
+                    index: 0,
+                    shifted_frames: 0,
+                },
+                BoundaryFix {
+                    index: 1,
+                    shifted_frames: 0,
+                },
+            ],
+            tail_padding_frames: None,
+            fully_fixed: true,
+        };
+        let tool = dummy_tool();
+        let opts = EncodeOpts::default();
+        let encode = RepairEncode {
+            flac: &tool,
+            opts: &opts,
+            overwrite: false,
+        };
+        let dsts = [PathBuf::from("out/t01.flac"), PathBuf::from("out/t02.flac")];
+        let err = execute_fix(&files, &plan, &dsts, &encode).unwrap_err();
+        assert!(
+            err.to_string().contains("not computed for this file set"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn execute_fix_refuses_an_empty_set() {
+        let plan = FixPlan {
+            boundaries: vec![],
+            tail_padding_frames: None,
+            fully_fixed: true,
+        };
+        let tool = dummy_tool();
+        let opts = EncodeOpts::default();
+        let encode = RepairEncode {
+            flac: &tool,
+            opts: &opts,
+            overwrite: false,
+        };
+        assert!(execute_fix(&[], &plan, &[], &encode).is_err());
     }
 }
