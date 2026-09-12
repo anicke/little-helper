@@ -12,18 +12,18 @@ for the live-music trading community: verify, checksum and convert lossless audi
 
 ## 0. Status
 
-*Updated 2026-09-08.*
+*Updated 2026-09-12.*
 
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; SBE repair (R1–R3 of [docs/sbe-repair.md](docs/sbe-repair.md)) done — plan and execute a fix for a directory of any size, chained boundaries and `--pad-tail` both included; only a TUI/GUI screen (R4) is outstanding |
-| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers` all work |
-| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell is being revamped: [docs/gui-shell.md](docs/gui-shell.md), S1–S3 done, S4 not started |
-| `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `convert`, and `torrent create`/`check` have real live screens, everything else runs headless like `lh` itself |
+| M1 `lh-core` | **in progress** — probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; SBE repair ([docs/sbe-repair.md](docs/sbe-repair.md), R1–R4) done, including the TUI screen; etree naming, tagging and rename ([docs/tagging.md](docs/tagging.md), N1–N3) done |
+| M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers`, `tag`, `rename` all work |
+| M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell is being revamped: [docs/gui-shell.md](docs/gui-shell.md), S1–S3 done, S4 not started. Tag/rename ([docs/tagging.md](docs/tagging.md)) has no GUI screen yet |
+| `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `convert`, `sbe fix`, `torrent create`/`check`, and `tag`/`rename` have real live screens, everything else runs headless like `lh` itself |
 | M4 Packaging | not started |
 
-180 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+228 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 
@@ -83,6 +83,13 @@ These are the constraints every later decision is checked against.
 1. **Never destroy data.** v0.1 modifies nothing in place. Outputs are new files written
    to a temp path and atomically renamed. Originals are never touched, never deleted.
    Users are handing us archives they cannot re-acquire.
+   **Amended for `tag` and `rename`** ([docs/tagging.md](docs/tagging.md) §1): from v0.2
+   these two operations write in place, because neither has a meaningful copy-to-output
+   form. They are bound by a stricter contract instead — nothing is written until the full
+   before→after diff has been shown and confirmed (`--yes` / `a`), audio is never touched
+   and that is *checked* rather than asserted (every written file is re-probed and its
+   STREAMINFO MD5 compared to the digest read before the write; a mismatch aborts the run
+   as a bug), and a set is renamed all at once or not at all.
 2. **Provenance is a feature, not plumbing.** Every operation records which tool ran, its
    version, and the exact argv. That record is exportable. Encoding uses the *reference*
    `flac` binary so the FLAC vendor string reads `reference libFLAC x.y.z` — the string
@@ -118,8 +125,12 @@ These are the constraints every later decision is checked against.
 
 ### Explicitly deferred to v0.2+
 
-Tag editing (via reference `metaflac`), SHN via `shntool`, APE / TTA / WavPack,
-MP3 export, cue split & join, 24-bit→16-bit resample, batch rename.
+SHN via `shntool`, APE / TTA / WavPack, MP3 export, cue split & join, 24-bit→16-bit resample.
+
+Tag editing and batch rename, originally deferred here, are done — planned in
+[docs/tagging.md](docs/tagging.md) (N1–N3) and shipped as `lh tag` / `lh rename` and their
+`lh-tui` screens. A GUI screen is the one thing still open, tracked alongside the other v0.1
+GUI work in §4.
 
 SBE *repair* (as opposed to the detection already in v0.1) is planned in
 [docs/sbe-repair.md](docs/sbe-repair.md). It shifts samples across track boundaries so splits
