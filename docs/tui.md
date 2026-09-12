@@ -136,6 +136,23 @@ per frame (so a fast batch does not visibly lag the table behind the gauge), and
 enum's variants (they should mirror the operation's own result enum, the way verify's
 mirrors `Verification`), and whatever the operation-specific header/footer needs to say.
 
+**The header's elapsed time freezes once the work is done, not live `start.elapsed()`.**
+Every screen keeps polling and redrawing at 80ms after its batch/job finishes too — that's
+what lets `q` still quit a screen sitting on its final results — so a header computing
+`start.elapsed()` directly on every frame would keep climbing for however long the user sits
+there reading the table before quitting, which reads as the operation still running when it
+is not. `header_elapsed(start, &mut finished_at, done)` (`lh-tui/src/main.rs:65`) is the fix
+every screen shares: it returns a live, advancing value until `done` first turns true, then
+returns that one frozen instant forever after, `finished_at` being the caller's own
+`Option<Instant>` local to its run loop. `done` is each screen's own notion of "nothing left
+to happen" — `done == total` for a per-file batch, `matches!(stage, ...Stage::Done(_))` for a
+single-job screen, `matches!(stage, TagStage::Done)`/`RenameStage::Done` for the two editor
+screens (their elapsed keeps advancing through `Editing`/`Writing` — that duration is real,
+only the post-write idle wait should stop counting). `run_sbe_fix_plan_screen` (dry-run
+preview, no job at all) and `run_sbe_fix_execute_screen` (which already `break`s the instant
+its one job reaches `Done`, never idling on a finished screen) are the two exceptions with no
+freeze — the first has no "done" to freeze at, the second is never idle long enough to matter.
+
 A screen whose operation reports true sub-file progress (`convert`'s frame counts,
 `torrent create`'s piece counts — both already flow through `job::Event::Progress` for
 `lh-cli`'s own `run_batch`, §8 below) should render it; verify has no such screen because

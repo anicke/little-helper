@@ -57,6 +57,21 @@ use std::path::{Path, PathBuf};
 
 const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
 
+/// The elapsed time a header shows: keeps advancing every frame while `done` is false, then
+/// freezes at the instant `done` first turns true. Every screen redraws on an 80ms poll even
+/// once its work is finished (waiting for `q`), so a header computing `start.elapsed()` live
+/// would otherwise keep climbing while nothing is actually happening. `finished_at` is the
+/// caller's own `Option<Instant>`, `None` until that instant, so the freeze survives frames.
+fn header_elapsed(start: Instant, finished_at: &mut Option<Instant>, done: bool) -> f32 {
+    if done && finished_at.is_none() {
+        *finished_at = Some(Instant::now());
+    }
+    finished_at
+        .unwrap_or_else(Instant::now)
+        .duration_since(start)
+        .as_secs_f32()
+}
+
 #[derive(Clone)]
 enum Status {
     Pending,
@@ -292,6 +307,7 @@ fn run(
     let mut no_md5_count = 0usize;
     let mut failed_count = 0usize;
     let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -335,7 +351,8 @@ fn run(
             mismatch: mismatch_count,
             failed: failed_count,
         };
-        terminal.draw(|frame| draw(frame, root, &rows, &stats, start, tick, &theme))?;
+        let elapsed = header_elapsed(start, &mut finished_at, done == total);
+        terminal.draw(|frame| draw(frame, root, &rows, &stats, elapsed, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -369,7 +386,7 @@ fn draw(
     root: &str,
     rows: &[FileRow],
     stats: &Stats,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -384,7 +401,7 @@ fn draw(
         ])
         .split(area);
 
-    draw_header(frame, chunks[0], root, stats, start, theme);
+    draw_header(frame, chunks[0], root, stats, elapsed, theme);
     draw_table(frame, chunks[1], rows, tick, theme);
     draw_gauge(frame, chunks[2], stats, theme);
     draw_footer(frame, chunks[3], theme);
@@ -395,10 +412,9 @@ fn draw_header(
     area: Rect,
     root: &str,
     stats: &Stats,
-    start: Instant,
+    elapsed: f32,
     theme: &Theme,
 ) {
-    let elapsed = start.elapsed().as_secs_f32();
     let line = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(" verify  "),
@@ -614,11 +630,9 @@ fn run_checksum_screen(
     let mut done = 0usize;
     let mut ok_count = 0usize;
     let mut failed_count = 0usize;
-    let meta = ChecksumMeta {
-        kind,
-        root,
-        start: Instant::now(),
-    };
+    let meta = ChecksumMeta { kind, root };
+    let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -652,7 +666,8 @@ fn run_checksum_screen(
             ok: ok_count,
             failed: failed_count,
         };
-        terminal.draw(|frame| draw_checksum(frame, &meta, &rows, &stats, tick, &theme))?;
+        let elapsed = header_elapsed(start, &mut finished_at, done == total);
+        terminal.draw(|frame| draw_checksum(frame, &meta, &rows, &stats, elapsed, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -696,7 +711,6 @@ struct ChecksumStats {
 struct ChecksumMeta<'a> {
     kind: ChecksumKind,
     root: &'a str,
-    start: Instant,
 }
 
 fn draw_checksum(
@@ -704,6 +718,7 @@ fn draw_checksum(
     meta: &ChecksumMeta,
     rows: &[ChecksumRow],
     stats: &ChecksumStats,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -718,7 +733,7 @@ fn draw_checksum(
         ])
         .split(area);
 
-    draw_checksum_header(frame, chunks[0], meta, stats, theme);
+    draw_checksum_header(frame, chunks[0], meta, stats, elapsed, theme);
     draw_checksum_table(frame, chunks[1], rows, tick, theme);
     draw_checksum_gauge(frame, chunks[2], stats, theme);
     draw_footer(frame, chunks[3], theme);
@@ -729,9 +744,9 @@ fn draw_checksum_header(
     area: Rect,
     meta: &ChecksumMeta,
     stats: &ChecksumStats,
+    elapsed: f32,
     theme: &Theme,
 ) {
-    let elapsed = meta.start.elapsed().as_secs_f32();
     let line = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(format!(" {}  ", meta.kind.label())),
@@ -958,11 +973,9 @@ fn run_check_screen(
     let mut missing_count = 0usize;
     let mut mismatch_count = 0usize;
     let mut failed_count = 0usize;
-    let meta = CheckMeta {
-        kind,
-        label,
-        start: Instant::now(),
-    };
+    let meta = CheckMeta { kind, label };
+    let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -1006,7 +1019,9 @@ fn run_check_screen(
             mismatch: mismatch_count,
             failed: failed_count,
         };
-        terminal.draw(|frame| draw_checklist(frame, &meta, &rows, &stats, tick, &theme))?;
+        let elapsed = header_elapsed(start, &mut finished_at, done == total);
+        terminal
+            .draw(|frame| draw_checklist(frame, &meta, &rows, &stats, elapsed, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -1041,7 +1056,6 @@ struct CheckStats {
 struct CheckMeta<'a> {
     kind: ChecksumKind,
     label: &'a str,
-    start: Instant,
 }
 
 fn draw_checklist(
@@ -1049,6 +1063,7 @@ fn draw_checklist(
     meta: &CheckMeta,
     rows: &[CheckRow],
     stats: &CheckStats,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -1063,7 +1078,7 @@ fn draw_checklist(
         ])
         .split(area);
 
-    draw_checklist_header(frame, chunks[0], meta, stats, theme);
+    draw_checklist_header(frame, chunks[0], meta, stats, elapsed, theme);
     draw_checklist_table(frame, chunks[1], rows, tick, theme);
     draw_checklist_gauge(frame, chunks[2], stats, theme);
     draw_footer(frame, chunks[3], theme);
@@ -1074,9 +1089,9 @@ fn draw_checklist_header(
     area: Rect,
     meta: &CheckMeta,
     stats: &CheckStats,
+    elapsed: f32,
     theme: &Theme,
 ) {
-    let elapsed = meta.start.elapsed().as_secs_f32();
     let line = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(format!(" check {}  ", meta.kind.label())),
@@ -1276,6 +1291,7 @@ fn run_sbe_screen(
     let mut not_applicable_count = 0usize;
     let mut failed_count = 0usize;
     let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -1316,7 +1332,8 @@ fn run_sbe_screen(
             not_applicable: not_applicable_count,
             failed: failed_count,
         };
-        terminal.draw(|frame| draw_sbe(frame, root, &rows, &stats, start, tick, &theme))?;
+        let elapsed = header_elapsed(start, &mut finished_at, done == total);
+        terminal.draw(|frame| draw_sbe(frame, root, &rows, &stats, elapsed, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -1350,7 +1367,7 @@ fn draw_sbe(
     root: &str,
     rows: &[SbeRow],
     stats: &SbeStats,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -1365,7 +1382,7 @@ fn draw_sbe(
         ])
         .split(area);
 
-    draw_sbe_header(frame, chunks[0], root, stats, start, theme);
+    draw_sbe_header(frame, chunks[0], root, stats, elapsed, theme);
     draw_sbe_table(frame, chunks[1], rows, tick, theme);
     draw_sbe_gauge(frame, chunks[2], stats, theme);
     draw_footer(frame, chunks[3], theme);
@@ -1376,10 +1393,9 @@ fn draw_sbe_header(
     area: Rect,
     root: &str,
     stats: &SbeStats,
-    start: Instant,
+    elapsed: f32,
     theme: &Theme,
 ) {
-    let elapsed = start.elapsed().as_secs_f32();
     let line = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(" sbe  "),
@@ -2118,7 +2134,6 @@ fn run_convert(args: ConvertArgs, theme: ThemeName) -> ExitCode {
 struct ConvertMeta<'a> {
     root: &'a str,
     want: AudioFormat,
-    start: Instant,
 }
 
 /// Returns whether every file converted cleanly (a skip counts as clean, same as
@@ -2198,11 +2213,9 @@ fn run_convert_screen(
     let mut written_count = 0usize;
     let mut skipped_count = 0usize;
     let mut failed_count = 0usize;
-    let meta = ConvertMeta {
-        root,
-        want,
-        start: Instant::now(),
-    };
+    let meta = ConvertMeta { root, want };
+    let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -2263,7 +2276,8 @@ fn run_convert_screen(
             skipped: skipped_count,
             failed: failed_count,
         };
-        terminal.draw(|frame| draw_convert(frame, &meta, &rows, &stats, tick, &theme))?;
+        let elapsed = header_elapsed(start, &mut finished_at, done == total);
+        terminal.draw(|frame| draw_convert(frame, &meta, &rows, &stats, elapsed, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -2300,6 +2314,7 @@ fn draw_convert(
     meta: &ConvertMeta,
     rows: &[ConvertRow],
     stats: &ConvertStats,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -2314,7 +2329,7 @@ fn draw_convert(
         ])
         .split(area);
 
-    draw_convert_header(frame, chunks[0], meta, stats, theme);
+    draw_convert_header(frame, chunks[0], meta, stats, elapsed, theme);
     draw_convert_table(frame, chunks[1], meta, rows, tick, theme);
     draw_convert_gauge(frame, chunks[2], stats, theme);
     draw_footer(frame, chunks[3], theme);
@@ -2325,9 +2340,9 @@ fn draw_convert_header(
     area: Rect,
     meta: &ConvertMeta,
     stats: &ConvertStats,
+    elapsed: f32,
     theme: &Theme,
 ) {
-    let elapsed = meta.start.elapsed().as_secs_f32();
     let line = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(format!(" convert --to {}  ", meta.want)),
@@ -2618,6 +2633,7 @@ fn run_torrent_create_screen(
 
     let mut stage = CreateStage::Preparing;
     let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
     let mut want_quit = false;
 
@@ -2635,9 +2651,14 @@ fn run_torrent_create_screen(
             }
         }
 
+        let elapsed = header_elapsed(
+            start,
+            &mut finished_at,
+            matches!(stage, CreateStage::Done(_)),
+        );
         terminal.draw(|frame| {
             draw_torrent_create(
-                frame, source, dst, chosen, private, source_tag, &stage, start, tick, &theme,
+                frame, source, dst, chosen, private, source_tag, &stage, elapsed, tick, &theme,
             )
         })?;
 
@@ -2675,7 +2696,7 @@ fn draw_torrent_create(
     private: bool,
     source_tag: &Option<String>,
     stage: &CreateStage,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -2690,7 +2711,6 @@ fn draw_torrent_create(
         ])
         .split(area);
 
-    let elapsed = start.elapsed().as_secs_f32();
     let header = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(" torrent create  "),
@@ -2923,6 +2943,7 @@ fn run_torrent_check_screen(
 
     let mut stage = CheckStage::Preparing;
     let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -2939,7 +2960,12 @@ fn run_torrent_check_screen(
             }
         }
 
-        terminal.draw(|frame| draw_torrent_check(frame, &stage, quick, start, tick, &theme))?;
+        let elapsed = header_elapsed(
+            start,
+            &mut finished_at,
+            matches!(stage, CheckStage::Done(_)),
+        );
+        terminal.draw(|frame| draw_torrent_check(frame, &stage, quick, elapsed, tick, &theme))?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
@@ -2967,7 +2993,7 @@ fn draw_torrent_check(
     frame: &mut Frame,
     stage: &CheckStage,
     quick: bool,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -2982,7 +3008,6 @@ fn draw_torrent_check(
         ])
         .split(area);
 
-    let elapsed = start.elapsed().as_secs_f32();
     let mode = if quick { "check --quick" } else { "check" };
     let header = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
@@ -3561,6 +3586,7 @@ fn run_tag_screen(
     let mut failed = 0usize;
 
     let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -3600,10 +3626,11 @@ fn run_tag_screen(
             }
         }
 
+        let elapsed = header_elapsed(start, &mut finished_at, matches!(stage, TagStage::Done));
         terminal.draw(|frame| {
             draw_tag(
                 frame, dir, &files, &taggable, &before, &fields, &titles, focus, title_idx, &rows,
-                &stage, wrote, failed, start, tick, &theme,
+                &stage, wrote, failed, elapsed, tick, &theme,
             )
         })?;
 
@@ -3713,7 +3740,7 @@ fn draw_tag(
     stage: &TagStage,
     wrote: usize,
     failed: usize,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -3728,7 +3755,6 @@ fn draw_tag(
         ])
         .split(area);
 
-    let elapsed = start.elapsed().as_secs_f32();
     let mode = match stage {
         TagStage::Editing => "tag",
         TagStage::Writing => "tag (writing)",
@@ -4182,6 +4208,7 @@ fn run_rename_screen(
     let mut queue: Option<Queue<lh_core::Result<Vec<PathBuf>>>> = None;
 
     let start = Instant::now();
+    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -4213,6 +4240,7 @@ fn run_rename_screen(
             }
         }
 
+        let elapsed = header_elapsed(start, &mut finished_at, matches!(stage, RenameStage::Done));
         terminal.draw(|frame| {
             draw_rename(
                 frame,
@@ -4226,7 +4254,7 @@ fn run_rename_screen(
                 plan.as_ref(),
                 &rows,
                 &stage,
-                start,
+                elapsed,
                 tick,
                 &theme,
             )
@@ -4346,7 +4374,7 @@ fn draw_rename(
     plan: Option<&RenamePlan>,
     rows: &[RenameRowStatus],
     stage: &RenameStage,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -4362,7 +4390,6 @@ fn draw_rename(
         ])
         .split(area);
 
-    let elapsed = start.elapsed().as_secs_f32();
     let mode = match stage {
         RenameStage::Editing => "rename",
         RenameStage::Renaming => "rename (renaming)",
