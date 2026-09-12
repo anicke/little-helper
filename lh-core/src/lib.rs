@@ -15,6 +15,7 @@ pub mod checksum;
 pub mod config;
 pub mod convert;
 pub mod error;
+pub mod etree;
 pub mod format;
 pub mod job;
 pub mod model;
