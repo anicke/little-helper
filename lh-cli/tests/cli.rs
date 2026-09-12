@@ -364,3 +364,105 @@ fn torrent_create_refuses_an_unfilled_passkey() {
 
     assert!(!dir.path().join("show.torrent").exists());
 }
+
+/// `sbe fix --dry-run` writes nothing and just previews the plan (docs/sbe-repair.md R1).
+#[test]
+fn sbe_fix_dry_run_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("t01.flac");
+    let b = dir.path().join("t02.flac");
+    std::fs::copy(fixtures().join("cdda-sbe.flac"), &a).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), &b).unwrap();
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .arg("--dry-run")
+        .assert()
+        .code(1) // the tail is left misaligned without --pad-tail
+        .stdout(predicates::str::contains("shift 137 frames backward"))
+        .stdout(predicates::str::contains("plan only, nothing written"));
+
+    assert_eq!(
+        std::fs::read(&a).unwrap(),
+        std::fs::read(fixtures().join("cdda-sbe.flac")).unwrap()
+    );
+}
+
+/// Real execution (R2): the boundary between exactly two files is fixed, written under
+/// `-o`, and the earlier file comes out sector-aligned. The source directory is untouched.
+#[test]
+fn sbe_fix_executes_a_single_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("t01.flac");
+    let b = dir.path().join("t02.flac");
+    std::fs::copy(fixtures().join("cdda-sbe.flac"), &a).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), &b).unwrap();
+    let before_a = std::fs::read(&a).unwrap();
+    let before_b = std::fs::read(&b).unwrap();
+    let out = dir.path().join("out");
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .args(["-o"])
+        .arg(&out)
+        .assert()
+        .code(1) // tail still misaligned; --pad-tail isn't implemented yet (R3)
+        .stdout(predicates::str::contains("FIXED     t01.flac"))
+        .stdout(predicates::str::contains("FIXED     t02.flac"));
+
+    assert_eq!(std::fs::read(&a).unwrap(), before_a, "source untouched");
+    assert_eq!(std::fs::read(&b).unwrap(), before_b, "source untouched");
+
+    lh().arg("sbe")
+        .arg(out.join("t01.flac"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ALIGNED"));
+}
+
+/// Repair never overwrites the originals in place (Principle 1) — executing without `-o`
+/// is a command failure, not a silent default.
+#[test]
+fn sbe_fix_without_output_dir_is_a_command_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixtures().join("cdda-sbe.flac"), dir.path().join("t01.flac")).unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t02.flac"),
+    )
+    .unwrap();
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("-o/--output"));
+}
+
+/// `--pad-tail` execution is R3, not implemented yet — it must fail loudly, not silently
+/// fall back to an unpadded fix.
+#[test]
+fn sbe_fix_pad_tail_execution_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(fixtures().join("cdda-sbe.flac"), dir.path().join("t01.flac")).unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("t02.flac"),
+    )
+    .unwrap();
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .args(["-o"])
+        .arg(dir.path().join("out"))
+        .arg("--pad-tail")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("R2"));
+
+    assert!(!dir.path().join("out").exists());
+}

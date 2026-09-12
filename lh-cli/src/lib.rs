@@ -10,7 +10,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lh_core::analysis::{
-    BoundaryDirection, FixPlan, Sbe, TailPolicy, Verification, plan_fix, sbe, verify,
+    BoundaryDirection, FixPlan, RepairEncode, Sbe, TailPolicy, Verification,
+    execute_single_boundary, plan_fix, sbe, verify,
 };
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute};
 use lh_core::convert::{
@@ -237,12 +238,21 @@ pub struct SbeFixArgs {
     #[arg(long, value_enum, default_value = "backward")]
     pub direction: Direction,
     /// Close a misaligned last file by adding silence, instead of leaving it reported.
+    /// Planning honours this; execution does not yet (docs/sbe-repair.md R3) and refuses
+    /// to run when it is set.
     #[arg(long)]
     pub pad_tail: bool,
-    /// Print the plan and write nothing. Required for now: only planning is implemented —
-    /// there is no execution yet (docs/sbe-repair.md R1).
+    /// Print the plan and write nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// Write repaired files here. Required to execute (never the source directory's own
+    /// files — Principle 1, repair never overwrites originals).
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+    /// Overwrite outputs that already exist at the destination. Sources are never touched
+    /// either way.
+    #[arg(long)]
+    pub overwrite: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -419,16 +429,11 @@ fn cmd_sbe(p: &Paths) -> Result<bool> {
     Ok(ok)
 }
 
-/// Plan (never execute) a sector-boundary repair for one directory's files, in filename
-/// order. R1 of docs/sbe-repair.md: pure arithmetic over declared frame counts, no decode,
-/// nothing written — `--dry-run` is required until execution exists.
+/// Plan a sector-boundary repair for one directory's files, in filename order, and — unless
+/// `--dry-run` — execute it. Execution (R2 of docs/sbe-repair.md) only covers the single-
+/// boundary case today: exactly two files, no `--pad-tail`. A whole ordered set with
+/// chained boundaries is R3, not implemented yet.
 fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
-    if !args.dry_run {
-        anyhow::bail!(
-            "sbe fix does not write anything yet — only planning is implemented; pass \
-             --dry-run to see the plan (docs/sbe-repair.md, milestone R1)"
-        );
-    }
     if !args.dir.is_dir() {
         anyhow::bail!("{} is not a directory", args.dir.display());
     }
@@ -455,7 +460,87 @@ fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
     let plan = plan_fix(&set.files, direction, tail)
         .with_context(|| format!("planning a fix for {}", args.dir.display()))?;
 
-    print_fix_plan(&args.dir, &set.files, &plan, args.pad_tail);
+    if args.dry_run {
+        print_fix_plan(&args.dir, &set.files, &plan, args.pad_tail);
+        return Ok(plan.fully_fixed);
+    }
+
+    if args.pad_tail {
+        anyhow::bail!(
+            "sbe fix cannot execute --pad-tail yet — only the boundary shift between two \
+             files is implemented (docs/sbe-repair.md R2); padding the tail with silence is \
+             R3. Use --dry-run to see the plan without it."
+        );
+    }
+    if set.files.len() != 2 {
+        anyhow::bail!(
+            "sbe fix can only execute a single two-file boundary today (docs/sbe-repair.md \
+             R2); {} has {} files. Chaining a whole set is R3, not implemented yet — use \
+             --dry-run to see the full plan.",
+            args.dir.display(),
+            set.files.len()
+        );
+    }
+    let out_dir = args.output.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "sbe fix needs -o/--output to execute — it never writes over the originals \
+             (Principle 1)"
+        )
+    })?;
+    for f in &set.files {
+        if f.format != AudioFormat::Flac {
+            anyhow::bail!(
+                "sbe fix can only execute against FLAC ({} is {}); other formats have no \
+                 repair path yet",
+                f.file_name(),
+                f.format
+            );
+        }
+    }
+
+    let flac = Registry::discover_one(ToolId::Flac)
+        .require(ToolId::Flac)
+        .cloned()?;
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: args.overwrite,
+    };
+
+    let a = &set.files[0];
+    let b = &set.files[1];
+    let dst_a = destination(&a.path, "flac", Some(out_dir))
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", a.path.display()))?;
+    let dst_b = destination(&b.path, "flac", Some(out_dir))
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", b.path.display()))?;
+
+    let shifted = plan.boundaries[0].shifted_frames;
+    let (fixed_a, fixed_b) = execute_single_boundary(a, b, shifted, &dst_a, &dst_b, &encode)
+        .with_context(|| {
+            format!(
+                "repairing the boundary between {} and {}",
+                a.file_name(),
+                b.file_name()
+            )
+        })?;
+
+    for (f, fixed) in [(a, &fixed_a), (b, &fixed_b)] {
+        println!(
+            "FIXED     {} -> {}   audio md5 {}",
+            f.file_name(),
+            fixed.path.display(),
+            hex::encode(fixed.audio_md5)
+        );
+    }
+    if !plan.fully_fixed {
+        println!(
+            "{}   still misaligned once the boundary above is fixed — rerun with --pad-tail \
+             once tail padding is implemented (R3)",
+            b.file_name()
+        );
+    }
+
     Ok(plan.fully_fixed)
 }
 

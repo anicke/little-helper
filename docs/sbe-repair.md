@@ -277,7 +277,13 @@ lh sbe fix <DIR> [--direction backward|forward|nearest] [--pad-tail] [--dry-run]
 
 Operates on one directory as one ordered set (by filename), the same way `lh torrent create`
 takes a folder rather than a file list. `--dry-run` prints the plan (§4 step 4) and writes
-nothing — cheap, because computing a plan needs no decode.
+nothing — cheap, because computing a plan needs no decode. `-o` is required to execute
+without `--dry-run` (Principle 1: never write over the originals); `--pad-tail` is honoured
+by planning but refused by execution until R3.
+
+The three-file example below is the **target shape once R3 lands** — a whole directory,
+chained boundaries, an in-place-feeling summary. Today (R2), execution only accepts a
+directory of exactly two files (one boundary) and reports per file as it writes it:
 
 ```
 $ lh sbe fix ~/shows/gd1977-05-08/d1 --dry-run
@@ -286,17 +292,24 @@ d1
   02 → 03   already aligned
   03        last file, +141 frames short of a sector — not fixed without --pad-tail
 
-$ lh sbe fix ~/shows/gd1977-05-08/d1
+$ lh sbe fix ~/shows/gd1977-05-08/d1                       # R3 target, not yet real
 d1
   01   ALIGNED   (was +3, -3 frames to 02)
   02   ALIGNED   (+3 from 01, unchanged into 03)
   03   MISALIGNED   (+141 frames short; rerun with --pad-tail to close it with silence)
   2 of 3 fixed, tags preserved, round-trip audio MD5 unchanged
+
+$ lh sbe fix ~/shows/two-tracks -o ~/shows/two-tracks-fixed   # what R2 actually does today
+FIXED     t01.flac -> /home/.../two-tracks-fixed/t01.flac   audio md5 81e1447c...
+FIXED     t02.flac -> /home/.../two-tracks-fixed/t02.flac   audio md5 ab8c522d...
+t02.flac   still misaligned once the boundary above is fixed — rerun with --pad-tail once
+tail padding is implemented (R3)
 ```
 
 Exit codes follow the existing contract (docs/torrent-creation.md §6): `0` fully fixed
 (or nothing needed fixing), `1` the set has something the tool won't override (an unpadded
-misaligned tail, a non-CD-audio member), `2` the command failed.
+misaligned tail, a non-CD-audio member), `2` the command failed — including, today, a
+directory of other than two files, `--pad-tail` at execution time, or a missing `-o`.
 
 ---
 
@@ -323,8 +336,8 @@ this belongs once it exists.
 | # | Milestone | Contents |
 |---|---|---|
 | ~~**R1**~~ | ~~Plan, no execution~~ | **Done** — `analysis::sbe_fix::plan_fix` (§3, §4 steps 1–4): left-to-right arithmetic over `StreamInfo.total_frames`, no decode, refuses a non-CD-audio member. `lh sbe fix <DIR> --dry-run [--direction] [--pad-tail]`; bare `lh sbe <paths>` is unchanged. 10 tests (aligned/misaligned/chained boundaries, all three directions, tail report vs. pad). |
-| ~~**R2**~~ | ~~Two-file execution~~ | **Library done** — `analysis::sbe_fix::execute_single_boundary` (§4 steps 5–7): decode both neighbours in full (`format::flac::decode_to_samples`), shift frames across the split, re-encode each through the reference `flac` binary (`convert::encode_flac_staged`, the staged-not-committed half of `to_flac_cancellable`), restore original Vorbis comments via `metaflac`, verify the round-trip PCM MD5 invariant (§1, §5, `format::flac::concatenated_pcm_md5`) unconditionally, then commit both outputs atomically (`output::commit_all`, all-or-nothing with rollback). No chaining and no tail padding yet — one boundary, two files, in isolation. 5 tests in `lh-core/tests/sbe_fix.rs` (exact shift amount, round-trip invariant, tag survival, atomic-failure rollback, non-CD-audio refusal) plus 2 for `commit_all` in `output.rs`. **Not yet reachable from `lh sbe fix`** — the CLI still requires `--dry-run` and bails otherwise; wiring real execution into the CLI (single-boundary case first) is the next step before R3. |
-| **R3** | Chained sets | Left-to-right multi-boundary sets, `--direction`, `--pad-tail`, driven end-to-end from `lh sbe fix` (no `--dry-run`) over a whole directory rather than one boundary at a time. `lh sbe fix` complete per §6. |
+| ~~**R2**~~ | ~~Two-file execution~~ | **Done** — `analysis::sbe_fix::execute_single_boundary` (§4 steps 5–7): decode both neighbours in full (`format::flac::decode_to_samples`), shift frames across the split, re-encode each through the reference `flac` binary (`convert::encode_flac_staged`, the staged-not-committed half of `to_flac_cancellable`), restore original Vorbis comments via `metaflac`, verify the round-trip PCM MD5 invariant (§1, §5, `format::flac::concatenated_pcm_md5`) unconditionally, then commit both outputs atomically (`output::commit_all`, all-or-nothing with rollback). Reachable from `lh sbe fix <DIR> -o <OUT> [--overwrite]` (no `--dry-run`) when `<DIR>` has exactly two files and `--pad-tail` is not given — both refused loudly otherwise, pointing at R3. `-o` is mandatory to execute (open question 4 resolved this way: never an implicit default of overwriting the originals). No chaining and no tail padding yet — one boundary, two files, in isolation. 5 tests in `lh-core/tests/sbe_fix.rs` (exact shift amount, round-trip invariant, tag survival, atomic-failure rollback, non-CD-audio refusal), 2 for `commit_all` in `output.rs`, and 4 CLI tests in `lh-cli/tests/cli.rs` (dry run, real execution, missing `-o`, `--pad-tail` refused). |
+| **R3** | Chained sets | Left-to-right multi-boundary sets over a whole directory, `--pad-tail` honoured by execution (not just planning), `lh sbe fix` complete per §6 for any number of files. |
 | **R4** | TUI / GUI | Once §7's sequential-vs-pooled `Queue` question is settled. |
 
 ---
