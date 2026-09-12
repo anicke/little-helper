@@ -92,7 +92,7 @@ Everything else about scope matches `lh-gui`'s own framing: `lh-tui` adds no ope
 `lh-core` does not already expose (Principle 4), and a command with no screen yet keeps
 working exactly as `lh` does — `run_headless` is not a placeholder to delete, it is the
 permanent fallback for whichever commands never earn a screen of their own (`tools`,
-`torrent info` and `info` are plausibly fine as plain text forever; §8 Q1).
+`torrent info` and `info` are plausibly fine as plain text forever; §11 Q1).
 
 ---
 
@@ -406,24 +406,75 @@ character in that field rather than applying or quitting, on both screens.
 
 ---
 
-## 8. Screens not yet planned
+## 8. TUI7 — Check screen — done
+
+Same per-file batch shape as verify/checksum (§2), but the file list doesn't come from
+`lh_cli::collect` scanning a folder for audio — it comes from `ChecksumFile::read`'s own
+`entries`, the same source `cmd_check` (`lh-cli/src/lib.rs:664`) reads. That's the one real
+divergence from §2's template, and it is why a row can land in a state neither verify nor
+checksum has: `Missing`, an entry naming a file that isn't on disk at all.
+
+* **Kind resolution is shared, not copied.** The `.ffp`/`.md5`/`.st5` extension match
+  `cmd_check` used to inline is now `lh_cli::checksum_kind_for(&Path) -> Result<ChecksumKind>`,
+  called from both `cmd_check` and the screen's `run_check` — one place decides what a
+  checksum file's extension means, matching this doc's own framing of `lh-cli` as the one
+  command grammar both binaries share (§0).
+* **`CheckOutcome`** (`Ok`, `Mismatch { expected, actual }`, `Missing`, `Failed(String)`) is
+  the queue's `T`, computed inside the job closure exactly the way `cmd_check`'s loop body
+  does: `target.exists()` first (→ `Missing` without ever calling `compute`), then
+  `compute(kind, target)` compared against the entry's stored digest (→ `Ok`/`Mismatch`), a
+  compute error stringified into `Failed` — the same three-way-plus-missing split `cmd_check`
+  prints as `OK`/`MISMATCH`/`MISSING`/`FAILED`. `CheckStatus` mirrors it with `Pending`/
+  `Running` added, same relationship verify's `Status` has to `Verification` (§0).
+* **Header names the checksum file, not a directory** — `check FFP  test.ffp`, matching
+  `cmd_check` which only ever gets one file as its argument, not a `Paths` glob; the target
+  directory used to resolve each entry is that file's own parent (`file.parent()`, `.` if
+  none), identical to `cmd_check`'s `dir`.
+* **An empty checksum file skips the screen entirely** — `ChecksumFile::read` succeeding with
+  zero entries prints `no entries in <path>` and returns success without calling
+  `ratatui::init()`, the same empty-input early-return every other screen has for zero files
+  (§2), just phrased for entries instead of files.
+* **Return value**: `missing_count == 0 && mismatch_count == 0 && failed_count == 0` — the
+  same "clean" `cmd_check`'s own `ok` flag tracks, so `$?` matches between `lh check` and
+  `lh-tui check`.
+* **Function/type names carry a `check*`/`Check*` prefix already used by the unrelated
+  `torrent check` screen** (`CheckStage`, `draw_check_table`, `draw_check_gauge` there are
+  per-`TorrentReport`, not per-entry) — the draw functions here are named `draw_checklist*`/
+  `checklist_status_*` to avoid colliding with those, since both screens live in the same
+  `lh-tui/src/main.rs` and Rust has one flat function namespace per module.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (unchanged pass count —
+no `lh-core` logic changed) and `cargo clippy --all-targets` both clean; `cargo fmt` clean.
+Run for real inside `tmux`: `lh-tui check reference.ffp` against `lh-core/tests/fixtures`
+showed all four entries reach `OK` live, gauge `4/4 ok:4 missing:0 mismatch:0 failed:0` in
+green, `q` exited `0` — matching `lh check reference.ffp` run headless first for comparison.
+A second fixture built by hand (a `.ffp` with one correct entry, one entry given a wrong
+digest, one entry naming a file never copied in, and one entry pointing at a text file saved
+with a `.flac` extension) reproduced all four outcomes side by side: `OK` for the untouched
+file, `MISMATCH` for the wrong digest (detail: `expected ... actual ...`, the real computed
+digest), `MISSING` for the absent file (detail: `no such file`), and `FAILED` for the
+unparseable one (detail: the same `FLAC metadata read failed` message `lh check` prints to
+stderr) — gauge `4/4 ok:1 missing:1 mismatch:1 failed:1` in red, `q` exited `1`, both
+matching the headless `lh check` run against the identical fixture byte for byte.
+
+## 9. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
-* **Check, Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really
-  needed for a single pass (`check` doesn't decode audio; `info`/`tools`/`torrent
-  info`/`trackers` don't even touch a `Queue` in `lh-cli` today). Plausibly fine as
+* **Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really needed for
+  a single pass (none of them even touch a `Queue` in `lh-cli` today). Plausibly fine as
   `run_headless` forever (§1) rather than earning a screen — nobody has asked, and a
   ratatui table over already-known, non-streaming data is not obviously better than the
   plain text `lh` already prints for these.
 
 ---
 
-## 9. What has and has not been checked
+## 10. What has and has not been checked
 
-* **Verify, checksum, convert and SBE screens**: all run for real against the fixture corpus
-  (§3's, §5's and §6's "Real evidence") — table, gauge, quit key and exit code all confirmed,
-  closing the gap this section used to flag ("compiled but never actually run").
+* **Verify, checksum, convert, SBE and check screens**: all run for real against the fixture
+  corpus (§3's, §5's, §6's and §8's "Real evidence") — table, gauge, quit key and exit code
+  all confirmed, closing the gap this section used to flag ("compiled but never actually
+  run").
 * **Verify screen against a real show, not just the fixture corpus.** Run against a genuine
   17-track FLAC show (~600 MB, already carrying its own `.ffp`/`.md5`) sitting in
   `~/Downloads`: all 17 decoded and reported `OK` live in the table, the gauge tracked
@@ -448,10 +499,10 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 10. Open questions
+## 11. Open questions
 
 1. **Do `info`, `tools`, `torrent info`/`trackers` ever get screens, or stay headless
-   forever?** §8 leans "stay headless" — a ratatui table over static, non-streaming output
+   forever?** §9 leans "stay headless" — a ratatui table over static, non-streaming output
    is not an obvious improvement over `lh`'s own text — but nobody has asked either way.
 2. **Does a screen need a `--no-tui` escape hatch** for scripting (piping `lh-tui verify`'s
    output, redirecting to a file where an alternate-screen ratatui app would misbehave)? The

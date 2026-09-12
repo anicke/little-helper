@@ -661,21 +661,28 @@ fn cmd_checksum(kind: ChecksumKind, args: &ChecksumArgs) -> Result<bool> {
     Ok(ok)
 }
 
-fn cmd_check(file: &Path) -> Result<bool> {
-    let kind = match file
+/// The `ChecksumKind` a `.ffp`/`.md5`/`.st5` path implies, from its extension — shared
+/// with `lh-tui`'s `check` screen so both name a file's kind exactly the way `lh check`
+/// does.
+pub fn checksum_kind_for(file: &Path) -> Result<ChecksumKind> {
+    match file
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("ffp") => ChecksumKind::Ffp,
-        Some("md5") => ChecksumKind::Md5,
-        Some("st5") => ChecksumKind::St5,
+        Some("ffp") => Ok(ChecksumKind::Ffp),
+        Some("md5") => Ok(ChecksumKind::Md5),
+        Some("st5") => Ok(ChecksumKind::St5),
         other => anyhow::bail!(
             "cannot tell what kind of checksum file this is from {:?}; expected .ffp, .md5 or .st5",
             other.unwrap_or_default()
         ),
-    };
+    }
+}
+
+fn cmd_check(file: &Path) -> Result<bool> {
+    let kind = checksum_kind_for(file)?;
 
     let list =
         ChecksumFile::read(kind, file).with_context(|| format!("reading {}", file.display()))?;
