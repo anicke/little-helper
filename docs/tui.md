@@ -92,7 +92,7 @@ Everything else about scope matches `lh-gui`'s own framing: `lh-tui` adds no ope
 `lh-core` does not already expose (Principle 4), and a command with no screen yet keeps
 working exactly as `lh` does — `run_headless` is not a placeholder to delete, it is the
 permanent fallback for whichever commands never earn a screen of their own (`tools`,
-`torrent info` and `info` are plausibly fine as plain text forever; §7 Q1).
+`torrent info` and `info` are plausibly fine as plain text forever; §8 Q1).
 
 ---
 
@@ -142,6 +142,31 @@ A screen whose operation reports true sub-file progress (`convert`'s frame count
 `analysis::verify` never calls `Progress::report` (module doc, `lh-tui/src/main.rs:11`), not
 because the pattern above cannot show one. §3 (Checksum) is the same shape as verify — no
 sub-file progress exists for `checksum::compute` either.
+
+**The editor screen**, added for Tag/Rename (§7) and not covered by anything above: every
+screen through §6 only watches — it submits jobs to a `Queue` and folds events into a table,
+taking no keyboard input beyond quitting. `tag`/`rename` edit, which forces two departures:
+
+* **`q` cannot mean quit while a field has focus** — it is a letter someone might be typing.
+  The key contract becomes: `Esc` leaves the focused field, and from no field leaves the
+  screen; `Ctrl-C` always aborts, everywhere, unchanged; `q` (and, on these two screens, `a`
+  to apply and `e` to enter the titles block) act only when nothing is focused. This is the
+  one real break from the "`q`/`Esc`/`Ctrl-C` are identical" rule earlier in this section, and
+  it is forced by having text fields at all, not chosen for its own sake.
+* **Bracketed paste has to be enabled explicitly**, for the lifetime of these two screens
+  only. `ratatui::init()` does not turn it on, so a pasted setlist would otherwise arrive as a
+  stream of individual `Char` events racing the 80ms poll loop. `crossterm::execute!` toggles
+  `EnableBracketedPaste`/`DisableBracketedPaste` around the screen's own `init`/`restore`, and
+  `CtEvent::Paste(String)` is handled by splitting on newlines wherever a screen has a
+  block worth pasting into (tag's titles list).
+
+No new dependency for text entry: a `Field { value, cursor }` handling
+`Char`/`Backspace`/`Delete`/`Left`/`Right`/`Home`/`End` (`lh-tui/src/main.rs`, shared by both
+screens) covers every single-line field on both screens, and a `Vec<Field>` with a selected
+index covers the titles block. The cursor is a glyph spliced into the rendered text, not a
+real terminal cursor — that would need the widget to know its own screen coordinates inside
+whatever layout is drawing it, which the table/list-heavy layouts here don't make cheap to
+plumb through.
 
 ---
 
@@ -327,7 +352,61 @@ line for line.
 
 ---
 
-## 7. Screens not yet planned
+## 7. TUI6 — Tag / Rename screens — done
+
+Two screens, `lh-tui tag <dir>` and `lh-tui rename <dir>`, per docs/tagging.md §6. Both are
+laid out as header / body / gauge / footer like every earlier screen, but the body during
+editing is a live form plus a live diff, not a job table — the job table only appears once
+`a` (apply) has been pressed, and only then does either screen touch a file.
+
+* **Tag**: a `show` pane (the six show-level `tag::Field`s `Tab`/`Shift-Tab` cycle through,
+  seeded from the first taggable file that already carries any tags, then from the folder's
+  own `ShowName::parse` where that leaves `DATE` blank), a `titles` pane (`e` enters it, `↑`/
+  `↓` selects a line, a paste replaces the whole block, `Esc` leaves it), and a `diff` pane
+  recomputed every frame from `Tags::changes` — the exact function `cmd_tag` prints its own
+  preview from, so the screen's diff and the CLI's are provably the same computation, not two
+  hand-kept-in-step renderings of it. Pressing `a` builds one write job per taggable,
+  changed file (`ffp` before, `tag::apply`, `tag::assert_audio_unchanged` — docs/tagging.md
+  §1 contract point 2, inside the job so a file that somehow changed fails on its own row);
+  an unchanged or non-taggable file gets no job and is already `Unchanged`/`N/A` the moment
+  `a` is pressed.
+* **Rename**: a `spec` pane (`BAND`/`DATE`/`DISC`/`SHORT YEAR`, seeded from `ShowName::parse`
+  the same way `cmd_rename`'s own defaults are) above a `plan` table recomputed every frame by
+  `plan_rename` — pure arithmetic over names already in memory, the reason this is cheap
+  enough to do on every keystroke. Collision rows render in `theme.error` and `a` refuses
+  silently while any exist, the table already being the explanation. Applying is **one job**
+  wrapping `execute_rename(&plan)` for the whole plan, not one job per file: unlike tagging,
+  a rename is atomic (`execute_rename`'s own two-phase move with rollback, docs/tagging.md §1
+  contract point 3), so there is no independent per-file write to submit — the table still
+  shows one row per file, they just all resolve together from the one job's single result,
+  the same way `run_sbe_fix_execute_screen` (§0) renders per-file rows from one `execute_fix`
+  call. This is the one place these two screens diverge from a literal "one job per file" —
+  correctness following `lh-core`'s own atomicity contract instead.
+* **Both** return whichever "clean" notion the operation already has (tag: no `Failed` row;
+  rename: every row `Ok`), and both leave the screen without writing anything if `q`/`Esc` is
+  pressed before `a` — the diff/plan pane already *is* the preview, so quitting early is the
+  same "plan only, nothing written" outcome `cmd_tag`/`cmd_rename` give without `--yes`.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (unchanged pass count —
+no `lh-core`/`lh-cli` logic changed) and `cargo clippy --all-targets` both clean; `cargo fmt`
+clean. Run for real under a real pty (`tmux`, this time surviving between tool calls): against
+a copy of `cdda-aligned.flac`/`hires-24bit.flac`/`mono-48k.wav` inside a folder named
+`gd1977-05-08.sbd.someone.12345.sbeok.flac16`, `lh-tui tag` seeded `DATE` from the folder name
+live on open, typing into `ARTIST` and the two titles updated the diff pane on every
+keystroke, leaving the titles block with `Esc` correctly returned `q`/`a` to their unfocused
+meanings, and `a` wrote both FLACs (`OK`) while the WAV stayed `N/A` — `metaflac
+--export-tags-to=-` afterwards showed exactly the typed `ARTIST`/`DATE`/`TITLE`/`TRACKNUMBER`
+values, and `lh ffp` on both FLACs matched `lh-core/tests/fixtures/reference.ffp`'s digests
+for the same source files exactly, byte for byte — the audio-unchanged postcondition held
+against the real reference checksums, not just the in-process check. `lh-tui rename` against
+a folder of oddly-named files showed the live `from -> to` table update on every keystroke of
+`BAND`/`DATE`, and `a` renamed all three; the resulting file names on disk matched the plan
+exactly. A stray `a`/`q` typed while a field was still focused was confirmed to land as a
+character in that field rather than applying or quitting, on both screens.
+
+---
+
+## 8. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
@@ -340,7 +419,7 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 8. What has and has not been checked
+## 9. What has and has not been checked
 
 * **Verify, checksum, convert and SBE screens**: all run for real against the fixture corpus
   (§3's, §5's and §6's "Real evidence") — table, gauge, quit key and exit code all confirmed,
@@ -353,20 +432,26 @@ Named so the gap is visible, not to commit to an order:
   reported all 17 (and, for the `.md5`, all 20 including the artwork and info text) `OK` too
   — three independent checks (the screen's own decode, and both sidecar files) agreeing on
   real trader material, not synthetic fixtures.
+* **Tag and rename screens**: run for real (§7's "Real evidence") against copies of real
+  fixtures — live editing, focus-gated `q`/`a`/`e`, the diff/plan pane updating on every
+  keystroke, a successful write/rename, and the audio-unchanged postcondition checked against
+  the reference FFPs, not just the in-process assertion.
 * **Headless passthrough**: `run_headless` is a two-line wrapper around an already-tested
   `lh_cli::run`, so the only real risk is argument parsing drift between `lh` and `lh-tui` —
   and there is none, since both parse the same `Cli` (§0).
 * **Not yet checked anywhere**: Ctrl-C specifically (only `q` has been pressed by hand so
   far — the code path is identical, per §0/§2, but untried); any screen on a narrower
   terminal than the 100–120 columns used above, where the fixed-width status column and
-  percentage-width columns have not been checked for wrapping or truncation.
+  percentage-width columns have not been checked for wrapping or truncation; tag's diff
+  table and rename's plan table specifically, both of which get tighter with more files or
+  longer values than the three-file fixtures §7 tested with.
 
 ---
 
-## 9. Open questions
+## 10. Open questions
 
 1. **Do `info`, `tools`, `torrent info`/`trackers` ever get screens, or stay headless
-   forever?** §7 leans "stay headless" — a ratatui table over static, non-streaming output
+   forever?** §8 leans "stay headless" — a ratatui table over static, non-streaming output
    is not an obvious improvement over `lh`'s own text — but nobody has asked either way.
 2. **Does a screen need a `--no-tui` escape hatch** for scripting (piping `lh-tui verify`'s
    output, redirecting to a file where an alternate-screen ratatui app would misbehave)? The
