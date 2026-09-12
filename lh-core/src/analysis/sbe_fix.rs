@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::format::{self, wav::WavWriter};
 use crate::model::{AudioFile, FRAMES_PER_SECTOR, StreamInfo};
 use crate::output;
+use crate::tag;
 use crate::tools::{Provenance, Tool};
 use std::fs::File;
 use std::io::BufWriter;
@@ -226,7 +227,7 @@ pub fn execute_fix(
     // §4 step 5c: tags are read before anything else touches any file.
     let tags = files
         .iter()
-        .map(|f| read_vorbis_comments(&f.path))
+        .map(|f| tag::read_comment_block(&f.path))
         .collect::<Result<Vec<_>>>()?;
 
     // §4 step 5a.
@@ -292,7 +293,7 @@ pub fn execute_fix(
             &mut || true,
         )?;
         // §4 step 5e: restore tags on the staged file, still before commit.
-        write_vorbis_comments(temp.path(), &tags[i])?;
+        tag::restore_comment_block(temp.path(), &tags[i])?;
         temps.push(temp);
         provenance.push(prov);
     }
@@ -430,40 +431,6 @@ fn write_scratch_wav(dst_hint: &Path, samples: &[i32], info: &StreamInfo) -> Res
         .map_err(|e| Error::io(&path, e))?;
     writer.finish().map_err(|e| Error::io(&path, e))?;
     Ok(ScratchWav(path))
-}
-
-/// `None` when the source carries no `VORBIS_COMMENT` block at all — nothing to restore,
-/// as opposed to a block with zero comments in it, which is still worth writing back so a
-/// custom vendor string (if the source somehow had one) round-trips too. In practice every
-/// FLAC our own `convert` or `flac` itself produces has the block; this only matters for a
-/// source file with no metadata block whatsoever.
-fn read_vorbis_comments(path: &Path) -> Result<Option<metaflac::block::VorbisComment>> {
-    let tag = metaflac::Tag::read_from_path(path).map_err(|source| Error::FlacMeta {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(tag.vorbis_comments().cloned())
-}
-
-/// Restore comment fields onto a freshly encoded FLAC, keeping the vendor string `flac`
-/// just wrote — that string is Principle 2's provenance marker, not part of what repair is
-/// meant to preserve from the source.
-fn write_vorbis_comments(
-    path: &Path,
-    original: &Option<metaflac::block::VorbisComment>,
-) -> Result<()> {
-    let Some(original) = original else {
-        return Ok(());
-    };
-    let mut tag = metaflac::Tag::read_from_path(path).map_err(|source| Error::FlacMeta {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    tag.vorbis_comments_mut().comments = original.comments.clone();
-    tag.save().map_err(|source| Error::FlacMeta {
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 #[cfg(test)]

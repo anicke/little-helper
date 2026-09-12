@@ -62,6 +62,24 @@ pub enum Error {
     #[error("tracker {id}: {detail}")]
     UnusableTracker { id: String, detail: String },
 
+    /// Principle 5: a WAV in a show folder is a normal thing to find, so say which format
+    /// it is and what that format cannot hold, rather than "tagging failed".
+    #[error("{path}: {format} carries no Vorbis comments; only FLAC can hold etree tags")]
+    NotTaggable { path: PathBuf, format: &'static str },
+
+    /// docs/tagging.md §1, contract point 2. A rename or a tag edit must not be able to
+    /// change audio, and this is that promise failing rather than being trusted: it is a bug
+    /// in us, and it stops the rest of the run instead of repeating across a show.
+    #[error(
+        "{path}: audio MD5 changed from {before} to {after} — a metadata write must never \
+         touch audio; refusing to go on"
+    )]
+    AudioChanged {
+        path: PathBuf,
+        before: String,
+        after: String,
+    },
+
     /// Principle 1: v0.1 modifies nothing in place, so an existing output is a stop.
     #[error("{path} already exists; refusing to overwrite it")]
     OutputExists { path: PathBuf },

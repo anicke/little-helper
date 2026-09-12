@@ -21,6 +21,7 @@ pub mod job;
 pub mod model;
 pub mod output;
 pub mod scan;
+pub mod tag;
 pub mod tools;
 pub mod torrent;
 
