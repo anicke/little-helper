@@ -9,9 +9,10 @@
 //! date asks to be checked.
 //!
 //! The checking is why [`Health`] is an enum and not a boolean. Of TLH's eleven, on
-//! 2026-08-30, two answer as trackers, two answer as trackers but only to a personal
-//! announce URL, four cannot work at that URL at all, and three did not answer from here —
-//! which is not the same thing as gone, and is not written down as if it were.
+//! 2026-08-30, two answer as trackers, two answer as trackers but only hand out a working
+//! announce URL when you upload the finished `.torrent` back to the site, four cannot work
+//! at that URL at all, and three did not answer from here — which is not the same thing as
+//! gone, and is not written down as if it were.
 
 use crate::config;
 use crate::error::{Error, Result};
@@ -41,11 +42,13 @@ const CHECKED: &str = "2026-08-30";
 pub enum Health {
     /// It answered as a tracker. Use it.
     Announces,
-    /// It answered as a tracker, but only a personal announce URL will authorize: the
-    /// generic one in the list authorizes nobody. We refuse the id and say where to get
-    /// the real URL, because writing this one produces a torrent that silently never
-    /// announces.
-    PersonalUrl,
+    /// It answered, but the generic announce URL in the list does not authorize on its
+    /// own: the site issues a working one only by re-processing a `.torrent` you upload to
+    /// it — DIME says as much outright ("download a new copy of the .torrent file from the
+    /// tracker"). So the generic URL is still worth writing: it is what you upload to get
+    /// the working copy back. We use it and warn, rather than refuse, because refusing
+    /// blocks the one step (create, then upload) that is actually how these sites work.
+    PersonalUpload,
     /// This URL cannot work — it is not a tracker any more, or never was, or does not
     /// resolve. The site may well still exist somewhere else; the URL is what is broken.
     Broken,
@@ -60,16 +63,18 @@ impl Health {
     pub fn label(self) -> &'static str {
         match self {
             Self::Announces => "announces",
-            Self::PersonalUrl => "personal URL needed",
+            Self::PersonalUpload => "personal copy via upload",
             Self::Broken => "broken",
             Self::Unreachable => "unreachable",
             Self::Unchecked => "unchecked",
         }
     }
 
-    /// Whether we are willing to write this entry's URL into a torrent.
+    /// Whether we are willing to write this entry's URL into a torrent. `PersonalUpload` is
+    /// usable: the generic URL is exactly what gets uploaded to the site to obtain the
+    /// working one, so writing it is the correct first step, not a mistake.
     pub fn usable(self) -> bool {
-        !matches!(self, Self::PersonalUrl | Self::Broken)
+        !matches!(self, Self::Broken)
     }
 
     /// Whether anything answered when we checked. `false` for `Broken` and `Unreachable` —
@@ -146,8 +151,9 @@ impl Tracker {
 /// because we have no evidence for either. `private` lives inside the info dictionary, so
 /// guessing it wrong silently changes the infohash of every torrent made for that site —
 /// and TLH is no help, its changelog shows `Private torrent` as a manual checkbox and no
-/// passkey support at all. Two entries below plainly *do* need a personal URL; what we do
-/// not know is the shape of it, so they say so rather than shipping a guessed template.
+/// passkey support at all. Two entries below plainly *do* gate on a personal URL; what we
+/// do not know is its shape, only that DIME hands it out by re-processing an uploaded
+/// `.torrent` rather than by a URL template we could fill in ourselves.
 const BUNDLED: &[(&str, &str, &str, Health, &str)] = &[
     (
         "crosstown",
@@ -160,14 +166,14 @@ const BUNDLED: &[(&str, &str, &str, Health, &str)] = &[
         "dime",
         "DIME",
         "http://bt.dimeadozen.org/announce.php",
-        Health::PersonalUrl,
+        Health::PersonalUpload,
         "answered: \"not authorized; download a new copy of the .torrent file from the tracker\"",
     ),
     (
         "etree",
         "etree.org",
         "http://tracker.etree.org:6969/announce",
-        Health::PersonalUrl,
+        Health::PersonalUpload,
         "answered: \"Missing Key.\"",
     ),
     (
@@ -488,10 +494,12 @@ pub struct Resolved {
 
 /// Turn `--tracker` arguments — ids from the list, or URLs — into tiers.
 ///
-/// Refuses rather than writes an announce URL we know cannot work: an unknown id, an entry
-/// whose URL is broken, an entry that needs a personal URL we do not have, or an unresolved
-/// `{passkey}`. Each refusal names the escape hatch, which is always the same one: pass the
-/// URL you know is right and we will use it verbatim.
+/// Refuses rather than writes an announce URL we know cannot work at all: an unknown id, an
+/// entry whose URL is broken, or an unresolved `{passkey}`. Each refusal names the escape
+/// hatch, which is always the same one: pass the URL you know is right and we will use it
+/// verbatim. A `PersonalUpload` entry is not refused — its generic URL is exactly what gets
+/// uploaded to the site to obtain a working one — but it does warn, so the extra step is not
+/// a surprise.
 pub fn resolve(specs: &[String], list: &TrackerList, keys: &Passkeys) -> Result<Resolved> {
     let mut out = Resolved::default();
     let mut private_sites: Vec<String> = Vec::new();
@@ -522,6 +530,20 @@ pub fn resolve(specs: &[String], list: &TrackerList, keys: &Passkeys) -> Result<
                         .evidence
                         .as_deref()
                         .unwrap_or("no detail was recorded"),
+                ));
+            }
+            if tracker.health == Health::PersonalUpload {
+                out.warnings.push(format!(
+                    "{name} does not authorize this announce URL by itself. Checked {} ({}). \
+                     Create the torrent as usual, then upload the .torrent file to {name}'s \
+                     site to get back a personal copy with a working announce URL — that \
+                     reissued copy is the one to seed.",
+                    tracker.checked.as_deref().unwrap_or("an unknown date"),
+                    tracker
+                        .evidence
+                        .as_deref()
+                        .unwrap_or("no detail was recorded"),
+                    name = tracker.name,
                 ));
             }
             let announce = tracker.announce_url(keys)?;
@@ -584,21 +606,12 @@ fn refuse_unusable(tracker: &Tracker) -> Result<()> {
         .evidence
         .as_deref()
         .unwrap_or("no detail was recorded");
-    let detail = match tracker.health {
-        Health::PersonalUrl => format!(
-            "{} issues a personal announce URL; the one in the list authorizes nobody. \
-             Checked {checked}: {saw}. Get yours from the site and pass it with \
-             --tracker <URL>.",
-            tracker.name
-        ),
-        _ => format!(
+    Err(Error::UnusableTracker {
+        id: tracker.id.clone(),
+        detail: format!(
             "{} cannot work. Checked {checked}: {saw}. If you know a URL that does, pass \
              it with --tracker <URL>.",
             tracker.announce
         ),
-    };
-    Err(Error::UnusableTracker {
-        id: tracker.id.clone(),
-        detail,
     })
 }

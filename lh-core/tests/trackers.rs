@@ -38,9 +38,9 @@ fn every_bundled_entry_is_dated_and_carries_its_evidence() {
     }
 }
 
-/// The four entries we checked and found unusable, and the two that need a personal URL,
-/// never become an announce URL in a torrent. A URL that cannot work is worse than no
-/// tracker at all, because the user finds out only when nobody ever connects.
+/// The four entries we checked and found unusable never become an announce URL in a
+/// torrent. A URL that cannot work is worse than no tracker at all, because the user finds
+/// out only when nobody ever connects.
 #[test]
 fn an_entry_we_know_cannot_work_is_refused_by_id() {
     let list = TrackerList::bundled();
@@ -53,11 +53,28 @@ fn an_entry_we_know_cannot_work_is_refused_by_id() {
         // Always with the escape hatch, because we might be the ones who are wrong.
         assert!(message.contains("--tracker <URL>"), "{id}: {message}");
     }
+}
 
-    for id in ["dime", "etree"] {
-        let err = resolve(&specs(&[id]), &list, &keys).expect_err("must refuse");
-        let message = err.to_string();
-        assert!(message.contains("personal announce URL"), "{id}: {message}");
+/// DIME and etree only hand out a working announce URL by re-processing an uploaded
+/// `.torrent`. Their generic URL is exactly what gets uploaded, so it is written into the
+/// torrent same as any other tracker — with a warning about the extra step, not a refusal.
+#[test]
+fn a_personal_upload_entry_is_used_and_warns() {
+    let list = TrackerList::bundled();
+    let keys = Passkeys::default();
+
+    for (id, announce) in [
+        ("dime", "http://bt.dimeadozen.org/announce.php"),
+        ("etree", "http://tracker.etree.org:6969/announce"),
+    ] {
+        let out = resolve(&specs(&[id]), &list, &keys).unwrap();
+        assert_eq!(out.tiers, vec![vec![announce.to_string()]]);
+        assert_eq!(out.warnings.len(), 1, "{id}: {:?}", out.warnings);
+        assert!(
+            out.warnings[0].contains("upload the .torrent file"),
+            "{id}: {:?}",
+            out.warnings
+        );
     }
 }
 
@@ -265,13 +282,14 @@ fn comments_and_blank_lines_are_skipped() {
 }
 
 /// `Health::usable` is the single gate every refusal goes through, so it is worth pinning
-/// which states pass it.
+/// which states pass it. `Broken` is the only one that does not — everything else is either
+/// confirmed working, unproven, or usable with a warning.
 #[test]
-fn only_states_we_have_no_evidence_against_are_usable() {
+fn only_broken_entries_are_unusable() {
     assert!(Health::Announces.usable());
     assert!(Health::Unreachable.usable());
     assert!(Health::Unchecked.usable());
-    assert!(!Health::PersonalUrl.usable());
+    assert!(Health::PersonalUpload.usable());
     assert!(!Health::Broken.usable());
 }
 

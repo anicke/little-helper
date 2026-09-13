@@ -262,9 +262,9 @@ fn torrent_trackers_lists_only_the_ones_that_answered() {
         4,
         "every listed entry carries the date it was checked:\n{text}"
     );
-    assert!(text.contains("personal URL needed"), "{text}");
+    assert!(text.contains("personal copy via upload"), "{text}");
     assert!(
-        text.contains("2 of 4 entries can be used as they stand"),
+        text.contains("4 of 4 entries can be used as they stand"),
         "{text}"
     );
     // And it says where a list of the user's own would go.

@@ -173,13 +173,19 @@ Four things the implementation forced:
   for that site — the worst possible place to be approximately right. TLH is no help: its
   changelog shows `Private torrent` as a manual checkbox added in 2011 and no passkey
   support at any point.
-* **etree and DIME plainly need a personal announce URL, and we still do not know its
+* **etree and DIME plainly gate on a personal announce URL, and we still do not know its
   shape.** They are the strongest evidence in the sweep — etree answers `Missing Key.`, DIME
   answers `not authorized; download a new copy of the .torrent file from the tracker` — and
   the temptation was to ship `…/{passkey}/announce` and let the mechanism do the rest.
   Probing for the shape got us rate-limited, which is the right outcome: a guessed template
   produces a confidently wrong URL, which is the failure mode of the entry we are replacing.
-  They refuse by id, quoting the tracker, and point at `--tracker <URL>`.
+  **Rethought after C3 landed** (see the note below the table): DIME's own wording — "download
+  a new copy of the .torrent file **from the tracker**" — is not asking for a URL we could go
+  fetch in advance, it is describing the site's actual mechanism: create the torrent, upload
+  it to the site, and the site hands back a reissued copy with a working announce URL baked
+  in. The generic URL in the list is exactly what gets uploaded. So `PersonalUpload` (renamed
+  from `PersonalUrl`) is *usable* — we write the generic URL and warn that the file needs to
+  be uploaded and swapped for the copy the site gives back, rather than refusing the id.
 
 Two smaller decisions worth recording:
 
@@ -352,14 +358,14 @@ whether an entry can be used at all, so the status is an enum:
 | `Health` | What it means | What `create` does |
 |---|---|---|
 | `Announces` | It answered as a tracker. | uses it |
-| `PersonalUrl` | It answered, but only a URL the site issues will authorize. | **refuses the id** |
+| `PersonalUpload` | It answered, but the generic URL only authorizes once you upload the resulting `.torrent` back to the site and get a reissued copy. | uses it, with a warning |
 | `Broken` | This URL cannot work — not a tracker, or no DNS. | **refuses the id** |
 | `Unreachable` | Nothing answered from where we checked. Not proof it is gone. | uses it, with a warning |
 | `Unchecked` | A user's own entry. Used exactly as given. | uses it |
 
-Every refusal quotes the evidence and the date, and every refusal names the same escape
-hatch: `--tracker <URL>`, which is taken verbatim. We may be the ones who are wrong, and a
-list that cannot be overridden is a list that is wrong forever.
+Every refusal quotes the evidence and the date, and names the same escape hatch:
+`--tracker <URL>`, which is taken verbatim. We may be the ones who are wrong, and a list that
+cannot be overridden is a list that is wrong forever.
 
 `checked` is the whole point. `lh torrent trackers` prints it, so a user can see an entry
 was last checked in 2018 and go and look rather than trusting us. A list with no date is how
@@ -385,9 +391,11 @@ same shape as the tracker list, because one format in that directory beats two. 
 with an unresolved `{passkey}` is never written.** An announce URL that cannot work is worse
 than no tracker at all, because the user finds out only when nobody ever connects.
 
-No *bundled* entry carries one. Two of them demonstrably need a personal URL and we do not
-know its shape (see the C3 notes); shipping a guessed template would reproduce, with more
-confidence, the exact failure this list is being rebuilt to fix.
+No *bundled* entry carries one. Two of them (DIME, etree) demonstrably gate on a personal
+URL, and it is not a template we could fill in ourselves — DIME hands it out by reissuing an
+uploaded `.torrent`, not by a `{passkey}`-shaped announce URL (see the C3 notes). Shipping a
+guessed template would reproduce, with more confidence, the exact failure this list is being
+rebuilt to fix.
 
 ### Tiers
 
