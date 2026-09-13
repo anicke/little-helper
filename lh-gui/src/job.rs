@@ -20,8 +20,9 @@
 //! caller `report_rows`'s row shape was waiting for, and it is.
 
 use lh_core::analysis::{Sbe, Verification};
-use lh_core::checksum::ChecksumKind;
+use lh_core::checksum::{ChecksumKind, EntryOutcome};
 use lh_core::convert::Conversion;
+use lh_core::display;
 use lh_core::job::{Event, JobId};
 use lh_core::torrent::{Created, FileStatus, TorrentReport};
 use std::hash::{Hash, Hasher};
@@ -43,21 +44,9 @@ pub enum JobOutcome {
     Convert(lh_core::Result<Box<Conversion>>),
     TorrentCreate(lh_core::Result<Box<Created>>),
     TorrentCheck(lh_core::Result<Box<TorrentReport>>),
-    /// One checksum-file entry's outcome, computed by the job closure itself rather than a
-    /// `lh_core` function — `cmd_check`'s own comparison (`lh-cli/src/main.rs`) is exactly
-    /// this small, and lifting it would be new `lh-core` surface for no reuse beyond one
-    /// caller (`docs/gui-shell.md` §6, S3).
-    ChecksumCheck(ChecksumEntryStatus),
-}
-
-/// What checking one checksum-file entry against the file beside it can find — the same
-/// four outcomes `lh-cli`'s `cmd_check` prints (`MISSING`/`OK`/`MISMATCH`/`FAILED`), as data.
-#[derive(Debug)]
-pub enum ChecksumEntryStatus {
-    Ok,
-    Missing,
-    Mismatch { expected: [u8; 16], actual: [u8; 16] },
-    Failed(String),
+    /// One checksum-file entry's outcome, from `checksum::check_entry`
+    /// (`docs/gui-shell.md` §6, S3).
+    ChecksumCheck(EntryOutcome),
 }
 
 /// The `Subscription::run_with` data, hashed by a stable id only — `docs/gui.md` §G0/§2.
@@ -193,9 +182,9 @@ fn checksum_check_row(label: &str, outcome: &JobOutcome) -> Option<FileRow> {
         return None;
     };
     let (tag, detail) = match status {
-        ChecksumEntryStatus::Ok => ("OK", String::new()),
-        ChecksumEntryStatus::Missing => ("MISSING", String::new()),
-        ChecksumEntryStatus::Mismatch { expected, actual } => (
+        EntryOutcome::Ok => ("OK", String::new()),
+        EntryOutcome::Missing => ("MISSING", String::new()),
+        EntryOutcome::Mismatch { expected, actual } => (
             "MISMATCH",
             format!(
                 "expected {} actual {}",
@@ -203,7 +192,7 @@ fn checksum_check_row(label: &str, outcome: &JobOutcome) -> Option<FileRow> {
                 hex::encode(actual)
             ),
         ),
-        ChecksumEntryStatus::Failed(e) => ("FAILED", e.clone()),
+        EntryOutcome::Failed(e) => ("FAILED", e.to_string()),
     };
     Some(FileRow {
         path: label.to_string(),
@@ -230,7 +219,7 @@ fn report_rows(report: &TorrentReport) -> Vec<FileRow> {
                 format!("expected {expected} bytes, found {actual}")
             }
             FileStatus::Unreadable { reason } => reason.clone(),
-            FileStatus::Corrupt { bad_pieces } => pieces_phrase(bad_pieces),
+            FileStatus::Corrupt { bad_pieces } => display::pieces_phrase(bad_pieces),
             FileStatus::Suspect { piece, shared_with } => format!(
                 "piece {piece} is shared with {} other file(s); either could be at fault",
                 shared_with.len()
@@ -259,15 +248,6 @@ fn report_rows(report: &TorrentReport) -> Vec<FileRow> {
         });
     }
     rows
-}
-
-fn pieces_phrase(pieces: &[u32]) -> String {
-    if pieces.len() == 1 {
-        format!("piece {}", pieces[0])
-    } else {
-        let list: Vec<String> = pieces.iter().map(u32::to_string).collect();
-        format!("pieces {}", list.join(", "))
-    }
 }
 
 /// One line of rendered outcome for the file table / job-queue panel, in the same shape
@@ -323,7 +303,7 @@ fn render(outcome: &JobOutcome) -> Result<String, String> {
             } else {
                 "pieces"
             },
-            crate::format_bytes(created.piece_length),
+            display::bytes(created.piece_length),
         )),
         JobOutcome::TorrentCreate(Err(e)) => Err(e.to_string()),
         JobOutcome::TorrentCheck(Ok(report)) => match report.verdict() {
@@ -338,15 +318,13 @@ fn render(outcome: &JobOutcome) -> Result<String, String> {
             }
         },
         JobOutcome::TorrentCheck(Err(e)) => Err(e.to_string()),
-        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Ok) => Ok("OK".to_string()),
-        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Missing) => Err("MISSING".to_string()),
-        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Mismatch { expected, actual }) => {
-            Err(format!(
-                "MISMATCH expected {} actual {}",
-                hex::encode(expected),
-                hex::encode(actual)
-            ))
-        }
-        JobOutcome::ChecksumCheck(ChecksumEntryStatus::Failed(e)) => Err(e.clone()),
+        JobOutcome::ChecksumCheck(EntryOutcome::Ok) => Ok("OK".to_string()),
+        JobOutcome::ChecksumCheck(EntryOutcome::Missing) => Err("MISSING".to_string()),
+        JobOutcome::ChecksumCheck(EntryOutcome::Mismatch { expected, actual }) => Err(format!(
+            "MISMATCH expected {} actual {}",
+            hex::encode(expected),
+            hex::encode(actual)
+        )),
+        JobOutcome::ChecksumCheck(EntryOutcome::Failed(e)) => Err(e.to_string()),
     }
 }

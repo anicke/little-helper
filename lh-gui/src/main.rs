@@ -28,6 +28,7 @@ use job::JobOutcome;
 use lh_core::analysis::{self, Sbe};
 use lh_core::checksum::{self, ChecksumFile, ChecksumKind, Entry};
 use lh_core::convert::{self, Conversion, EncodeOpts};
+use lh_core::display;
 use lh_core::job::{JobId, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::scan::{self, WorkingSet};
@@ -73,16 +74,6 @@ impl std::fmt::Display for ConvertTarget {
             ConvertTarget::Wav => "FLAC → WAV",
             ConvertTarget::Flac => "WAV → FLAC",
         })
-    }
-}
-
-/// `ChecksumKind` (`lh_core::checksum`) has no `Display` of its own and the orphan rule
-/// keeps one from being added here — a plain label function instead.
-fn checksum_kind_label(kind: ChecksumKind) -> &'static str {
-    match kind {
-        ChecksumKind::Ffp => "FFP",
-        ChecksumKind::Md5 => "MD5",
-        ChecksumKind::St5 => "ST5",
     }
 }
 
@@ -407,17 +398,7 @@ impl App {
     /// (`docs/gui-shell.md` §10 Q4 — the original asks via `frmTypeChecksumFile`, unscoped
     /// for S3).
     fn pick_checksum_file(&mut self, path: PathBuf) {
-        let kind = match path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("ffp") => Some(ChecksumKind::Ffp),
-            Some("md5") => Some(ChecksumKind::Md5),
-            Some("st5") => Some(ChecksumKind::St5),
-            _ => None,
-        };
+        let kind = ChecksumKind::from_path(&path);
         self.checksum_check_kind = kind;
         self.checksum_check_file = None;
         match kind {
@@ -723,20 +704,11 @@ impl App {
         self.queue.cancel_token().reset();
         let mut pending = HashSet::new();
         for entry in &file.entries {
-            let target = dir.join(&entry.file_name);
-            let expected = entry.digest;
+            let base_dir = dir.clone();
+            let entry = entry.clone();
             let label = entry.file_name.clone();
             let id = self.queue.submit(label.clone(), move |_p| {
-                let status = if !target.exists() {
-                    job::ChecksumEntryStatus::Missing
-                } else {
-                    match checksum::compute(kind, &target) {
-                        Ok(actual) if actual == expected => job::ChecksumEntryStatus::Ok,
-                        Ok(actual) => job::ChecksumEntryStatus::Mismatch { expected, actual },
-                        Err(e) => job::ChecksumEntryStatus::Failed(e.to_string()),
-                    }
-                };
-                JobOutcome::ChecksumCheck(status)
+                JobOutcome::ChecksumCheck(checksum::check_entry(kind, &base_dir, &entry))
             });
             pending.insert(id);
             self.jobs.insert(
@@ -867,7 +839,7 @@ fn convert_to_wav(
     overwrite: bool,
     p: &lh_core::job::Progress<JobOutcome>,
 ) -> lh_core::Result<Box<Conversion>> {
-    let dst = destination_for(path, "wav")?;
+    let dst = convert::destination(path, "wav", None)?;
     convert::to_wav_with_progress(path, &dst, overwrite, &mut |done, total| {
         p.report(done, total);
         !p.is_cancelled()
@@ -883,7 +855,7 @@ fn convert_to_flac(
     overwrite: bool,
     p: &lh_core::job::Progress<JobOutcome>,
 ) -> lh_core::Result<Box<Conversion>> {
-    let dst = destination_for(path, "flac")?;
+    let dst = convert::destination(path, "flac", None)?;
     convert::to_flac_cancellable(
         path,
         &dst,
@@ -893,11 +865,6 @@ fn convert_to_flac(
         &mut || !p.is_cancelled(),
     )
     .map(Box::new)
-}
-
-fn destination_for(path: &Path, extension: &str) -> lh_core::Result<PathBuf> {
-    convert::destination(path, extension, None)
-        .ok_or_else(|| lh_core::Error::malformed(path, "has no file name to work from"))
 }
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
@@ -1186,11 +1153,9 @@ fn convert_panel(app: &App) -> Element<'_, Message> {
 /// output path that turns those digests into a written `ChecksumFile`
 /// (`App::run_checksum_create`).
 fn checksum_create_panel(app: &App) -> Element<'_, Message> {
-    let kinds = row(
-        [ChecksumKind::Ffp, ChecksumKind::Md5, ChecksumKind::St5]
-            .into_iter()
-            .map(|k| kind_button(k, app.checksum_kind == k)),
-    )
+    let kinds = row([ChecksumKind::Ffp, ChecksumKind::Md5, ChecksumKind::St5]
+        .into_iter()
+        .map(|k| kind_button(k, app.checksum_kind == k)))
     .spacing(4);
     let output = text_input("Output file (.ffp/.md5/.st5)", &app.checksum_output)
         .on_input(Message::ChecksumOutputChanged);
@@ -1209,7 +1174,7 @@ fn checksum_create_panel(app: &App) -> Element<'_, Message> {
 }
 
 fn kind_button(kind: ChecksumKind, selected: bool) -> Element<'static, Message> {
-    button(text(checksum_kind_label(kind)))
+    button(text(kind.label()))
         .on_press(Message::ChecksumKindSelected(kind))
         .style(move |theme, status| {
             if selected {
@@ -1229,8 +1194,7 @@ fn checksum_check_panel(app: &App) -> Element<'_, Message> {
     let label = match &app.checksum_check_path {
         Some(p) => p.display().to_string(),
         None => {
-            "No checksum file chosen — Browse or drop a .ffp/.md5/.st5 on the window."
-                .to_string()
+            "No checksum file chosen — Browse or drop a .ffp/.md5/.st5 on the window.".to_string()
         }
     };
     let browse = button("Browse...").on_press(Message::ChecksumCheckBrowsePressed);
@@ -1245,8 +1209,11 @@ fn checksum_check_panel(app: &App) -> Element<'_, Message> {
         _ => text("").into(),
     };
 
-    let run = button("Check")
-        .on_press_maybe(app.checksum_check_file.is_some().then_some(Message::ChecksumCheckPressed));
+    let run = button("Check").on_press_maybe(
+        app.checksum_check_file
+            .is_some()
+            .then_some(Message::ChecksumCheckPressed),
+    );
     let cancel = button("Cancel").on_press(Message::CancelPressed);
 
     column![
@@ -1355,7 +1322,12 @@ fn file_table(app: &App) -> Element<'_, Message> {
         })
         .width(Length::FillPortion(2)),
         table::column(text("Duration"), |file: AudioFile| {
-            text(format_duration(file.stream_info.duration_secs()))
+            text(
+                file.stream_info
+                    .duration_secs()
+                    .map(display::duration_short)
+                    .unwrap_or_else(|| "?".to_string()),
+            )
         })
         .width(Length::FillPortion(1)),
         table::column(text("Encoder"), |file: AudioFile| {
@@ -1448,7 +1420,7 @@ fn torrent_check_panel(app: &App) -> Element<'_, Message> {
             meta.info_hash_hex(),
             meta.real_files().count(),
             meta.pieces.len(),
-            format_bytes(meta.piece_length),
+            display::bytes(meta.piece_length),
         ))
         .into(),
         None => text("").into(),
@@ -1561,35 +1533,6 @@ fn tool_line(id: ToolId, discovery: &Discovery) -> String {
         Discovery::Unusable { path, reason } => {
             format!("{}: {} — unusable: {reason}", id.name(), path.display())
         }
-    }
-}
-
-/// Duplicated from `lh-cli`'s own `format_bytes` rather than lifted into `lh-core`: pure
-/// display formatting, not a correctness-sensitive detail like `convert::destination` or
-/// `torrent::default_output` — `format_duration` right below is already the same kind of
-/// duplicate.
-pub(crate) fn format_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
-
-fn format_duration(secs: Option<f64>) -> String {
-    match secs {
-        Some(s) => {
-            let total = s.round() as u64;
-            format!("{}:{:02}", total / 60, total % 60)
-        }
-        None => "?".to_string(),
     }
 }
 
@@ -1706,13 +1649,6 @@ mod tests {
             .clone();
         app.selected.insert(first);
         let _ = file_table(&app);
-    }
-
-    #[test]
-    fn format_duration_matches_mm_ss() {
-        assert_eq!(format_duration(Some(0.4)), "0:00");
-        assert_eq!(format_duration(Some(65.6)), "1:06");
-        assert_eq!(format_duration(None), "?");
     }
 
     /// Drains `rx` into `app` until every one of `total` submitted jobs has a terminal
@@ -1952,13 +1888,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn format_bytes_matches_kib_mib() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(16 * 1024), "16.0 KiB");
-        assert_eq!(format_bytes(16 * 1024 * 1024), "16.0 MiB");
-    }
-
     /// A folder with a couple of small synthetic files, not the read-only audio fixture
     /// corpus — torrent create/check do not care what the bytes are, and a real write
     /// (the `.torrent` itself) must not touch the checked-in corpus, same reasoning G3's
@@ -2106,8 +2035,9 @@ mod tests {
     #[test]
     fn running_checksum_create_through_the_real_queue_writes_a_checksum_file_matching_the_reference_ffp()
      {
-        let reference = ChecksumFile::read(ChecksumKind::Ffp, &fixtures_dir().join("reference.ffp"))
-            .expect("reference.ffp should parse");
+        let reference =
+            ChecksumFile::read(ChecksumKind::Ffp, &fixtures_dir().join("reference.ffp"))
+                .expect("reference.ffp should parse");
         let reference_names: HashSet<String> = reference
             .entries
             .iter()
@@ -2206,7 +2136,11 @@ mod tests {
     fn checksum_check_reports_missing_and_mismatch_entries() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.bin"), b"hello").unwrap();
-        let content = format!("{}  a.bin\n{}  missing.bin\n", "0".repeat(32), "f".repeat(32));
+        let content = format!(
+            "{}  a.bin\n{}  missing.bin\n",
+            "0".repeat(32),
+            "f".repeat(32)
+        );
         let checksum_path = dir.path().join("check.md5");
         std::fs::write(&checksum_path, &content).unwrap();
 

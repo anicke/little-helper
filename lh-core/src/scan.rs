@@ -43,3 +43,24 @@ pub fn scan(root: &Path, recursive: bool) -> Result<WorkingSet> {
     }
     Ok(set)
 }
+
+/// Expand a mix of files and folders into one `WorkingSet`, the scan-and-probe half of
+/// what every front end's `collect` needs: a bare file is probed directly, a folder is
+/// walked with [`scan`]. Reports nothing — a caller that wants to print skips (as
+/// `lh-cli`'s own `collect` does) reads `WorkingSet::skipped` itself.
+pub fn collect(paths: &[PathBuf], recursive: bool) -> Result<WorkingSet> {
+    let mut set = WorkingSet::default();
+    for path in paths {
+        if path.is_dir() {
+            let sub = scan(path, recursive)?;
+            set.files.extend(sub.files);
+            set.skipped.extend(sub.skipped);
+        } else {
+            match format::probe(path) {
+                Ok(f) => set.files.push(f),
+                Err(e) => set.skipped.push((path.clone(), e.to_string())),
+            }
+        }
+    }
+    Ok(set)
+}

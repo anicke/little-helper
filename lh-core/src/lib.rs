@@ -14,6 +14,7 @@ pub mod analysis;
 pub mod checksum;
 pub mod config;
 pub mod convert;
+pub mod display;
 pub mod error;
 pub mod etree;
 pub mod format;

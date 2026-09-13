@@ -12,7 +12,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 
 ## 0. Status
 
-*Updated 2026-09-12.*
+*Updated 2026-09-13.*
 
 | Milestone | State |
 |---|---|
@@ -21,10 +21,10 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers`, `tag`, `rename` all work |
 | M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell revamp is done: [docs/gui-shell.md](docs/gui-shell.md), S1–S4 all done (rail shell, selection, checksum areas, `iced::widget::table`). Tag/rename ([docs/tagging.md](docs/tagging.md)) has no GUI screen yet |
 | `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `check`, `convert`, `sbe fix`, `torrent create`/`check`/`info`, and `tag`/`rename` have real live screens, everything else runs headless like `lh` itself |
-| Architecture cleanup | **planned** — behaviour-preserving refactors across all four crates, see [docs/architecture-cleanup.md](docs/architecture-cleanup.md) (A1–A6): shared logic into `lh-core`, one progress/cancel callback, `sbe_fix` → `repair`, split and de-duplicate the front ends |
+| Architecture cleanup | **in progress** — behaviour-preserving refactors across all four crates, see [docs/architecture-cleanup.md](docs/architecture-cleanup.md) (A1–A6): A1 done (`ChecksumKind::from_path`, `checksum::check_entry`, `scan::collect`, `convert::destination` returning `Result`, and `lh_core::display` now hold what each front end used to reimplement); A2–A6 not started |
 | M4 Packaging | not started |
 
-229 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
+230 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
 on the fixture corpus, and our FLAC → WAV output matches `flac -d` byte for byte — including
 the `WAVE_FORMAT_EXTENSIBLE` header at 24 bits.
 

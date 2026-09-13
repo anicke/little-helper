@@ -40,6 +40,23 @@ impl ChecksumKind {
             Self::St5 => "ST5",
         }
     }
+
+    /// The kind a `.ffp`/`.md5`/`.st5` path implies, from its extension alone — shared by
+    /// every front end so each names a checksum file's kind exactly the way `lh check`
+    /// does.
+    pub fn from_path(path: &Path) -> Option<ChecksumKind> {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("ffp") => Some(Self::Ffp),
+            Some("md5") => Some(Self::Md5),
+            Some("st5") => Some(Self::St5),
+            _ => None,
+        }
+    }
 }
 
 /// FFP: the MD5 already stored in FLAC's STREAMINFO. A header read — no decode.
@@ -78,5 +95,36 @@ pub fn compute(kind: ChecksumKind, path: &Path) -> Result<[u8; 16]> {
         ChecksumKind::Ffp => ffp(path),
         ChecksumKind::Md5 => md5(path),
         ChecksumKind::St5 => st5(path),
+    }
+}
+
+/// What checking one checksum-file entry against the file beside it can find — shared by
+/// every front end's `check` (`lh check`, and the TUI/GUI screens behind it).
+#[derive(Debug)]
+pub enum EntryOutcome {
+    Ok,
+    Mismatch {
+        expected: [u8; 16],
+        actual: [u8; 16],
+    },
+    Missing,
+    Failed(Error),
+}
+
+/// Recompute `entry`'s digest from `base_dir.join(&entry.file_name)` and compare against
+/// what the checksum file stored. Per entry rather than per checksum file, because the
+/// TUI and GUI submit one queue job per entry and need to keep doing so.
+pub fn check_entry(kind: ChecksumKind, base_dir: &Path, entry: &Entry) -> EntryOutcome {
+    let target = base_dir.join(&entry.file_name);
+    if !target.exists() {
+        return EntryOutcome::Missing;
+    }
+    match compute(kind, &target) {
+        Ok(actual) if actual == entry.digest => EntryOutcome::Ok,
+        Ok(actual) => EntryOutcome::Mismatch {
+            expected: entry.digest,
+            actual,
+        },
+        Err(e) => EntryOutcome::Failed(e),
     }
 }

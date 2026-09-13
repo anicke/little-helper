@@ -30,10 +30,13 @@ use lh_core::analysis::{
     BoundaryDirection, FixPlan, Fixed, RepairEncode, Sbe, TailPolicy, Verification, execute_fix,
     plan_fix, sbe, verify,
 };
-use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute, ffp};
+use lh_core::checksum::{
+    ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute, ffp,
+};
 use lh_core::convert::{
     Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
 };
+use lh_core::display;
 use lh_core::etree::ShowDate;
 use lh_core::etree::ShowName;
 use lh_core::job::{CancelToken, Event, Queue};
@@ -860,17 +863,6 @@ fn draw_checksum_gauge(frame: &mut Frame, area: Rect, stats: &ChecksumStats, the
 // the same kind of trouble as a digest that doesn't match or a read that failed outright.
 
 #[derive(Clone)]
-enum CheckOutcome {
-    Ok,
-    Mismatch {
-        expected: [u8; 16],
-        actual: [u8; 16],
-    },
-    Missing,
-    Failed(String),
-}
-
-#[derive(Clone)]
 enum CheckStatus {
     Pending,
     Running,
@@ -952,22 +944,13 @@ fn run_check_screen(
         })
         .collect();
 
-    let queue: Queue<CheckOutcome> = Queue::new();
+    let queue: Queue<EntryOutcome> = Queue::new();
     let cancel = queue.cancel_token();
     for e in &entries {
         let target_dir = dir.clone();
-        let file_name = e.file_name.clone();
-        let expected = e.digest;
+        let entry = e.clone();
         queue.submit(e.file_name.clone(), move |_progress| {
-            let target = target_dir.join(&file_name);
-            if !target.exists() {
-                return CheckOutcome::Missing;
-            }
-            match compute(kind, &target) {
-                Ok(actual) if actual == expected => CheckOutcome::Ok,
-                Ok(actual) => CheckOutcome::Mismatch { expected, actual },
-                Err(e) => CheckOutcome::Failed(e.to_string()),
-            }
+            check_entry(kind, &target_dir, &entry)
         });
     }
     let events = queue.events();
@@ -990,21 +973,21 @@ fn run_check_screen(
                 Event::Finished { id, output, .. } => {
                     done += 1;
                     rows[id.index()].status = match output {
-                        CheckOutcome::Ok => {
+                        EntryOutcome::Ok => {
                             ok_count += 1;
                             CheckStatus::Ok
                         }
-                        CheckOutcome::Mismatch { expected, actual } => {
+                        EntryOutcome::Mismatch { expected, actual } => {
                             mismatch_count += 1;
                             CheckStatus::Mismatch { expected, actual }
                         }
-                        CheckOutcome::Missing => {
+                        EntryOutcome::Missing => {
                             missing_count += 1;
                             CheckStatus::Missing
                         }
-                        CheckOutcome::Failed(e) => {
+                        EntryOutcome::Failed(e) => {
                             failed_count += 1;
-                            CheckStatus::Failed(e)
+                            CheckStatus::Failed(e.to_string())
                         }
                     };
                 }
@@ -1680,8 +1663,8 @@ fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
     let mut dsts: Vec<PathBuf> = Vec::with_capacity(set.files.len());
     for f in &set.files {
         match destination(&f.path, "flac", Some(&out_dir)) {
-            Some(d) => dsts.push(d),
-            None => {
+            Ok(d) => dsts.push(d),
+            Err(_) => {
                 eprintln!("lh-tui: {} has no file name", f.path.display());
                 return ExitCode::from(2);
             }
@@ -2185,8 +2168,8 @@ fn run_convert_screen(
                 return ConvertOutcome::Skipped;
             }
             let dst = match destination(&path, extension, out_dir.as_deref()) {
-                Some(d) => d,
-                None => return ConvertOutcome::NoFileName,
+                Ok(d) => d,
+                Err(_) => return ConvertOutcome::NoFileName,
             };
             let result = match to {
                 Target::Wav => to_wav_with_progress(&path, &dst, force, &mut |done, total| {
@@ -2456,30 +2439,6 @@ fn draw_convert_gauge(frame: &mut Frame, area: Rect, stats: &ConvertStats, theme
         .ratio(ratio)
         .label(label);
     frame.render_widget(gauge, area);
-}
-
-fn format_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
-
-fn pieces_phrase(pieces: &[u32]) -> String {
-    if pieces.len() == 1 {
-        format!("piece {}", pieces[0])
-    } else {
-        let list: Vec<String> = pieces.iter().map(u32::to_string).collect();
-        format!("pieces {}", list.join(", "))
-    }
 }
 
 // --- Torrent create -----------------------------------------------------------------
@@ -3078,14 +3037,14 @@ fn draw_file_preview(
     let title = format!(
         " files: {} ({}{excluded_note}) ",
         files.len(),
-        format_bytes(total)
+        display::bytes(total)
     );
     let items: Vec<ListItem> = files
         .iter()
         .map(|f| {
             ListItem::new(Line::from(vec![
                 Span::raw(f.path.clone()),
-                Span::styled(format!("  {}", format_bytes(f.length)), theme.dim),
+                Span::styled(format!("  {}", display::bytes(f.length)), theme.dim),
             ]))
         })
         .collect();
@@ -3156,12 +3115,12 @@ fn create_lines<'a>(
                 ));
                 lines.push(Line::from(format!(
                     "size       {}",
-                    format_bytes(made.total_length)
+                    display::bytes(made.total_length)
                 )));
                 lines.push(Line::from(format!(
                     "pieces     {} x {}",
                     made.pieces,
-                    format_bytes(made.piece_length)
+                    display::bytes(made.piece_length)
                 )));
                 lines.push(Line::from(format!("infohash   {}", made.info_hash_hex())));
                 for (path, why) in &made.excluded {
@@ -3481,7 +3440,7 @@ fn check_rows(report: &TorrentReport) -> Vec<TorrentFileRow> {
                 format!("expected {expected} bytes, found {actual}")
             }
             FileStatus::Unreadable { reason } => reason.clone(),
-            FileStatus::Corrupt { bad_pieces } => pieces_phrase(bad_pieces),
+            FileStatus::Corrupt { bad_pieces } => display::pieces_phrase(bad_pieces),
             FileStatus::Suspect { piece, shared_with } => format!(
                 "piece {piece} is shared with {} other file(s); either could be at fault",
                 shared_with.len()
@@ -3670,11 +3629,11 @@ fn torrent_info_lines<'a>(t: &Metainfo, theme: &'a Theme) -> Vec<Line<'a>> {
         Line::from(format!(
             "pieces       {} x {}",
             t.pieces.len(),
-            format_bytes(t.piece_length)
+            display::bytes(t.piece_length)
         )),
         Line::from(format!(
             "total        {} ({} bytes)",
-            format_bytes(t.total_length),
+            display::bytes(t.total_length),
             t.total_length
         )),
     ];
@@ -3698,10 +3657,7 @@ fn torrent_info_lines<'a>(t: &Metainfo, theme: &'a Theme) -> Vec<Line<'a>> {
         lines.push(Line::from(format!("created by   {v}")));
     }
     if let Some(ts) = t.creation_date {
-        lines.push(Line::from(format!(
-            "created      {}",
-            lh_cli::format_date(ts)
-        )));
+        lines.push(Line::from(format!("created      {}", display::date(ts))));
     }
     if let Some(v) = &t.comment {
         for (i, line) in v.lines().enumerate() {
@@ -3723,7 +3679,7 @@ fn torrent_info_lines<'a>(t: &Metainfo, theme: &'a Theme) -> Vec<Line<'a>> {
 fn draw_torrent_info_files(frame: &mut Frame, area: Rect, t: &Metainfo, theme: &Theme) {
     let rows = t.real_files().map(|f| {
         Row::new(vec![
-            Cell::from(format_bytes(f.length)),
+            Cell::from(display::bytes(f.length)),
             Cell::from(f.display_path()),
         ])
     });

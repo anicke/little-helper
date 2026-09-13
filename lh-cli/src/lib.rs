@@ -13,21 +13,24 @@ use lh_core::analysis::{
     BoundaryDirection, FixPlan, RepairEncode, Sbe, TailPolicy, Verification, execute_fix, plan_fix,
     sbe, verify,
 };
-use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, compute, ffp};
+use lh_core::checksum::{
+    ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute, ffp,
+};
 use lh_core::convert::{
     Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
 };
+use lh_core::display;
 use lh_core::etree::{ShowDate, ShowName};
 use lh_core::job::{CancelToken, Event, Progress, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::rename::{NameSpec, RenamePlan, RenameStatus, execute_rename, plan_rename};
+use lh_core::scan;
 use lh_core::tag::{self, Tags};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
     Chosen, CreateOpts, Created, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList,
     Verdict, check, check_sizes, create_with_progress, default_output, resolve,
 };
-use lh_core::{format, scan};
 use std::path::{Path, PathBuf};
 
 /// Run one job per file on a bounded worker pool if there is more than one file — a
@@ -373,28 +376,13 @@ pub fn run(cli: Cli) -> Result<bool> {
 /// Expand files and folders into a flat list of audio files, reporting anything skipped
 /// rather than dropping it silently.
 pub fn collect(p: &Paths) -> Result<(Vec<AudioFile>, bool)> {
-    let mut files = Vec::new();
+    let set = scan::collect(&p.paths, p.recursive)?;
     let mut clean = true;
-    for path in &p.paths {
-        if path.is_dir() {
-            let set = scan::scan(path, p.recursive)
-                .with_context(|| format!("scanning {}", path.display()))?;
-            for (skipped, why) in &set.skipped {
-                eprintln!("skipped {}: {why}", skipped.display());
-                clean = false;
-            }
-            files.extend(set.files);
-        } else {
-            match format::probe(path) {
-                Ok(f) => files.push(f),
-                Err(e) => {
-                    eprintln!("skipped {}: {e}", path.display());
-                    clean = false;
-                }
-            }
-        }
+    for (skipped, why) in &set.skipped {
+        eprintln!("skipped {}: {why}", skipped.display());
+        clean = false;
     }
-    Ok((files, clean))
+    Ok((set.files, clean))
 }
 
 fn cmd_info(p: &Paths) -> Result<bool> {
@@ -403,7 +391,7 @@ fn cmd_info(p: &Paths) -> Result<bool> {
         let si = &f.stream_info;
         let dur = si
             .duration_secs()
-            .map(format_duration)
+            .map(display::duration_precise)
             .unwrap_or_else(|| "?".into());
         println!(
             "{name}\n  {fmt}  {rate} Hz  {bits}-bit  {ch} ch  {dur}  {size} bytes",
@@ -551,7 +539,7 @@ fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         .iter()
         .map(|f| {
             destination(&f.path, "flac", Some(out_dir))
-                .ok_or_else(|| anyhow::anyhow!("{} has no file name", f.path.display()))
+                .map_err(|_| anyhow::anyhow!("{} has no file name", f.path.display()))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -661,24 +649,20 @@ fn cmd_checksum(kind: ChecksumKind, args: &ChecksumArgs) -> Result<bool> {
     Ok(ok)
 }
 
-/// The `ChecksumKind` a `.ffp`/`.md5`/`.st5` path implies, from its extension — shared
-/// with `lh-tui`'s `check` screen so both name a file's kind exactly the way `lh check`
-/// does.
+/// `ChecksumKind::from_path`, with `lh check`'s own error wording when a path names none
+/// of `.ffp`/`.md5`/`.st5` — shared with `lh-tui`'s `check` screen so both report it the
+/// same way.
 pub fn checksum_kind_for(file: &Path) -> Result<ChecksumKind> {
-    match file
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("ffp") => Ok(ChecksumKind::Ffp),
-        Some("md5") => Ok(ChecksumKind::Md5),
-        Some("st5") => Ok(ChecksumKind::St5),
-        other => anyhow::bail!(
-            "cannot tell what kind of checksum file this is from {:?}; expected .ffp, .md5 or .st5",
-            other.unwrap_or_default()
-        ),
-    }
+    ChecksumKind::from_path(file).ok_or_else(|| {
+        let ext = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "cannot tell what kind of checksum file this is from {ext:?}; expected .ffp, .md5 or .st5"
+        )
+    })
 }
 
 fn cmd_check(file: &Path) -> Result<bool> {
@@ -690,24 +674,22 @@ fn cmd_check(file: &Path) -> Result<bool> {
 
     let mut ok = true;
     for entry in &list.entries {
-        let target = dir.join(&entry.file_name);
-        if !target.exists() {
-            ok = false;
-            println!("MISSING   {}", entry.file_name);
-            continue;
-        }
-        match compute(kind, &target) {
-            Ok(actual) if actual == entry.digest => println!("OK        {}", entry.file_name),
-            Ok(actual) => {
+        match check_entry(kind, dir, entry) {
+            EntryOutcome::Ok => println!("OK        {}", entry.file_name),
+            EntryOutcome::Missing => {
+                ok = false;
+                println!("MISSING   {}", entry.file_name);
+            }
+            EntryOutcome::Mismatch { expected, actual } => {
                 ok = false;
                 println!(
                     "MISMATCH  {}\n            expected {}\n            actual   {}",
                     entry.file_name,
-                    hex::encode(entry.digest),
+                    hex::encode(expected),
                     hex::encode(actual)
                 );
             }
-            Err(e) => {
+            EntryOutcome::Failed(e) => {
                 ok = false;
                 println!("FAILED    {}: {e}", entry.file_name);
             }
@@ -933,11 +915,11 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
     println!(
         "  pieces       {} x {}",
         t.pieces.len(),
-        format_bytes(t.piece_length)
+        display::bytes(t.piece_length)
     );
     println!(
         "  total        {} ({} bytes)",
-        format_bytes(t.total_length),
+        display::bytes(t.total_length),
         t.total_length
     );
     let real = t.real_files().count();
@@ -959,7 +941,7 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
         println!("  created by   {v}");
     }
     if let Some(ts) = t.creation_date {
-        println!("  created      {}", format_date(ts));
+        println!("  created      {}", display::date(ts));
     }
     if let Some(v) = &t.comment {
         // Trackers write multi-line comments; keep the column alignment intact.
@@ -974,7 +956,7 @@ fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
     if list_files {
         println!();
         for f in t.real_files() {
-            println!("  {:>12}  {}", format_bytes(f.length), f.display_path());
+            println!("  {:>12}  {}", display::bytes(f.length), f.display_path());
         }
     }
     Ok(true)
@@ -1073,10 +1055,10 @@ fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
     println!(
         "  {} files   {}   {} {} of {}",
         made.files.len(),
-        format_bytes(made.total_length),
+        display::bytes(made.total_length),
         made.pieces,
         if made.pieces == 1 { "piece" } else { "pieces" },
-        format_bytes(made.piece_length),
+        display::bytes(made.piece_length),
     );
     for (path, why) in &made.excluded {
         let shown = path.strip_prefix(&source).unwrap_or(path);
@@ -1207,7 +1189,7 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
         "  {}  {} files  {}",
         hex::encode(report.info_hash),
         meta.real_files().count(),
-        format_bytes(meta.total_length)
+        display::bytes(meta.total_length)
     );
     println!("  root {}", report.root.display());
     println!();
@@ -1224,7 +1206,10 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
             }
             FileStatus::Unreadable { reason } => println!("{label:<11} {name}  ({reason})"),
             FileStatus::Corrupt { bad_pieces } => {
-                println!("{label:<11} {name}  ({})", pieces_phrase(bad_pieces))
+                println!(
+                    "{label:<11} {name}  ({})",
+                    display::pieces_phrase(bad_pieces)
+                )
             }
             FileStatus::Suspect { piece, shared_with } => {
                 let others: Vec<String> = shared_with
@@ -1308,8 +1293,8 @@ fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
             return ConvertOutcome::Skipped;
         }
         let dst = match destination(&f.path, extension, out_dir.as_deref()) {
-            Some(d) => d,
-            None => return ConvertOutcome::NoFileName,
+            Ok(d) => d,
+            Err(_) => return ConvertOutcome::NoFileName,
         };
         let result = match to {
             Target::Wav => to_wav_with_progress(&f.path, &dst, force, &mut |done, total| {
@@ -1444,57 +1429,4 @@ fn cmd_tools() -> Result<bool> {
         }
         Ok(false)
     }
-}
-
-fn pieces_phrase(pieces: &[u32]) -> String {
-    if pieces.len() == 1 {
-        format!("piece {}", pieces[0])
-    } else {
-        let list: Vec<String> = pieces.iter().map(u32::to_string).collect();
-        format!("pieces {}", list.join(", "))
-    }
-}
-
-fn format_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit < UNITS.len() - 1 {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
-
-/// Torrent creation dates matter for identifying an old seed, so show a date rather than
-/// an epoch. Civil-from-days, so this needs no date library.
-pub fn format_date(epoch_secs: i64) -> String {
-    let days = epoch_secs.div_euclid(86_400);
-    let secs = epoch_secs.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
-}
-
-fn format_duration(secs: f64) -> String {
-    let millis = (secs * 1000.0).round() as u64;
-    let (m, rem) = (millis / 60_000, millis % 60_000);
-    format!("{m}:{s:02}.{ms:03}", s = rem / 1000, ms = rem % 1000)
 }

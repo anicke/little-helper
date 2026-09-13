@@ -261,12 +261,14 @@ pub(crate) fn encode_flac_staged(
 /// Built as an `OsString` rather than through `with_extension`, which would eat everything
 /// after the last dot of a name like `gd77-05-08.d1t01.flac` — and non-UTF-8 names are in
 /// the fixture corpus for a reason.
-pub fn destination(src: &Path, extension: &str, out_dir: Option<&Path>) -> Option<PathBuf> {
+pub fn destination(src: &Path, extension: &str, out_dir: Option<&Path>) -> Result<PathBuf> {
+    let no_file_name = || Error::malformed(src, "has no file name to work from");
     let dir = out_dir
         .map(Path::to_path_buf)
-        .or_else(|| src.parent().map(Path::to_path_buf))?;
-    let mut name = src.file_stem()?.to_os_string();
+        .or_else(|| src.parent().map(Path::to_path_buf))
+        .ok_or_else(no_file_name)?;
+    let mut name = src.file_stem().ok_or_else(no_file_name)?.to_os_string();
     name.push(".");
     name.push(extension);
-    Some(dir.join(name))
+    Ok(dir.join(name))
 }
