@@ -516,23 +516,83 @@ the files table gone and the panel filling the freed space; `q` exited 0; pointi
 at a nonexistent path printed the same "reading ...: No such file or directory" `lh` itself
 would and exited 2 without ever touching the terminal.
 
-## 10. Screens not yet planned
+## 10. TUI9 — Interactive tracker picker for torrent create — done
+
+`torrent create`'s only input was `--tracker`, repeated on the command line before the
+screen ever opened (§4) — every other option a CLI flag too, which defeats the point of a
+TUI screen for the one thing (choosing a tracker) a person plausibly wants to decide once
+they can see the known list, not before. `CreateStage` gains a `ChoosingTrackers` stage
+ahead of `Preparing`, seeded from `--tracker` if any were given but always shown and always
+confirmed — `run_torrent_create` no longer calls `resolve()` itself; it only loads
+`TrackerList`/`Passkeys` before `ratatui::init()`, same as before, and hands the raw
+`TorrentCreateArgs` to the screen.
+
+* **Two widgets, one `CreateFocus`.** A `List` of `TrackerList::iter()`'s entries (id, name,
+  `Health::label()`) with an app-owned `cursor: usize` and a `ListState` built fresh each
+  frame purely for the selection highlight — the same pattern `draw_titles` (§7) uses — plus
+  one `Field` (§7's single-line text widget, reused verbatim) for a comma-separated custom
+  id/URL. `CreateFocus::None` is "nothing is being edited," the same convention
+  `TagFocus::None` uses: `q`/`Esc` there quit immediately (nothing has started, so there is
+  nothing to cancel), `Tab`/`BackTab` enter a widget, and `a`/`Enter` confirm.
+* **`picked: Vec<String>`, not a set of booleans.** Selection order is tier order, so toggling
+  a list row with `Space` appends or removes that tracker's id from one ordered vector — the
+  same shape `--tracker` already takes, just built interactively instead of parsed from
+  `argv`. The custom field's `Enter` splits on `,` and pushes each trimmed piece; there is no
+  list row for an id that does not exist or a mistyped URL, so `Backspace` on an *already
+  empty* field pops the most recent pick instead — a comma-tag-input's usual "backspace
+  removes the last chip" convention, and the only way to undo a bad custom entry short of
+  restarting.
+* **`resolve()` runs on confirm, not on submit.** `start_create` (called from the `a`/`Enter`
+  handler) does what `run_torrent_create` used to do before the terminal ever opened: resolve
+  the picks, build `CreateOpts`, start the queue. A refusal (unknown id, `PersonalUrl`/
+  `Broken` health, conflicting `info.source`) becomes `pick_error`, shown inline in place of
+  the picked-list summary, and the picker stays up to fix it — no preflight exit, no restart.
+* **The loop can now exit without ever reaching `Done`.** Quitting from `ChoosingTrackers`
+  breaks immediately, since no job was ever submitted; the old
+  `unreachable!("loop only exits once stage is Done")` is gone, replaced by mapping any
+  non-`Done` exit to `Error::Cancelled` — accurate, since "quit before starting" and "cancel
+  mid-hash" are both just "no torrent got written."
+* **`private`/`source` stay CLI-only flags**, deliberately — the ask was tracker selection,
+  and a tracker's own `private`/`source` already applies automatically the moment it is
+  picked, the same as `--tracker` always implied.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (229 tests, unchanged),
+`cargo clippy --all-targets` and `cargo fmt --check` all clean. Run for real inside `tmux`
+against a 3-file copy of `lh-core/tests/fixtures/torrents/payload/verified` with an isolated
+`LH_CONFIG_DIR`: launching with no `--tracker` opened on the picker showing all 11 bundled
+trackers with their health labels; `Tab` moved focus into the list, `Space` toggled `genesis`
+to `[x]`, `Esc` returned focus to `None`, and `a` resolved it, started hashing and wrote a
+`.torrent` whose panel showed the one resolved tier. Launching again with `--tracker etree`
+pre-selected `etree` (`[x]` on load); confirming it surfaced `etree`'s real `PersonalUrl`
+refusal inline without leaving the picker or crashing; toggling `etree` off and `crosstown`
+plus `genesis` on then confirming wrote a torrent with both tiers shown, in pick order. Typing
+`udp://example.org:1337/announce, badid` into the custom field and pressing `Enter` split it
+into two picks; confirming surfaced `badid`'s "no tracker by that name" error (with the full
+known-ids list) inline; `Backspace` on the then-empty custom field popped `badid` off,
+confirmed by the status line reverting to "no trackers picked yet." `q` quit cleanly from the
+picker itself (immediately, nothing running yet) and from the progress screen after a run
+finished.
+
+## 11. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
 * **`info`, `tools`, `torrent trackers`** — all cheap, in-process, no queue really needed for
   a single pass (none of them even touch a `Queue` in `lh-cli` today). Plausibly fine as
   `run_headless` forever (§1) rather than earning a screen, the same reasoning that used to
-  cover `torrent info` too before §9 above — nobody has asked for these three yet.
+  cover `torrent info` too before §9 above — nobody has asked for these three yet. (`torrent
+  create`'s own tracker input got interactive in §10 above without `torrent trackers` itself
+  earning a screen — the picker lists what it needs inline rather than depending on that
+  command ever getting one.)
 
 ---
 
-## 11. What has and has not been checked
+## 12. What has and has not been checked
 
-* **Verify, checksum, convert, SBE, check and torrent info screens**: all run for real
-  against the fixture corpus (§3's, §5's, §6's, §8's and §9's "Real evidence") — table/detail
-  panel, quit key and exit code all confirmed, closing the gap this section used to flag
-  ("compiled but never actually run").
+* **Verify, checksum, convert, SBE, check, torrent info and torrent create's tracker picker
+  screens**: all run for real against the fixture corpus (§3's, §5's, §6's, §8's, §9's and
+  §10's "Real evidence") — table/detail panel, quit key and exit code all confirmed, closing
+  the gap this section used to flag ("compiled but never actually run").
 * **Verify screen against a real show, not just the fixture corpus.** Run against a genuine
   17-track FLAC show (~600 MB, already carrying its own `.ffp`/`.md5`) sitting in
   `~/Downloads`: all 17 decoded and reported `OK` live in the table, the gauge tracked
@@ -557,10 +617,10 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 12. Open questions
+## 13. Open questions
 
 1. **Do `info`, `tools`, `torrent trackers` ever get screens, or stay headless forever?**
-   §10 leans "stay headless" — a ratatui table over static, non-streaming output is not an
+   §11 leans "stay headless" — a ratatui table over static, non-streaming output is not an
    obvious improvement over `lh`'s own text — but nobody has asked either way. `torrent info`
    itself is resolved (§9): it got a screen because someone did ask, which is some evidence
    against "nobody ever asks for these," but not proof any particular one of the remaining
@@ -576,3 +636,8 @@ Named so the gap is visible, not to commit to an order:
 3. **Should `Theme` gain a light/dark or no-color variant**, or does "no inverted
    backgrounds, only fg color + bold/underline" (§0) already cover every terminal this
    project cares about? No report of it looking wrong anywhere yet.
+4. **Should `--private`/`--source` join the tracker picker (§10) as on-screen toggles?**
+   Deliberately left CLI-only for now — the ask was tracker selection, and a chosen tracker's
+   own `private`/`source` already takes effect without either flag. Revisit if someone wants
+   to set a private torrent's flag or override a tracker's `source` without a command-line
+   flag the same way trackers no longer need one.
