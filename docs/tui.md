@@ -474,24 +474,65 @@ unparseable one (detail: the same `FLAC metadata read failed` message `lh check`
 stderr) — gauge `4/4 ok:1 missing:1 mismatch:1 failed:1` in red, `q` exited `1`, both
 matching the headless `lh check` run against the identical fixture byte for byte.
 
-## 9. Screens not yet planned
+## 9. TUI8 — Torrent info screen — done
+
+Resolves open question 1 (§11) for `torrent info` specifically: it does earn a screen,
+because someone asked. `Info`, `Tools`, `Torrent trackers` remain headless (below).
+
+* **No `Queue` at all** — the first screen with none. `Metainfo::read` is a single
+  in-process parse, not a job worth submitting anywhere (`cmd_torrent_info`,
+  `lh-cli/src/lib.rs:926`, never touches a `Queue` either), so there is nothing to stream.
+  The file is read once, before `ratatui::init()`; a read error prints and exits (code 2)
+  the same as every other screen's setup failure, without ever opening the alternate screen.
+* **Static content, still redrawn every 80ms tick** — not because anything changes, but
+  because that's what lets a terminal resize reflow the layout for free, the same as every
+  live screen already gets from redrawing on its own poll loop. `q`/`Esc`/`Ctrl-C` all quit
+  immediately; there is no job to cancel, so unlike every batch screen there is no
+  `cancel_token` at all.
+* **No gauge** — there is no ratio of anything to show for a single static read, so the
+  layout is header / detail panel / (optional) files table / footer, not the header / table
+  / gauge / footer shape §2 describes. The detail panel's height is computed from its own
+  line count (`lines.len() as u16 + 2` for the borders) rather than a fixed `Constraint`,
+  since the number of optional fields (`private`, `source`, `created by`, `created`,
+  `comment`, multi-tier `trackers`) varies per torrent.
+* **`torrent_info_lines` mirrors `cmd_torrent_info` line-by-line**, the same discipline
+  `draw_check_table`/`check_rows` use for `torrent check` (§4) — one function decides what a
+  field means, read by both the plain-text and the ratatui rendering, so they cannot drift
+  on content, only on presentation. `format_date` (`lh-cli/src/lib.rs:1475`) is now `pub` so
+  `lh-tui` calls the same civil-from-days formatter rather than a second copy.
+* **`--no-files` (`no_files` on `TorrentCommand::Info`) removes the files table entirely**
+  rather than showing it empty — the detail panel's `Constraint::Min(3)` then takes the rest
+  of the screen instead of splitting it with a table, matching `cmd_torrent_info`'s own
+  `list_files` flag skipping the file loop outright.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (161 tests, unchanged)
+and `cargo clippy --all-targets` all clean; `cargo fmt --check` clean. Run for real inside
+`tmux` against `lh-core/tests/fixtures/torrents/mktorrent-oracle.torrent`: the detail panel
+showed infohash, piece count/length, total size, file count, `created by`/`created` (this
+fixture has neither `private` nor `source` nor a `comment` nor trackers, so those lines were
+correctly absent), and the files table listed all 9 real files with sizes matching `lh
+torrent info` run headless on the same file; `--no-files` produced the same detail panel with
+the files table gone and the panel filling the freed space; `q` exited 0; pointing the screen
+at a nonexistent path printed the same "reading ...: No such file or directory" `lh` itself
+would and exited 2 without ever touching the terminal.
+
+## 10. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:
 
-* **Info, Tools, Torrent info/trackers** — all cheap, in-process, no queue really needed for
+* **`info`, `tools`, `torrent trackers`** — all cheap, in-process, no queue really needed for
   a single pass (none of them even touch a `Queue` in `lh-cli` today). Plausibly fine as
-  `run_headless` forever (§1) rather than earning a screen — nobody has asked, and a
-  ratatui table over already-known, non-streaming data is not obviously better than the
-  plain text `lh` already prints for these.
+  `run_headless` forever (§1) rather than earning a screen, the same reasoning that used to
+  cover `torrent info` too before §9 above — nobody has asked for these three yet.
 
 ---
 
-## 10. What has and has not been checked
+## 11. What has and has not been checked
 
-* **Verify, checksum, convert, SBE and check screens**: all run for real against the fixture
-  corpus (§3's, §5's, §6's and §8's "Real evidence") — table, gauge, quit key and exit code
-  all confirmed, closing the gap this section used to flag ("compiled but never actually
-  run").
+* **Verify, checksum, convert, SBE, check and torrent info screens**: all run for real
+  against the fixture corpus (§3's, §5's, §6's, §8's and §9's "Real evidence") — table/detail
+  panel, quit key and exit code all confirmed, closing the gap this section used to flag
+  ("compiled but never actually run").
 * **Verify screen against a real show, not just the fixture corpus.** Run against a genuine
   17-track FLAC show (~600 MB, already carrying its own `.ffp`/`.md5`) sitting in
   `~/Downloads`: all 17 decoded and reported `OK` live in the table, the gauge tracked
@@ -516,11 +557,14 @@ Named so the gap is visible, not to commit to an order:
 
 ---
 
-## 11. Open questions
+## 12. Open questions
 
-1. **Do `info`, `tools`, `torrent info`/`trackers` ever get screens, or stay headless
-   forever?** §9 leans "stay headless" — a ratatui table over static, non-streaming output
-   is not an obvious improvement over `lh`'s own text — but nobody has asked either way.
+1. **Do `info`, `tools`, `torrent trackers` ever get screens, or stay headless forever?**
+   §10 leans "stay headless" — a ratatui table over static, non-streaming output is not an
+   obvious improvement over `lh`'s own text — but nobody has asked either way. `torrent info`
+   itself is resolved (§9): it got a screen because someone did ask, which is some evidence
+   against "nobody ever asks for these," but not proof any particular one of the remaining
+   three will follow.
 2. **Does a screen need a `--no-tui` escape hatch** for scripting (piping `lh-tui verify`'s
    output, redirecting to a file where an alternate-screen ratatui app would misbehave)? The
    original `lh verify` already covers this case by existing as a separate binary. No longer

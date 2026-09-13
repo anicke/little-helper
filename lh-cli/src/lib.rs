@@ -1472,7 +1472,7 @@ fn format_bytes(n: u64) -> String {
 
 /// Torrent creation dates matter for identifying an old seed, so show a date rather than
 /// an epoch. Civil-from-days, so this needs no date library.
-fn format_date(epoch_secs: i64) -> String {
+pub fn format_date(epoch_secs: i64) -> String {
     let days = epoch_secs.div_euclid(86_400);
     let secs = epoch_secs.rem_euclid(86_400);
     let z = days + 719_468;
