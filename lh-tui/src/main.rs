@@ -2670,7 +2670,7 @@ fn run_torrent_create_screen(
     let mut private = false;
     let mut source_tag: Option<String> = None;
 
-    let start = Instant::now();
+    let mut start = Instant::now();
     let mut finished_at = None;
     let mut tick = 0usize;
     let mut want_quit = false;
@@ -2691,11 +2691,17 @@ fn run_torrent_create_screen(
             }
         }
 
-        let elapsed = header_elapsed(
-            start,
-            &mut finished_at,
-            matches!(stage, CreateStage::Done(_)),
-        );
+        // Picking trackers is the user thinking, not the tool working — the clock
+        // starts once creation actually kicks off (below), not when this screen opens.
+        let elapsed = if matches!(stage, CreateStage::ChoosingTrackers) {
+            0.0
+        } else {
+            header_elapsed(
+                start,
+                &mut finished_at,
+                matches!(stage, CreateStage::Done(_)),
+            )
+        };
         terminal.draw(|frame| {
             draw_torrent_create(
                 frame,
@@ -2745,6 +2751,7 @@ fn run_torrent_create_screen(
                                                 started = Some(s);
                                                 pick_error = None;
                                                 stage = CreateStage::Preparing;
+                                                start = Instant::now();
                                             }
                                             Err(e) => pick_error = Some(format!("{e:#}")),
                                         }
