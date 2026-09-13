@@ -399,7 +399,7 @@ Then, with generated fixtures:
 | **T1** | Parse + `lh torrent info` | Metainfo model, infohash from raw bytes, external test vector. |
 | **T2** | Layout + `--quick` | Root resolution, path validation, size pre-check, missing and extra files. |
 | **T3** | `lh torrent check` | Piece streaming, pad files, per-file attribution, the boundary rule. |
-| ~~**T4**~~ | ~~GUI panel~~ | **Done** — Browse or drop a `.torrent` (parsed immediately for name/infohash/counts), Check against a folder (quick or full) through `lh-gui`'s job queue, with a per-file results table. `check_with_progress` has no cancellation checkpoint (unlike `create_with_progress`'s), so Cancel does not stop a check already streaming pieces — a pre-existing gap, not one G4 added. See `docs/gui.md` §G4 notes. |
+| ~~**T4**~~ | ~~GUI panel~~ | **Done** — Browse or drop a `.torrent` (parsed immediately for name/infohash/counts), Check against a folder (quick or full) through `lh-gui`'s job queue, with a per-file results table. `check` gained a cancellation checkpoint in docs/architecture-cleanup.md A3, so Cancel now stops a check already streaming pieces the same way it stops a create. See `docs/gui.md` §G4 notes. |
 | **T5** | BitTorrent v2 | See below. |
 
 ## 12. BitTorrent v2 (BEP 52)

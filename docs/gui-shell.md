@@ -303,7 +303,7 @@ and the table is shown only for the first kind:
 
 Torrent → Create is the one that must ignore the selection, and it is worth saying why
 rather than letting it look like an oversight: a torrent describes a folder as it exists on
-disk, and `torrent::create_with_progress` walks that folder. Filtering by ticked rows would
+disk, and `torrent::create` walks that folder. Filtering by ticked rows would
 produce a `.torrent` whose file list did not match the directory it names, which is a
 broken torrent, not a subset. The create area therefore says which folder it will use and
 shows the ticked count nowhere.

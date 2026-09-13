@@ -8,7 +8,7 @@
 use lh_core::analysis::{
     BoundaryDirection, RepairEncode, TailPolicy, execute_fix, execute_single_boundary, plan_fix,
 };
-use lh_core::convert::{EncodeOpts, to_flac_cancellable};
+use lh_core::convert::{EncodeOpts, to_flac};
 use lh_core::format;
 use lh_core::model::AudioFile;
 use lh_core::tools::{Registry, Tool, ToolId};
@@ -85,9 +85,14 @@ fn synth_flac(flac: &Tool, dir: &Path, name: &str, frames: u64, seed: u32) -> Au
     let wav = dir.join(format!("{name}.wav"));
     synth_wav(&wav, frames, seed);
     let dst = dir.join(format!("{name}.flac"));
-    to_flac_cancellable(&wav, &dst, flac, &EncodeOpts::default(), false, &mut || {
-        true
-    })
+    to_flac(
+        &wav,
+        &dst,
+        flac,
+        &EncodeOpts::default(),
+        false,
+        &mut |_, _| true,
+    )
     .unwrap();
     probe(&dst)
 }

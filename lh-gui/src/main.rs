@@ -34,8 +34,8 @@ use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::scan::{self, WorkingSet};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
-    CreateOpts, Metainfo, Passkeys, TrackerList, check_sizes, check_with_progress,
-    create_with_progress, default_output, resolve,
+    CreateOpts, Metainfo, Passkeys, TrackerList, check, check_sizes, create, default_output,
+    resolve,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -488,7 +488,7 @@ impl App {
         let label = format!("torrent create: {}", source.display());
         let id = self.queue.submit(label.clone(), move |p| {
             JobOutcome::TorrentCreate(
-                create_with_progress(&source, &dst, &opts, &mut |done, total| {
+                create(&source, &dst, &opts, &mut |done, total| {
                     p.report(done, total);
                     !p.is_cancelled()
                 })
@@ -505,10 +505,10 @@ impl App {
     }
 
     /// Submits one job that checks `torrent_check_path` against `torrent_check_against`
-    /// (`docs/torrent-verification.md` T4). `check_with_progress`'s progress callback
-    /// (`lh-core/src/torrent/verify.rs`) has no cancellation checkpoint the way
-    /// `create_with_progress`'s does — Cancel still calls `Queue::cancel()`, but a check
-    /// already streaming pieces runs to completion; see the G4 notes.
+    /// (`docs/torrent-verification.md` T4). `check`'s progress callback
+    /// (`lh-core/src/torrent/verify.rs`) polls the same cancellation checkpoint `create`'s
+    /// does (`docs/architecture-cleanup.md` A3), so Cancel stops a check already streaming
+    /// pieces instead of letting it run to completion.
     fn run_torrent_check(&mut self) {
         let Some(torrent_path) = self.torrent_check_path.clone() else {
             self.error = Some("choose a .torrent file first".to_string());
@@ -531,8 +531,9 @@ impl App {
             let result = if quick {
                 check_sizes(&meta, &torrent_path, &against)
             } else {
-                check_with_progress(&meta, &torrent_path, &against, &mut |done, total| {
+                check(&meta, &torrent_path, &against, &mut |done, total| {
                     p.report(done, total);
+                    !p.is_cancelled()
                 })
             };
             JobOutcome::TorrentCheck(result.map(Box::new))
@@ -840,7 +841,7 @@ fn convert_to_wav(
     p: &lh_core::job::Progress<JobOutcome>,
 ) -> lh_core::Result<Box<Conversion>> {
     let dst = convert::destination(path, "wav", None)?;
-    convert::to_wav_with_progress(path, &dst, overwrite, &mut |done, total| {
+    convert::to_wav(path, &dst, overwrite, &mut |done, total| {
         p.report(done, total);
         !p.is_cancelled()
     })
@@ -856,13 +857,16 @@ fn convert_to_flac(
     p: &lh_core::job::Progress<JobOutcome>,
 ) -> lh_core::Result<Box<Conversion>> {
     let dst = convert::destination(path, "flac", None)?;
-    convert::to_flac_cancellable(
+    convert::to_flac(
         path,
         &dst,
         tool,
         &EncodeOpts::default(),
         overwrite,
-        &mut || !p.is_cancelled(),
+        &mut |done, total| {
+            p.report(done, total);
+            !p.is_cancelled()
+        },
     )
     .map(Box::new)
 }
@@ -1740,7 +1744,7 @@ mod tests {
     }
 
     /// G3's real evidence: `Operation::Convert(ConvertTarget::Wav)` moves a real FLAC
-    /// fixture through the queue, `to_wav_with_progress`, and back into `App` state —
+    /// fixture through the queue, `convert::to_wav`, and back into `App` state —
     /// writing an actual `.wav` beside the source, reporting it "checked against source"
     /// (the fixture carries a STREAMINFO MD5), and appending its `Provenance::render()`
     /// text to `App::log`. Run against a copy in a tempdir rather than the fixtures dir
@@ -1783,7 +1787,7 @@ mod tests {
 
     /// The other direction, through the reference `flac` binary discovered from
     /// `App::tools` — real evidence `run_operation`'s `flac_tool` plumbing actually reaches
-    /// `to_flac_cancellable`, not just that it compiles. Skips (rather than failing) when
+    /// `convert::to_flac`, not just that it compiles. Skips (rather than failing) when
     /// `flac` is not installed, the same convention `lh-core/tests/convert.rs` uses.
     #[test]
     fn running_convert_to_flac_through_the_real_queue_writes_a_checked_file() {
@@ -1900,7 +1904,7 @@ mod tests {
     }
 
     /// G4's real evidence for C5: `App::run_torrent_create` moves a real folder through
-    /// `create_with_progress` and back into `App` state, producing an actual `.torrent`
+    /// `torrent::create` and back into `App` state, producing an actual `.torrent`
     /// beside the source with the piece count/length the payload implies.
     #[test]
     fn running_torrent_create_through_the_real_queue_writes_a_torrent() {

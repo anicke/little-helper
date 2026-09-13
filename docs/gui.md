@@ -243,7 +243,7 @@ already covers.
 | ~~**G0**~~ | ~~Iced/job-queue spike~~ | **Done** — confirmed the `Subscription` bridge, the `Hash`-identity requirement, that blocking `rx.iter()` inside `stream::channel` does not stall the window, and that window-level drag-and-drop is available. See §G0. |
 | ~~**G1**~~ | ~~Scaffold + file table~~ | **Done** — `iced` + `rfd` in the workspace, path bar (text input, Browse via `rfd::AsyncFileDialog`, Scan), window-wide drag-and-drop, `WorkingSet` → file table (name, format, duration, rate/bits/channels, SBE), Tools panel off `Registry::entries()`. Read-only: no queue yet. 4 tests in `lh-gui/src/main.rs`. See §G1 notes. |
 | ~~**G2**~~ | ~~Job queue wired~~ | **Done** — one long-lived `Queue<JobOutcome>`, the subscription adapter, an operation panel (verify / ffp / md5 / st5 / sbe) that runs every file in the working set, per-row status via `App::latest_job_by_path`, an aggregate `N of M done` and per-job job-queue panel, and a working Cancel button. 2 new tests against the real fixture corpus and a real `Queue`, plus a real (non-interactive) run under X11. See §G2 notes. |
-| ~~**G3**~~ | ~~Convert + log pane~~ | **Done** — convert (both directions) joins the operation panel with a direction picker and an Overwrite checkbox, through the same queue, with real per-file progress (`to_wav_with_progress`) and a real mid-run cancel (`to_flac_cancellable`, J2). A file already in the target format submits no job at all rather than showing FAILED for a no-op. A log/audit pane renders `Provenance::render()` for every finished job that produced one, with an Export button. 4 new tests: two through the real queue (WAV write + FLAC write via the real reference `flac` binary), one proving the already-in-format skip submits nothing, none against a mocked queue. See §G3 notes. |
+| ~~**G3**~~ | ~~Convert + log pane~~ | **Done** — convert (both directions) joins the operation panel with a direction picker and an Overwrite checkbox, through the same queue, with real per-file progress (`to_wav`) and a real mid-run cancel (`to_flac`, J2). A file already in the target format submits no job at all rather than showing FAILED for a no-op. A log/audit pane renders `Provenance::render()` for every finished job that produced one, with an Export button. 4 new tests: two through the real queue (WAV write + FLAC write via the real reference `flac` binary), one proving the already-in-format skip submits nothing, none against a mocked queue. See §G3 notes. |
 | ~~**G4**~~ | ~~Torrent panels~~ | **Done** — a Create-torrent panel (folder from the already-scanned working set, comma-separated tracker ids/URLs, private/source/comment, one job with real piece progress) and a Check-torrent panel (Browse or drop a `.torrent`, parsed immediately for name/infohash/counts; Check against a folder, quick or full, through the same queue). The check panel gets its own per-file results table, the first `JobUpdate::Finished` payload beyond one status line. 6 new tests: two through the real queue (a real `.torrent` written and read back, and a create → check round trip reporting `Complete`), one proving an unresolvable tracker spec is rejected before any job is submitted, one proving drag-and-drop routes a `.torrent` to the check panel instead of `App::scan`, plus `format_bytes`. See §G4 notes. |
 | **S1–S4** | Shell revamp | Planned separately in [gui-shell.md](gui-shell.md). G1–G4 each appended one more panel to a single `column!`, so the window now renders ten regions at once; S1–S4 replace that with a left rail of application areas over a shared working set and a persistent job/log dock. It also adds the two front-end gaps this doc never covered — writing a checksum file, and checking one — neither of which is new `lh-core` logic. ~~S1~~ (the rail, area pane and dock themselves) is **done**; S2–S4 not started. |
 
@@ -286,12 +286,10 @@ already covers.
    panel always auto-sizes pieces and excludes the same noise `lh-cli` does by default,
    matching `docs/torrent-creation.md` C5's own scope ("Folder → trackers → ... → create"
    names none of these). `lh-cli`'s flags still cover the case where one is needed.
-7. **`check_with_progress` has no cancellation checkpoint** (`lh-core/src/torrent/verify.rs`
-   — its `progress: &mut dyn FnMut(u32, u32)` returns nothing to poll, unlike
-   `create_with_progress`'s bool-returning one). Cancel still calls `Queue::cancel()` for a
-   running check, but a check already streaming pieces runs to completion regardless — an
-   existing `lh-core` gap (T3 never needed cancellation because `lh torrent check` is a
-   single blocking call), not something G4 added or hid.
+7. ~~**`check_with_progress` has no cancellation checkpoint**~~ **Resolved by
+   docs/architecture-cleanup.md A3.** `torrent::check`'s progress callback now returns a
+   `bool` the walk polls per piece, the same shape `create`'s always had, so Cancel stops a
+   running check instead of letting it stream to completion regardless.
 
 ---
 
@@ -446,7 +444,7 @@ logs one `FLAC → WAV` provenance entry; WAV → FLAC against `cdda-aligned.wav
 and the already-in-format case submits zero jobs. This is the first `lh-gui` milestone
 whose tests actually invoke the reference `flac` binary, not just in-process code — G2's
 real-`Queue` tests only ever exercised verify/checksum/sbe, none of which shell out.
-Cancellation mid-convert (`Progress::is_cancelled` reaching `to_flac_cancellable`'s killed
+Cancellation mid-convert (`Progress::is_cancelled` reaching `to_flac`'s killed
 child, J2's whole point) is exercised by `lh-core/tests/convert.rs` already, not re-tested
 here — `lh-gui`'s own wiring only needed proving that pressing Cancel calls
 `Queue::cancel()` (G2) and that `is_cancelled()` is threaded into both closures (this

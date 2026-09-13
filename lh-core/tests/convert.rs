@@ -6,7 +6,7 @@
 //! Tests needing `flac` skip when it is absent rather than failing — Windows CI has no
 //! package for it — and say so, so a green run is never mistaken for a complete one.
 
-use lh_core::convert::{EncodeOpts, to_flac, to_flac_cancellable, to_wav, to_wav_with_progress};
+use lh_core::convert::{EncodeOpts, to_flac, to_wav};
 use lh_core::tools::{Agent, Registry, Tool, ToolId};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,7 +52,8 @@ fn flac_to_wav_is_byte_identical_to_the_reference_decoder() {
         let ours = dir.path().join(format!("ours-{name}.wav"));
         let theirs = dir.path().join(format!("theirs-{name}.wav"));
 
-        let done = to_wav(&src, &ours, false).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let done =
+            to_wav(&src, &ours, false, &mut |_, _| true).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             done.checked_against_source,
             "{name} carried no MD5 to check"
@@ -84,7 +85,15 @@ fn wav_to_flac_goes_through_the_reference_encoder_and_round_trips() {
 
     let src = fixture("cdda-aligned.wav");
     let encoded = dir.path().join("out.flac");
-    let done = to_flac(&src, &encoded, &flac, &EncodeOpts::default(), false).unwrap();
+    let done = to_flac(
+        &src,
+        &encoded,
+        &flac,
+        &EncodeOpts::default(),
+        false,
+        &mut |_, _| true,
+    )
+    .unwrap();
     assert!(done.checked_against_source);
 
     // Principle 2: the vendor string is the point of shelling out at all.
@@ -109,7 +118,7 @@ fn wav_to_flac_goes_through_the_reference_encoder_and_round_trips() {
 
     // The round-trip property from PLAN.md §6, for the canonical 16-bit case.
     let back = dir.path().join("back.wav");
-    to_wav(&encoded, &back, false).unwrap();
+    to_wav(&encoded, &back, false, &mut |_, _| true).unwrap();
     assert_eq!(
         std::fs::read(&back).unwrap(),
         std::fs::read(&src).unwrap(),
@@ -124,7 +133,8 @@ fn a_flac_that_fails_its_own_checksum_produces_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("bad.wav");
 
-    let err = to_wav(&fixture("wrong-md5.flac"), &out, false).expect_err("should refuse");
+    let err = to_wav(&fixture("wrong-md5.flac"), &out, false, &mut |_, _| true)
+        .expect_err("should refuse");
     let message = err.to_string();
     assert!(message.contains("does not match the MD5"), "{message}");
 
@@ -145,12 +155,13 @@ fn an_existing_output_is_never_overwritten_by_default() {
     let out = dir.path().join("taken.wav");
     std::fs::write(&out, b"someone else's file").unwrap();
 
-    let err = to_wav(&fixture("cdda-aligned.flac"), &out, false).expect_err("should refuse");
+    let err = to_wav(&fixture("cdda-aligned.flac"), &out, false, &mut |_, _| true)
+        .expect_err("should refuse");
     assert!(err.to_string().contains("already exists"), "{err}");
     assert_eq!(std::fs::read(&out).unwrap(), b"someone else's file");
 
     // With permission, it goes through.
-    to_wav(&fixture("cdda-aligned.flac"), &out, true).unwrap();
+    to_wav(&fixture("cdda-aligned.flac"), &out, true, &mut |_, _| true).unwrap();
     assert_ne!(std::fs::read(&out).unwrap(), b"someone else's file");
 }
 
@@ -160,7 +171,7 @@ fn the_output_may_not_be_the_input() {
     let copy = dir.path().join("cdda-aligned.flac");
     std::fs::copy(fixture("cdda-aligned.flac"), &copy).unwrap();
 
-    let err = to_wav(&copy, &copy, true).expect_err("should refuse");
+    let err = to_wav(&copy, &copy, true, &mut |_, _| true).expect_err("should refuse");
     assert!(err.to_string().contains("destroy the original"), "{err}");
     assert_eq!(
         std::fs::read(&copy).unwrap(),
@@ -205,8 +216,8 @@ fn write_noise_wav(path: &Path, seconds: u32) {
     std::fs::write(path, w).unwrap();
 }
 
-/// The killable half of J2: `to_flac_cancellable` stops `flac` mid-encode instead of
-/// waiting for it to finish, and leaves nothing behind (docs/job-queue.md §8).
+/// The killable half of J2: `to_flac` stops `flac` mid-encode instead of waiting for it to
+/// finish, and leaves nothing behind (docs/job-queue.md §8).
 #[test]
 fn a_running_flac_can_be_killed_mid_encode() {
     let Some(flac) = reference_flac() else { return };
@@ -216,18 +227,18 @@ fn a_running_flac_can_be_killed_mid_encode() {
     let dst = dir.path().join("out.flac");
 
     let mut polls = 0u32;
-    let err = to_flac_cancellable(
+    let err = to_flac(
         &src,
         &dst,
         &flac,
         &EncodeOpts::default(),
         false,
-        &mut || {
+        &mut |_, _| {
             polls += 1;
             false
         },
     )
-    .expect_err("a should_continue that says stop must be honored");
+    .expect_err("a progress that says stop must be honored");
     assert!(matches!(err, lh_core::Error::Cancelled), "{err}");
     assert!(polls >= 1, "should_continue was never polled");
     assert!(
@@ -246,15 +257,15 @@ fn a_running_flac_can_be_killed_mid_encode() {
     );
 }
 
-/// The frame-level progress half of J2: `to_wav_with_progress` reports (done, total) once
-/// per decoded block, done increasing to exactly total, before the WAV is committed.
+/// The frame-level progress half of J2: `to_wav` reports (done, total) once per decoded
+/// block, done increasing to exactly total, before the WAV is committed.
 #[test]
 fn to_wav_reports_frame_progress_that_ends_at_the_total() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.wav");
 
     let mut seen = Vec::new();
-    to_wav_with_progress(
+    to_wav(
         &fixture("cdda-aligned.flac"),
         &out,
         false,
@@ -289,7 +300,7 @@ fn to_wav_cancelled_mid_decode_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.wav");
 
-    let err = to_wav_with_progress(&fixture("cdda-aligned.flac"), &out, false, &mut |_, _| {
+    let err = to_wav(&fixture("cdda-aligned.flac"), &out, false, &mut |_, _| {
         false
     })
     .expect_err("progress returning false must stop the decode");

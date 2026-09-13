@@ -65,9 +65,10 @@ pub struct Progress<T> {
 }
 
 impl<T> Progress<T> {
-    /// Sub-item progress, e.g. (pieces done, pieces total) — the one shape a real caller
-    /// has today, in `torrent::create_with_progress`. A job with no natural sub-items just
-    /// never calls this; job-level `Started`/`Finished` still fires around it either way.
+    /// Sub-item progress, e.g. (pieces done, pieces total) — the one shape every real
+    /// caller has today (`convert::to_wav`, `convert::to_flac`, `torrent::create`,
+    /// `torrent::check`). A job with no natural sub-items just never calls this; job-level
+    /// `Started`/`Finished` still fires around it either way.
     pub fn report(&self, done: u32, total: u32) {
         let _ = self.tx.send(Event::Progress {
             id: self.id,

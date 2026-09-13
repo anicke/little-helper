@@ -33,9 +33,7 @@ use lh_core::analysis::{
 use lh_core::checksum::{
     ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute, ffp,
 };
-use lh_core::convert::{
-    Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
-};
+use lh_core::convert::{Conversion, EncodeOpts, destination, to_flac, to_wav};
 use lh_core::display;
 use lh_core::etree::ShowDate;
 use lh_core::etree::ShowName;
@@ -47,8 +45,7 @@ use lh_core::tag::{self, Tags};
 use lh_core::tools::{Registry, Tool, ToolId};
 use lh_core::torrent::{
     CreateOpts, Created, FileStatus, Metainfo, Passkeys, PreviewFile, Resolved, TorrentReport,
-    Tracker, TrackerList, Verdict, check_sizes, check_with_progress, create_with_progress,
-    default_output, preview, resolve,
+    Tracker, TrackerList, Verdict, check, check_sizes, create, default_output, preview, resolve,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -234,9 +231,37 @@ fn run_headless(cli: Cli) -> ExitCode {
     }
 }
 
+/// Expand files and folders into a flat list of audio files, reporting anything skipped
+/// rather than dropping it silently — the same shape as `lh_cli::collect`, kept local so
+/// this binary only reaches `lh-cli` for its grammar (`docs/architecture-cleanup.md` A2).
+fn collect(p: &Paths) -> anyhow::Result<(Vec<AudioFile>, bool)> {
+    let set = scan::collect(&p.paths, p.recursive)?;
+    let mut clean = true;
+    for (skipped, why) in &set.skipped {
+        eprintln!("skipped {}: {why}", skipped.display());
+        clean = false;
+    }
+    Ok((set.files, clean))
+}
+
+/// `ChecksumKind::from_path`, with an error naming the extension it could not place —
+/// local for the same reason [`collect`] is (A2).
+fn checksum_kind_for(file: &Path) -> anyhow::Result<ChecksumKind> {
+    ChecksumKind::from_path(file).ok_or_else(|| {
+        let ext = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "cannot tell what kind of checksum file this is from {ext:?}; expected .ffp, .md5 or .st5"
+        )
+    })
+}
+
 fn run_verify(paths: Paths, theme: ThemeName) -> ExitCode {
     let label = describe(&paths);
-    let (files, mut clean) = match lh_cli::collect(&paths) {
+    let (files, mut clean) = match collect(&paths) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("lh-tui: {e:#}");
@@ -551,7 +576,7 @@ struct ChecksumRow {
 
 fn run_checksum(kind: ChecksumKind, args: ChecksumArgs, theme: ThemeName) -> ExitCode {
     let label = describe(&args.paths);
-    let (files, mut clean) = match lh_cli::collect(&args.paths) {
+    let (files, mut clean) = match collect(&args.paths) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("lh-tui: {e:#}");
@@ -881,7 +906,7 @@ struct CheckRow {
 }
 
 fn run_check(file: PathBuf, theme: ThemeName) -> ExitCode {
-    let kind = match lh_cli::checksum_kind_for(&file) {
+    let kind = match checksum_kind_for(&file) {
         Ok(k) => k,
         Err(e) => {
             eprintln!("lh-tui: {e:#}");
@@ -1210,7 +1235,7 @@ struct SbeRow {
 
 fn run_sbe(paths: Paths, theme: ThemeName) -> ExitCode {
     let label = describe(&paths);
-    let (files, mut clean) = match lh_cli::collect(&paths) {
+    let (files, mut clean) = match collect(&paths) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("lh-tui: {e:#}");
@@ -1502,9 +1527,10 @@ fn draw_sbe_gauge(frame: &mut Frame, area: Rect, stats: &SbeStats, theme: &Theme
 // The plan itself is pure arithmetic over headers `scan` already read — no decode — so it's
 // computed up front and shown as a table before any job runs (`--dry-run` never opens a
 // job at all). `execute_fix` has no per-boundary progress to report and no cancellation
-// checkpoint, so once it starts, the row for every file just spins until the one `Finished`
-// event lands with every file's result at once, the same "no checkpoint, quit doesn't
-// actually stop it" shape `run_torrent_check_screen` already accepts for `check_with_progress`.
+// checkpoint (out of scope for docs/architecture-cleanup.md A3; see docs/sbe-repair.md), so
+// once it starts, the row for every file just spins until the one `Finished` event lands
+// with every file's result at once, and `q`/`Esc`/`Ctrl-C` cannot stop it early the way
+// `run_torrent_check_screen` now can for `check`.
 
 /// One row per file in the set (not per boundary): `shifted_in`/`shifted_out` are computed
 /// straight from the plan using the same formula `execute_fix` uses to fill in `Fixed`'s own
@@ -1763,10 +1789,9 @@ fn run_sbe_fix_plan_screen(
 }
 
 /// Runs `execute_fix` as the queue's one job. Quitting cancels the queue and breaks the
-/// draw loop immediately rather than waiting for `Done`, the same call
-/// `run_torrent_check_screen` makes for `check_with_progress`: `execute_fix` has no
-/// cancellation checkpoint of its own to honor, so waiting would just mean waiting for work
-/// that can't be told to stop early.
+/// draw loop immediately rather than waiting for `Done`: `execute_fix` has no cancellation
+/// checkpoint of its own to honor (unlike `check`'s, which `run_torrent_check_screen` now
+/// waits on), so waiting would just mean waiting for work that can't be told to stop early.
 #[allow(clippy::too_many_arguments)]
 fn run_sbe_fix_execute_screen(
     mut terminal: DefaultTerminal,
@@ -2022,13 +2047,13 @@ fn draw_fix_gauge(
 // --- Convert -------------------------------------------------------------------------
 //
 // Unlike verify/checksum, this is the one screen where a file's own progress is worth
-// showing: `to_wav_with_progress` reports (frames written, frames total) once per decoded
-// block, so a decoding row can show a live percentage rather than just a spinner
-// (`docs/tui.md` §5 calls this out as "the reason §2 calls out progress rendering as the
-// real per-screen variable"). `to_flac_cancellable` has no such number to relay — `flac`
-// only draws its own percentage when stderr is a terminal, which piped through `Command`
-// it never is (`lh-core/src/convert/mod.rs`'s own doc comment) — so an encoding row just
-// spins.
+// showing: `to_wav` reports (frames written, frames total) once per decoded block, so a
+// decoding row can show a live percentage rather than just a spinner (`docs/tui.md` §5
+// calls this out as "the reason §2 calls out progress rendering as the real per-screen
+// variable"). `to_flac` has no such number to relay — `flac` only draws its own percentage
+// when stderr is a terminal, which piped through `Command` it never is
+// (`lh-core/src/convert/mod.rs`'s own doc comment), calling its progress with `(0, 0)`
+// instead — so an encoding row just spins.
 
 #[derive(Clone)]
 enum ConvertStatus {
@@ -2056,7 +2081,7 @@ enum ConvertOutcome {
 
 fn run_convert(args: ConvertArgs, theme: ThemeName) -> ExitCode {
     let label = describe(&args.paths);
-    let (files, mut clean) = match lh_cli::collect(&args.paths) {
+    let (files, mut clean) = match collect(&args.paths) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("lh-tui: {e:#}");
@@ -2171,12 +2196,13 @@ fn run_convert_screen(
                 Ok(d) => d,
                 Err(_) => return ConvertOutcome::NoFileName,
             };
+            let on_progress = &mut |done, total| {
+                progress.report(done, total);
+                !progress.is_cancelled()
+            };
             let result = match to {
-                Target::Wav => to_wav_with_progress(&path, &dst, force, &mut |done, total| {
-                    progress.report(done, total);
-                    !progress.is_cancelled()
-                }),
-                Target::Flac => to_flac_cancellable(
+                Target::Wav => to_wav(&path, &dst, force, on_progress),
+                Target::Flac => to_flac(
                     &path,
                     &dst,
                     encoder
@@ -2184,7 +2210,7 @@ fn run_convert_screen(
                         .expect("discovered before the screen opened"),
                     &opts,
                     force,
-                    &mut || !progress.is_cancelled(),
+                    on_progress,
                 ),
             };
             match result {
@@ -2443,7 +2469,7 @@ fn draw_convert_gauge(frame: &mut Frame, area: Rect, stats: &ConvertStats, theme
 
 // --- Torrent create -----------------------------------------------------------------
 //
-// Unlike verify/checksum, `create_with_progress` walks the whole payload as one sequential
+// Unlike verify/checksum, `create` walks the whole payload as one sequential
 // piece-hashing pass, not a batch of independent files (`docs/tui.md` §4) — so there is one
 // job on a queue of one, and one row of progress to show, not a table. Its progress
 // callback returns a `bool` the same way `lh-cli`'s own `cmd_torrent_create` uses it
@@ -2597,7 +2623,7 @@ fn start_create(
     let job_source = source.to_path_buf();
     let job_dst = dst.to_path_buf();
     queue.submit("torrent create", move |progress| {
-        create_with_progress(&job_source, &job_dst, &opts, &mut |done, total| {
+        create(&job_source, &job_dst, &opts, &mut |done, total| {
             progress.report(done, total);
             !progress.is_cancelled()
         })
@@ -3188,14 +3214,12 @@ fn draw_create_gauge(
 
 // --- Torrent check --------------------------------------------------------------------
 //
-// One job on a queue of one, like create — but unlike create's `progress` callback,
-// `check_with_progress`'s (`lh-core/src/torrent/verify.rs`) has no cancellation
-// checkpoint: it never returns a `bool` the walk can act on, only `()`. `lh-gui`'s G4 hit
-// the same gap (`lh-gui/src/main.rs`'s `run_torrent_check` notes it) and accepted it rather
-// than changing `lh-core`. So `q`/`Esc`/`Ctrl-C` here breaks the draw loop immediately, the
-// same as verify/checksum — the underlying hash keeps running until it finishes, which is
-// no worse than plain `lh torrent check`, which cannot be interrupted at all short of
-// killing the process.
+// One job on a queue of one, exactly like create: `check`'s progress callback
+// (`lh-core/src/torrent/verify.rs`) returns a `bool` the walk polls per piece, so
+// `q`/`Esc`/`Ctrl-C` cancels the hash itself rather than just abandoning the draw loop
+// (`docs/architecture-cleanup.md` A3) — the same `want_quit`-then-wait-for-`Done` shape
+// create's screen uses, so the reported outcome (cancelled vs. finished) is always what
+// actually happened.
 
 enum CheckStage {
     Preparing,
@@ -3258,8 +3282,9 @@ fn run_torrent_check_screen(
         if quick {
             check_sizes(&meta, &torrent_path, &given)
         } else {
-            check_with_progress(&meta, &torrent_path, &given, &mut |done, total| {
+            check(&meta, &torrent_path, &given, &mut |done, total| {
                 progress.report(done, total);
+                !progress.is_cancelled()
             })
         }
     });
@@ -3269,6 +3294,7 @@ fn run_torrent_check_screen(
     let start = Instant::now();
     let mut finished_at = None;
     let mut tick = 0usize;
+    let mut want_quit = false;
 
     loop {
         while let Ok(event) = events.try_recv() {
@@ -3299,10 +3325,17 @@ fn run_torrent_check_screen(
                             && key.modifiers.contains(KeyModifiers::CONTROL));
                     if quit {
                         cancel.cancel();
-                        break;
+                        want_quit = true;
                     }
                 }
             }
+        }
+        // `--quick` has no cancellation checkpoint (`check_sizes` is a plain stat pass, not
+        // a hash), so waiting for its own `Done` costs nothing; a real hash honors `cancel`
+        // via the progress callback above and reports `Error::Cancelled` through `Done` the
+        // same way a completed check reports its own result.
+        if want_quit && matches!(stage, CheckStage::Done(_)) {
+            break;
         }
         tick = tick.wrapping_add(1);
     }

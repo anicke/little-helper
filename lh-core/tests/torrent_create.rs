@@ -114,6 +114,7 @@ fn our_infohash_matches_mktorrent() {
                 piece_length: Some(piece_length),
                 ..Default::default()
             },
+            &mut |_, _| true,
         )
         .unwrap_or_else(|e| panic!("{what}: {e}"));
 
@@ -156,6 +157,7 @@ fn our_infohash_matches_the_committed_mktorrent_oracle() {
             piece_length: Some(theirs.piece_length),
             ..Default::default()
         },
+        &mut |_, _| true,
     )
     .unwrap();
 
@@ -186,6 +188,7 @@ fn a_single_file_torrent_matches_mktorrent() {
             piece_length: Some(32 * 1024),
             ..Default::default()
         },
+        &mut |_, _| true,
     )
     .unwrap();
 
@@ -216,13 +219,13 @@ fn a_created_torrent_verifies_against_its_own_payload() {
     );
 
     let torrent = dir.path().join("show.torrent");
-    let made = create(&show, &torrent, &CreateOpts::default()).unwrap();
+    let made = create(&show, &torrent, &CreateOpts::default(), &mut |_, _| true).unwrap();
 
     let meta = Metainfo::read(&torrent).unwrap();
     assert_eq!(meta.info_hash, made.info_hash);
     assert_eq!(meta.created_by.as_deref(), Some("Little Helper 0.1.0"));
 
-    let report = check(&meta, &torrent, &show).unwrap();
+    let report = check(&meta, &torrent, &show, &mut |_, _| true).unwrap();
     assert_eq!(report.verdict(), Verdict::Complete, "{:?}", report.files);
 }
 
@@ -235,8 +238,20 @@ fn the_same_folder_twice_gives_the_same_infohash() {
     let show = dir.path().join("show");
     payload(&show, &[("a.flac", 50_000), ("b.flac", 50_000)]);
 
-    let first = create(&show, &dir.path().join("1.torrent"), &CreateOpts::default()).unwrap();
-    let second = create(&show, &dir.path().join("2.torrent"), &CreateOpts::default()).unwrap();
+    let first = create(
+        &show,
+        &dir.path().join("1.torrent"),
+        &CreateOpts::default(),
+        &mut |_, _| true,
+    )
+    .unwrap();
+    let second = create(
+        &show,
+        &dir.path().join("2.torrent"),
+        &CreateOpts::default(),
+        &mut |_, _| true,
+    )
+    .unwrap();
     assert_eq!(first.info_hash, second.info_hash);
 
     // Different trackers, same content: still the same torrent, because announce is outside
@@ -248,6 +263,7 @@ fn the_same_folder_twice_gives_the_same_infohash() {
             announce: vec![vec!["http://tracker.etree.org:6969/announce".into()]],
             ..Default::default()
         },
+        &mut |_, _| true,
     )
     .unwrap();
     assert_eq!(first.info_hash, tracked.info_hash);
@@ -259,6 +275,7 @@ fn the_same_folder_twice_gives_the_same_infohash() {
             private: true,
             ..Default::default()
         },
+        &mut |_, _| true,
     )
     .unwrap();
     assert_ne!(first.info_hash, private.info_hash);
@@ -289,6 +306,7 @@ fn a_piece_length_that_clients_would_reject_is_refused() {
                 piece_length: Some(bad),
                 ..Default::default()
             },
+            &mut |_, _| true,
         )
         .expect_err("should refuse");
         assert!(err.to_string().contains("power of two"), "{bad}: {err}");
@@ -317,6 +335,7 @@ fn noise_is_excluded_and_reported() {
         &show,
         &dir.path().join("out.torrent"),
         &CreateOpts::default(),
+        &mut |_, _| true,
     )
     .unwrap();
     let kept: Vec<String> = made.files.iter().map(|f| f.display_path()).collect();
@@ -332,6 +351,7 @@ fn noise_is_excluded_and_reported() {
             include_all: true,
             ..Default::default()
         },
+        &mut |_, _| true,
     )
     .unwrap();
     assert_eq!(all.files.len(), 6);
@@ -351,6 +371,7 @@ fn an_empty_directory_is_reported_not_dropped() {
         &show,
         &dir.path().join("out.torrent"),
         &CreateOpts::default(),
+        &mut |_, _| true,
     )
     .unwrap();
     assert_eq!(made.files.len(), 1);
@@ -378,6 +399,7 @@ fn a_symlink_is_refused_rather_than_followed() {
         &show,
         &dir.path().join("out.torrent"),
         &CreateOpts::default(),
+        &mut |_, _| true,
     )
     .expect_err("a symlink must be refused");
     let message = err.to_string();
@@ -394,7 +416,8 @@ fn an_existing_torrent_is_not_overwritten_by_default() {
     let out = dir.path().join("out.torrent");
     std::fs::write(&out, b"someone else's torrent").unwrap();
 
-    let err = create(&show, &out, &CreateOpts::default()).expect_err("should refuse");
+    let err =
+        create(&show, &out, &CreateOpts::default(), &mut |_, _| true).expect_err("should refuse");
     assert!(err.to_string().contains("already exists"), "{err}");
     assert_eq!(std::fs::read(&out).unwrap(), b"someone else's torrent");
 
@@ -405,6 +428,7 @@ fn an_existing_torrent_is_not_overwritten_by_default() {
             overwrite: true,
             ..Default::default()
         },
+        &mut |_, _| true,
     )
     .unwrap();
     assert_ne!(std::fs::read(&out).unwrap(), b"someone else's torrent");
@@ -421,6 +445,7 @@ fn a_folder_with_no_data_is_refused() {
         &show,
         &dir.path().join("out.torrent"),
         &CreateOpts::default(),
+        &mut |_, _| true,
     )
     .expect_err("an empty folder must be refused");
     assert!(err.to_string().contains("no files"), "{err}");
@@ -443,7 +468,7 @@ fn non_ascii_names_go_in_exactly_as_the_filesystem_gives_them() {
     );
 
     let torrent = dir.path().join("out.torrent");
-    let made = create(&show, &torrent, &CreateOpts::default()).unwrap();
+    let made = create(&show, &torrent, &CreateOpts::default(), &mut |_, _| true).unwrap();
 
     // Whatever the filesystem stored — precomposed, decomposed, or something else — the
     // torrent has to name it identically, or it will not verify against its own folder.
@@ -453,7 +478,7 @@ fn non_ascii_names_go_in_exactly_as_the_filesystem_gives_them() {
     assert_eq!(in_torrent, on_disk);
 
     let meta = Metainfo::read(&torrent).unwrap();
-    let report = check(&meta, &torrent, &show).unwrap();
+    let report = check(&meta, &torrent, &show, &mut |_, _| true).unwrap();
     assert_eq!(report.verdict(), Verdict::Complete, "{:?}", report.files);
 }
 
@@ -472,7 +497,7 @@ fn nfc_and_nfd_are_taken_as_the_filesystem_gives_them() {
     payload(&show, &[("cafe\u{301}.flac", 5_000)]);
 
     let torrent = dir.path().join("out.torrent");
-    let made = create(&show, &torrent, &CreateOpts::default()).unwrap();
+    let made = create(&show, &torrent, &CreateOpts::default(), &mut |_, _| true).unwrap();
 
     let on_disk = names_on_disk(&show);
     assert!(
@@ -488,7 +513,9 @@ fn nfc_and_nfd_are_taken_as_the_filesystem_gives_them() {
 
     let meta = Metainfo::read(&torrent).unwrap();
     assert_eq!(
-        check(&meta, &torrent, &show).unwrap().verdict(),
+        check(&meta, &torrent, &show, &mut |_, _| true)
+            .unwrap()
+            .verdict(),
         Verdict::Complete
     );
 }

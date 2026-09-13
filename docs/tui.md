@@ -16,19 +16,25 @@ Like `lh-gui`, it adds no domain logic of its own (Principle 4) — a screen cal
 
 *Established 2026-08-31 by reading `lh-tui/src/main.rs` and `lh-cli/src/lib.rs` directly.*
 
-* **`lh-cli`'s command logic lives in `lib.rs`, `main.rs` is a thin wrapper.** `Cli`,
-  `Command`, `Paths`, `ChecksumArgs`, `ConvertArgs`, `TorrentCommand` and every `cmd_*`
-  function are `pub` in `lh-cli/src/lib.rs`; `lh-cli/src/main.rs` is just `Cli::parse()` +
-  `run(cli)` + exit code. `lh-tui` depends on `lh-cli` as a library and parses the identical
-  `Cli`, so every subcommand `lh` accepts, `lh-tui` accepts too, with identical flags —
-  there is exactly one command grammar in the workspace, not two kept in sync by hand.
+* **`lh-cli`'s command logic lives in `lib.rs`, `main.rs` is a thin wrapper.**
+  `lh-cli/src/lib.rs`'s public surface is exactly `Cli`, `Command`, the arg structs
+  (`Paths`, `ChecksumArgs`, `ConvertArgs`, `TorrentCommand`, ...) and `run`
+  (`docs/architecture-cleanup.md` A2); every `cmd_*` function, plus `collect` and
+  `checksum_kind_for`, is private to the crate. `lh-cli/src/main.rs` is just
+  `Cli::parse()` + `run(cli)` + exit code. `lh-tui` depends on `lh-cli` as a library and
+  parses the identical `Cli`, so every subcommand `lh` accepts, `lh-tui` accepts too, with
+  identical flags — there is exactly one command grammar in the workspace, not two kept in
+  sync by hand. Anything a screen needs beyond the grammar — collecting files, telling a
+  checksum file's kind from its extension — it gets from `lh_core` directly (`scan::collect`,
+  `ChecksumKind::from_path`) rather than reaching into `lh-cli`'s internals.
 * **Only `Command::Verify` has a screen.** `main()` matches on `cli.command`: `Verify` goes
   to `run_verify`, everything else to `run_headless`, which calls `lh_cli::run(cli)` and
   prints exactly what `lh` would — no ratatui, no alternate screen. This is deliberate and
   stated in the module doc comment, not an oversight to route around silently.
 * **The verify screen's shape**, which every future screen should default to unless a
   command's own result type says otherwise:
-  * `lh_cli::collect(&paths)` for the file list — same skip-reporting as every `lh` command.
+  * A local `collect(&paths)` (`lh_core::scan::collect` plus the same skip-reporting every
+    `lh` command does) for the file list.
   * One `job::Queue<T>` for the screen's lifetime, one job per file, submitted before the
     draw loop starts.
   * A `FileRow { name, status }` table, `Status` a small enum matching the operation's own
@@ -102,7 +108,7 @@ Distilled from §0 so the next screen does not have to reverse-engineer verify's
 
 ```rust
 fn run_x(args: XArgs) -> ExitCode {
-    let (files, mut clean) = lh_cli::collect(&args.paths)?;   // same skip reporting as `lh`
+    let (files, mut clean) = collect(&args.paths)?;   // same skip reporting as `lh`
     // ... early-return for an empty file list, exactly like run_verify ...
     let terminal = ratatui::init();
     let result = run(terminal, &label, files, /* screen-specific config */);
@@ -237,28 +243,26 @@ code (`1`, matching the real mismatch+failure) were correct — closing the gap 
 
 ## 4. TUI3 — Torrent create / check screens — done
 
-Two screens, not one: `create_with_progress` walks the whole payload as a single sequential
+Two screens, not one: `create` walks the whole payload as a single sequential
 piece-hashing pass, so there is one job on a queue of one and one row of progress to show,
-not a batch table; `check`/`check_with_progress` produces a per-file `TorrentReport` only
+not a batch table; `check` produces a per-file `TorrentReport` only
 once the whole pass finishes, so its screen shows a "hashing…" placeholder during the run
 and the file table (the same shape as `lh-gui` G4's `TorrentFileRow`/`report_rows`, ported
 to a ratatui `Table`) only after. Neither fits §2's per-file pattern, which is why they were
 left out of it — a single job with sub-item progress, not N independent files.
 
-* **Create's cancellation is real.** `create_with_progress`'s progress callback returns a
+* **Create's cancellation is real.** `create`'s progress callback returns a
   `bool` the same way `lh-cli`'s own `cmd_torrent_create` uses it — `false` stops the hash
   within one piece. So the create screen's `q`/`Esc`/`Ctrl-C` waits for the job's actual
   `Done` (bounded by one piece's hash time) instead of breaking the draw loop immediately
   the way every other screen does, so the reported outcome (cancelled vs. finished vs.
   errored) is the real one rather than a guess made before the job caught up.
-* **Check's cancellation is not.** `check_with_progress` (`lh-core/src/torrent/verify.rs`)
-  has no cancellation checkpoint — its progress callback returns `()`, not a `bool` — a gap
-  `lh-gui`'s G4 already hit and accepted rather than changing `lh-core` (`lh-gui/src/main.rs`'s
-  `run_torrent_check` comment). The check screen inherits the same limitation: `q`/`Esc`/
-  `Ctrl-C` breaks the draw loop immediately, same as verify/checksum, but the hash keeps
-  running in the background until it finishes — no worse than plain `lh torrent check`,
-  which cannot be interrupted at all short of killing the process, and a strict improvement
-  over it (a live gauge instead of silence) everywhere except that one edge.
+* ~~**Check's cancellation is not.**~~ **Closed by docs/architecture-cleanup.md A3.**
+  `check` (`lh-core/src/torrent/verify.rs`) gained the same cancellation checkpoint
+  `create`'s progress callback already had — it returns a `bool` now, not `()` — closing the
+  gap `lh-gui`'s G4 had hit and accepted rather than changing `lh-core`. The check screen now
+  follows the same `want_quit`-then-wait-for-`Done` shape create's screen uses: `q`/`Esc`/
+  `Ctrl-C` stops the hash within one piece instead of just abandoning the draw loop.
 * **`--quick`** (`check_sizes`, no piece hashing) reuses the same screen and queue — it just
   produces a `Finished` event almost immediately, with no `Progress` events in between, so
   the "hashing…" placeholder is skipped in practice rather than needing its own code path.
@@ -303,12 +307,13 @@ section) is that a row's own progress is worth showing, unlike verify/checksum:
   `ratatui::init()` runs, rather than after converting half a batch. Confirmed with
   `LH_FLAC=/nonexistent`: `lh-tui: encoding WAV to FLAC requires flac, which was not found
   (...)`, exit code 2, no screen drawn.
-* **Rows show live sub-file progress where it exists.** `to_wav_with_progress`'s
+* **Rows show live sub-file progress where it exists.** `to_wav`'s
   `(frames done, frames total)` flows through `Progress::report` into `Event::Progress`,
   and a decoding row's status cell shows a live percentage instead of a bare spinner.
-  `to_flac_cancellable` has no such number — `flac` only draws its own percentage when
+  `to_flac` has no such number — `flac` only draws its own percentage when
   stderr is a terminal, which piped through `Command` it never is (`convert/mod.rs`'s own
-  doc comment) — so an encoding row just spins, the same as every other screen's `Running`.
+  doc comment), calling its progress with `(0, 0)` instead — so an encoding row just spins,
+  the same as every other screen's `Running`.
 * **The detail column carries the destination filename**, `-> name.ext`, and flags the
   weaker "unchecked" result (`checked_against_source == false`, source had nothing to
   compare against) in text rather than a separate status color — `OK` stays green either
@@ -426,16 +431,16 @@ character in that field rather than applying or quitting, on both screens.
 ## 8. TUI7 — Check screen — done
 
 Same per-file batch shape as verify/checksum (§2), but the file list doesn't come from
-`lh_cli::collect` scanning a folder for audio — it comes from `ChecksumFile::read`'s own
+`collect` scanning a folder for audio — it comes from `ChecksumFile::read`'s own
 `entries`, the same source `cmd_check` (`lh-cli/src/lib.rs:664`) reads. That's the one real
 divergence from §2's template, and it is why a row can land in a state neither verify nor
 checksum has: `Missing`, an entry naming a file that isn't on disk at all.
 
-* **Kind resolution is shared, not copied.** The `.ffp`/`.md5`/`.st5` extension match
-  `cmd_check` used to inline is now `lh_cli::checksum_kind_for(&Path) -> Result<ChecksumKind>`,
-  called from both `cmd_check` and the screen's `run_check` — one place decides what a
-  checksum file's extension means, matching this doc's own framing of `lh-cli` as the one
-  command grammar both binaries share (§0).
+* **Kind resolution built on the same `lh_core` primitive, not copied.** The `.ffp`/`.md5`/
+  `.st5` extension match is `ChecksumKind::from_path`, wrapped by a local
+  `checksum_kind_for(&Path) -> Result<ChecksumKind>` here and by `lh-cli`'s own
+  same-named private function — each binary owns its error wording rather than one reaching
+  into the other's internals (`docs/architecture-cleanup.md` A2).
 * **`CheckOutcome`** (`Ok`, `Mismatch { expected, actual }`, `Missing`, `Failed(String)`) is
   the queue's `T`, computed inside the job closure exactly the way `cmd_check`'s loop body
   does: `target.exists()` first (→ `Missing` without ever calling `compute`), then

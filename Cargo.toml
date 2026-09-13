@@ -12,6 +12,7 @@ authors = ["Little Helper contributors"]
 
 [workspace.dependencies]
 lh-core = { path = "lh-core", version = "0.1.0" }
+lh-cli = { path = "lh-cli", version = "0.1.0" }
 claxon = "0.4"
 metaflac = "0.2"
 md-5 = "0.11"

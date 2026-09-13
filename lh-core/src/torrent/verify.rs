@@ -10,7 +10,7 @@ use super::layout;
 use super::metainfo::Metainfo;
 use super::report::{FileStatus, PieceCounts, TorrentReport};
 use super::stream::{READ_BUF, Span, SpanReader, build_spans, feed_zeros, spans_overlapping};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use sha1::{Digest, Sha1};
 use std::path::Path;
 
@@ -23,16 +23,17 @@ enum PieceOutcome {
     Unverifiable,
 }
 
-pub fn check(meta: &Metainfo, torrent_path: &Path, given: &Path) -> Result<TorrentReport> {
-    check_with_progress(meta, torrent_path, given, &mut |_, _| {})
-}
-
-/// `progress` is called with (pieces done, pieces total) as the stream is walked.
-pub fn check_with_progress(
+/// Verify a local fileset against a torrent's piece hashes.
+///
+/// `progress` is called with (pieces done, pieces total) as the stream is walked. It
+/// returns whether to keep going — `false` stops the walk and the call returns
+/// `Err(Error::Cancelled)` with no partial `TorrentReport`, the same convention as
+/// [`super::create`]. A one-shot caller passes `&mut |_, _| true`.
+pub fn check(
     meta: &Metainfo,
     torrent_path: &Path,
     given: &Path,
-    progress: &mut dyn FnMut(u32, u32),
+    progress: &mut dyn FnMut(u32, u32) -> bool,
 ) -> Result<TorrentReport> {
     // The size pre-check comes first: a file of the wrong length will fail hashing anyway,
     // and knowing that up front is what lets us mark its pieces unverifiable rather than
@@ -103,7 +104,9 @@ pub fn check_with_progress(
         } else {
             PieceOutcome::Failed
         };
-        progress(piece_index as u32 + 1, total_pieces);
+        if !progress(piece_index as u32 + 1, total_pieces) {
+            return Err(Error::Cancelled);
+        }
     }
 
     attribute(meta, &spans, &outcomes, &mut report);

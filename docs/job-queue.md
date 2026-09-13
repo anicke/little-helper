@@ -15,8 +15,10 @@ piece of M1.
 usually looks like.*
 
 * **One place already has intra-operation progress**, and it is the only evidence of what
-  a real caller needs: `torrent::create_with_progress` takes `progress: &mut dyn FnMut(u32, u32)`
-  and calls it once per piece with (pieces done, pieces total) from inside `hash_pieces`.
+  a real caller needs: `torrent::create` (named `create_with_progress` until
+  docs/architecture-cleanup.md A3 unified it with the rest) takes
+  `progress: &mut dyn FnMut(u32, u32)` and calls it once per piece with (pieces done, pieces
+  total) from inside `hash_pieces`.
   It has no cancellation check anywhere in that loop — a `torrent create` cannot be stopped
   today short of killing the process.
 * **Everywhere else is one blocking call with nothing in between.** `checksum::compute`,
@@ -180,7 +182,7 @@ closes it there rather than leaving the queue to sit beside the code it was mean
   disposition that kills the process outright. This is the fix §0 named: a job already in
   flight finishes and its `TempOutput` commits or drops normally; queued-but-unstarted jobs
   never begin.
-* `torrent create`'s own `create_with_progress` callback stays exactly as it is — the CLI
+* `torrent create`'s own progress callback stays exactly as it is — the CLI
   submits the whole `create()` call as *one* queue job, and that job's closure forwards
   `Progress::report` into the existing `&mut dyn FnMut(u32, u32)` parameter. Two progress
   mechanisms were considered and rejected: teaching `torrent::create` to take a `job::Progress`
@@ -238,7 +240,7 @@ Four things the implementation forced, none of them visible from the sketch in �
 * **`Progress<'a, T>` could not stay borrowed.** `Queue::submit` requires `job: impl FnOnce(&Progress<T>) -> T + Send + 'static` because rayon's `spawn` needs a `'static` closure, and nothing borrowed from `&self` can cross into one. `Progress<T>` ended up owning a cloned `Sender` and a cloned `CancelToken` instead of borrowing them — both are cheap to clone by design (an `Arc` and a channel handle), so this cost nothing but the lifetime parameter.
 * **`wait()` needed its own bookkeeping, not a rayon trick.** `ThreadPool::broadcast` runs a closure on every worker thread, but it does not wait for work already sitting in rayon's own injector queue — a `spawn`'d job can still be pending when a `broadcast` closure runs on the thread that would have picked it up next. `Queue` instead carries a plain `Mutex<u64>` + `Condvar` outstanding-job counter, incremented in `submit` and decremented when a job's terminal event is sent. Correct, and it is what `wait()` in the CLI's `run_batch` never actually needed to call — draining `events()` for as many terminal events as jobs submitted already implies "done" without a second synchronization primitive, which is what `run_batch` does. `wait()` exists for a caller that wants completion without watching progress.
 * **§3's "streams results as they land" oversold the CLI change, and got corrected here.** A script piping `lh verify`'s stdout must see the same file order on every run; printing in completion order — the literal reading of that sentence — makes the output nondeterministic across runs on a multi-file batch, since worker threads finish in whatever order the OS schedules them. `run_batch` keeps per-file report lines in submission order, buffered until every job has a terminal event, and only the *progress counter* ("N of M done") streams live, to stderr, where a script is not reading anyway. Real, visible feedback during a long batch; unchanged, reproducible stdout.
-* **The cancellation checkpoint inside `hash_pieces` needed the existing callback to grow a return value, not a second parameter.** `create_with_progress`'s `progress: &mut dyn FnMut(u32, u32)` became `FnMut(u32, u32) -> bool`, where `false` stops the walk. That keeps `torrent::create` free of any dependency on the `job` module, exactly as §2 requires — the CLI's job closure is the only place that knows both types, forwarding `Progress::report` in and `Progress::is_cancelled` out through the one function `hash_pieces` already called every piece. A stopped walk returns the new `Error::Cancelled` rather than a partial `Created`, matching Principle 1.
+* **The cancellation checkpoint inside `hash_pieces` needed the existing callback to grow a return value, not a second parameter.** `create`'s `progress: &mut dyn FnMut(u32, u32)` became `FnMut(u32, u32) -> bool`, where `false` stops the walk — the same shape docs/architecture-cleanup.md A3 later gave every other long-running `lh-core` operation. That keeps `torrent::create` free of any dependency on the `job` module, exactly as §2 requires — the CLI's job closure is the only place that knows both types, forwarding `Progress::report` in and `Progress::is_cancelled` out through the one function `hash_pieces` already called every piece. A stopped walk returns the new `Error::Cancelled` rather than a partial `Created`, matching Principle 1.
 * **`JobId::index()` is honest about leaning on a design choice from open question 3, not a general property.** It only maps to "position in the file list" because each CLI batch command builds one fresh `Queue` and submits every file in one dense, ordered pass — true today, and it would silently stop being true the moment two batches ever shared one `Queue`. Worth remembering if J3's GUI adapter reaches for a single long-lived queue across operations, per that same open question.
 
 ---
@@ -280,13 +282,13 @@ whether the shape generalizes past pieces, and decoding one FLAC block at a time
 `done += block.duration()` against `total_frames` is the same shape with a different unit,
 exactly as guessed. `total_frames` comes from STREAMINFO and is usually present; when it is
 not (`probed.stream_info.total_frames == None`, legal but rare — a streaming encoder that
-never learned the sample count), `to_wav_with_progress` reports total `0` and the CLI shows
+never learned the sample count), `to_wav` reports total `0` and the CLI shows
 a bare done-count instead of a fraction, rather than lying about a denominator it does not
 have.
 
 **`Progress<T>` grew a `detached()` constructor** so `run_batch`'s single-file fast path
-(§3 — deliberately skips the queue) can still hand `to_wav_with_progress` /
-`to_flac_cancellable` a real `Progress` to check `is_cancelled()` against, with its own
+(§3 — deliberately skips the queue) can still hand `to_wav` / `to_flac` a real `Progress`
+to check `is_cancelled()` against, with its own
 fresh `CancelToken` wired to the same Ctrl-C handler either path installs. It sends into a
 channel nobody ever reads (the receiver is dropped immediately), which is fine — `submit`'s
 own `Progress` already tolerates a closed channel the same way, since a queue can be torn

@@ -63,14 +63,11 @@ pub struct Conversion {
 /// The decoded audio is hashed as it is written and compared against the MD5 in the
 /// source's STREAMINFO. A file that fails its own checksum does not produce a WAV: handing
 /// someone audio we know to be wrong is worse than handing them nothing.
-pub fn to_wav(src: &Path, dst: &Path, overwrite: bool) -> Result<Conversion> {
-    to_wav_with_progress(src, dst, overwrite, &mut |_, _| true)
-}
-
-/// [`to_wav`], reporting (frames written, total frames) once per decoded block and
-/// stopping early — with [`Error::Cancelled`], nothing renamed into place — the moment
-/// `progress` returns `false`. `to_wav` is this with a `progress` that never says stop.
-pub fn to_wav_with_progress(
+///
+/// `progress` is called with (frames written, total frames) once per decoded block; a
+/// one-shot caller passes `&mut |_, _| true`. Returning `false` stops early — with
+/// [`Error::Cancelled`], nothing renamed into place.
+pub fn to_wav(
     src: &Path,
     dst: &Path,
     overwrite: bool,
@@ -124,36 +121,26 @@ pub fn to_wav_with_progress(
 /// After `flac` returns we read the MD5 it wrote into STREAMINFO and compare it against
 /// the source's audio, in-process. That is an independent check of the encoder's own
 /// `--verify`, and it is cheap: one header read against one pass over the WAV.
+///
+/// `progress` is polled while `flac` is running (docs/job-queue.md §8) and called with
+/// `(0, 0)` — "no count available": `flac` only draws its own percentage display when
+/// stderr is a terminal, confirmed empirically (see docs/job-queue.md §8), and piped
+/// through `Command` it prints nothing until it exits, so there is no real number to relay
+/// in between. Every existing display already copes: a gauge renders `total == 0` as an
+/// empty bar. Returning `false` kills `flac` mid-run instead of waiting for it to finish;
+/// `flac` itself never learns it was asked to stop, and the killed child's `.part` output
+/// is cleaned up by [`TempOutput`] the same as any other cancelled or failed conversion. A
+/// one-shot caller passes `&mut |_, _| true`.
 pub fn to_flac(
     src: &Path,
     dst: &Path,
     tool: &Tool,
     opts: &EncodeOpts,
     overwrite: bool,
-) -> Result<Conversion> {
-    to_flac_cancellable(src, dst, tool, opts, overwrite, &mut || true)
-}
-
-/// [`to_flac`], but `should_continue` is polled while `flac` is running and returning
-/// `false` kills it mid-run instead of waiting for it to finish (docs/job-queue.md §8).
-/// `flac` itself never learns it was asked to stop; the killed child's `.part` output is
-/// cleaned up by `TempOutput` the same as any other cancelled or failed conversion.
-///
-/// There is no (done, total) here the way [`to_wav_with_progress`] has: `flac` only draws
-/// its own percentage display when stderr is a terminal, confirmed empirically (see
-/// docs/job-queue.md §8) — piped through `Command`, it prints nothing until it exits, so
-/// there is no number to relay in between. `to_flac` is this with a `should_continue` that
-/// never says stop.
-pub fn to_flac_cancellable(
-    src: &Path,
-    dst: &Path,
-    tool: &Tool,
-    opts: &EncodeOpts,
-    overwrite: bool,
-    should_continue: &mut dyn FnMut() -> bool,
+    progress: &mut dyn FnMut(u32, u32) -> bool,
 ) -> Result<Conversion> {
     let (temp, provenance, audio_md5, checked_against_source) =
-        encode_flac_staged(src, dst, tool, opts, overwrite, should_continue)?;
+        encode_flac_staged(src, dst, tool, opts, overwrite, &mut || progress(0, 0))?;
     Ok(Conversion {
         output: temp.commit()?,
         provenance,
@@ -162,14 +149,17 @@ pub fn to_flac_cancellable(
     })
 }
 
-/// [`to_flac_cancellable`], stopping short of the commit: the encoded, checked output is
-/// left staged under [`TempOutput`] rather than renamed into place.
+/// [`to_flac`], stopping short of the commit: the encoded, checked output is left staged
+/// under [`TempOutput`] rather than renamed into place.
 ///
 /// Repair (docs/sbe-repair.md §4 step 5f) needs exactly this — two files encoded and
 /// verified independently, but renamed into place together or not at all, which is a
-/// commit `to_flac_cancellable` cannot defer once it has made it. Everything up to the
-/// decision to commit is identical, so it lives here once and `to_flac_cancellable` is the
-/// thin wrapper that always commits immediately.
+/// commit `to_flac` cannot defer once it has made it. Everything up to the decision to
+/// commit is identical, so it lives here once and `to_flac` is the thin wrapper that always
+/// commits immediately. Takes the plain `should_continue` shape rather than `to_flac`'s
+/// `progress`, since [`execute_fix`](crate::analysis::execute_fix) — its other caller — has
+/// no progress reporting of its own (out of scope for docs/architecture-cleanup.md A3; see
+/// docs/sbe-repair.md).
 pub(crate) fn encode_flac_staged(
     src: &Path,
     dst: &Path,

@@ -118,17 +118,14 @@ struct SourceFile {
 }
 
 /// Build a torrent for `source` — a folder, or a single file — and write it to `dst`.
-pub fn create(source: &Path, dst: &Path, opts: &CreateOpts) -> Result<Created> {
-    create_with_progress(source, dst, opts, &mut |_, _| true)
-}
-
+///
 /// `progress` is called with (pieces done, pieces total) as the payload is walked. It
 /// returns whether to keep going — `false` stops the walk and the call returns
 /// `Err(Error::Cancelled)` rather than a partial `Created`, matching Principle 1: nothing
 /// half-done is ever handed back as though it were a result. This is `job`'s cancellation
 /// checkpoint (docs/job-queue.md §2); `create.rs` has no dependency on the `job` module
-/// itself, only on this bool.
-pub fn create_with_progress(
+/// itself, only on this bool. A one-shot caller passes `&mut |_, _| true`.
+pub fn create(
     source: &Path,
     dst: &Path,
     opts: &CreateOpts,

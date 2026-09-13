@@ -16,9 +16,7 @@ use lh_core::analysis::{
 use lh_core::checksum::{
     ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute, ffp,
 };
-use lh_core::convert::{
-    Conversion, EncodeOpts, destination, to_flac_cancellable, to_wav_with_progress,
-};
+use lh_core::convert::{Conversion, EncodeOpts, destination, to_flac, to_wav};
 use lh_core::display;
 use lh_core::etree::{ShowDate, ShowName};
 use lh_core::job::{CancelToken, Event, Progress, Queue};
@@ -29,7 +27,7 @@ use lh_core::tag::{self, Tags};
 use lh_core::tools::{Discovery, Registry, ToolId};
 use lh_core::torrent::{
     Chosen, CreateOpts, Created, FileStatus, Metainfo, Origin, Passkeys, Tracker, TrackerList,
-    Verdict, check, check_sizes, create_with_progress, default_output, resolve,
+    Verdict, check, check_sizes, create, default_output, resolve,
 };
 use std::path::{Path, PathBuf};
 
@@ -39,9 +37,8 @@ use std::path::{Path, PathBuf};
 /// file already being worked on finishes normally, nothing queued behind it starts.
 ///
 /// `job` gets a `Progress<T>` even outside a real queue (§8's `Progress::detached`) so a
-/// job that can check its own cancellation mid-run — `convert`, via
-/// `to_flac_cancellable` / `to_wav_with_progress` — behaves the same whether it is the
-/// only file or one of a batch.
+/// job that can check its own cancellation mid-run — `convert`, via `to_flac` / `to_wav`
+/// — behaves the same whether it is the only file or one of a batch.
 ///
 /// Results come back paired with their file in submission order, not completion order —
 /// a script piping our stdout should see the same thing on every run, even though the
@@ -375,7 +372,7 @@ pub fn run(cli: Cli) -> Result<bool> {
 
 /// Expand files and folders into a flat list of audio files, reporting anything skipped
 /// rather than dropping it silently.
-pub fn collect(p: &Paths) -> Result<(Vec<AudioFile>, bool)> {
+fn collect(p: &Paths) -> Result<(Vec<AudioFile>, bool)> {
     let set = scan::collect(&p.paths, p.recursive)?;
     let mut clean = true;
     for (skipped, why) in &set.skipped {
@@ -650,9 +647,8 @@ fn cmd_checksum(kind: ChecksumKind, args: &ChecksumArgs) -> Result<bool> {
 }
 
 /// `ChecksumKind::from_path`, with `lh check`'s own error wording when a path names none
-/// of `.ffp`/`.md5`/`.st5` — shared with `lh-tui`'s `check` screen so both report it the
-/// same way.
-pub fn checksum_kind_for(file: &Path) -> Result<ChecksumKind> {
+/// of `.ffp`/`.md5`/`.st5`.
+fn checksum_kind_for(file: &Path) -> Result<ChecksumKind> {
     ChecksumKind::from_path(file).ok_or_else(|| {
         let ext = file
             .extension()
@@ -1024,7 +1020,7 @@ fn cmd_torrent_create(args: &TorrentCreateArgs) -> Result<bool> {
     let job_dst = dst.clone();
     let job_opts = opts.clone();
     queue.submit("torrent create", move |progress| {
-        create_with_progress(&job_source, &job_dst, &job_opts, &mut |done, total| {
+        create(&job_source, &job_dst, &job_opts, &mut |done, total| {
             progress.report(done, total);
             !progress.is_cancelled()
         })
@@ -1180,7 +1176,7 @@ fn cmd_torrent_check(file: &Path, path: &Path, quick: bool) -> Result<bool> {
     let report = if quick {
         check_sizes(&meta, file, path)
     } else {
-        check(&meta, file, path)
+        check(&meta, file, path, &mut |_, _| true)
     }
     .with_context(|| format!("checking against {}", path.display()))?;
 
@@ -1296,18 +1292,19 @@ fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
             Ok(d) => d,
             Err(_) => return ConvertOutcome::NoFileName,
         };
+        let on_progress = &mut |done, total| {
+            progress.report(done, total);
+            !progress.is_cancelled()
+        };
         let result = match to {
-            Target::Wav => to_wav_with_progress(&f.path, &dst, force, &mut |done, total| {
-                progress.report(done, total);
-                !progress.is_cancelled()
-            }),
-            Target::Flac => to_flac_cancellable(
+            Target::Wav => to_wav(&f.path, &dst, force, on_progress),
+            Target::Flac => to_flac(
                 &f.path,
                 &dst,
                 encoder.as_ref().expect("discovered above"),
                 &opts,
                 force,
-                &mut || !progress.is_cancelled(),
+                on_progress,
             ),
         };
         match result {

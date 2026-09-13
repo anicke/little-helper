@@ -14,12 +14,11 @@ pub mod trackers;
 pub mod verify;
 
 pub use create::{
-    CreateOpts, Created, Preview, PreviewFile, Skipped, create, create_with_progress,
-    default_output, preview,
+    CreateOpts, Created, Preview, PreviewFile, Skipped, create, default_output, preview,
 };
 pub use encode::{Content, Draft, Encoded, encode, info_bytes};
 pub use layout::{check_sizes, join_checked, resolve_root};
 pub use metainfo::{Metainfo, TorrentFile};
 pub use report::{FileOutcome, FileStatus, PieceCounts, TorrentReport, Verdict};
 pub use trackers::{Chosen, Health, Origin, Passkeys, Resolved, Tracker, TrackerList, resolve};
-pub use verify::{check, check_with_progress};
+pub use verify::check;

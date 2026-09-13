@@ -46,7 +46,13 @@ fn flip(path: &Path, offset: u64) {
 
 fn run(kind: &str, torrent: &str, tmp: &TempDir) -> lh_core::torrent::TorrentReport {
     let m = meta(torrent);
-    check(&m, &fixtures().join(torrent), &tmp.path().join(kind)).unwrap()
+    check(
+        &m,
+        &fixtures().join(torrent),
+        &tmp.path().join(kind),
+        &mut |_, _| true,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -168,4 +174,28 @@ fn padding_is_hashed_as_zeros_and_verifies() {
     assert_eq!(report.verdict(), Verdict::Complete);
     assert_eq!(report.files[1].status, FileStatus::Padding);
     assert_eq!(report.pieces.unwrap().ok, 3);
+}
+
+/// The cancellation checkpoint A3 added: `progress` returning `false` stops the piece walk
+/// immediately, with `Error::Cancelled` and no partial `TorrentReport` — the same
+/// no-half-result convention `torrent::create` already had.
+#[test]
+fn progress_returning_false_cancels_with_no_partial_report() {
+    let tmp = payload("verified");
+    let m = meta("verify-multi.torrent");
+
+    let mut polls = 0u32;
+    let err = check(
+        &m,
+        &fixtures().join("verify-multi.torrent"),
+        &tmp.path().join("verified"),
+        &mut |_, _| {
+            polls += 1;
+            false
+        },
+    )
+    .expect_err("progress returning false must stop the check");
+
+    assert!(matches!(err, lh_core::Error::Cancelled), "{err}");
+    assert_eq!(polls, 1, "must stop at the first piece, not walk them all");
 }
