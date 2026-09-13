@@ -9,10 +9,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use lh_core::analysis::{
-    BoundaryDirection, FixPlan, RepairEncode, Sbe, TailPolicy, Verification, execute_fix, plan_fix,
-    sbe, verify,
-};
+use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{
     ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute, ffp,
 };
@@ -22,6 +19,9 @@ use lh_core::etree::{ShowDate, ShowName};
 use lh_core::job::{CancelToken, Event, Progress, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::rename::{NameSpec, RenamePlan, RenameStatus, execute_rename, plan_rename};
+use lh_core::repair::{
+    BoundaryDirection, FixPlan, RepairEncode, TailPolicy, execute_fix, plan_fix,
+};
 use lh_core::scan;
 use lh_core::tag::{self, Tags};
 use lh_core::tools::{Discovery, Registry, ToolId};

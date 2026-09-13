@@ -22,7 +22,7 @@ const CHANNEL_MASKS: [u32; 8] = [0x4, 0x3, 0x7, 0x33, 0x37, 0x3F, 0x70F, 0x63F];
 const MAX_WAV_DATA: u64 = u32::MAX as u64;
 
 #[derive(Debug, Clone)]
-pub struct WavLayout {
+pub(crate) struct WavLayout {
     pub stream_info: StreamInfo,
     /// Byte offset of the `data` chunk payload.
     pub data_offset: u64,
@@ -32,7 +32,7 @@ pub struct WavLayout {
 
 /// Walk the RIFF chunk list looking for `fmt ` and `data`. Chunks we do not recognize
 /// (`LIST`, `INFO`, `id3 `, taper metadata) are skipped rather than treated as errors.
-pub fn probe(path: &Path) -> Result<WavLayout> {
+pub(crate) fn probe(path: &Path) -> Result<WavLayout> {
     let file = File::open(path).map_err(|e| Error::io(path, e))?;
     let mut r = BufReader::new(file);
 

@@ -21,7 +21,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | M2 `lh-cli` | **in progress** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers`, `tag`, `rename` all work |
 | M3 `lh-gui` | **in progress** — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell revamp is done: [docs/gui-shell.md](docs/gui-shell.md), S1–S4 all done (rail shell, selection, checksum areas, `iced::widget::table`). Tag/rename ([docs/tagging.md](docs/tagging.md)) has no GUI screen yet |
 | `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `check`, `convert`, `sbe fix`, `torrent create`/`check`/`info`, and `tag`/`rename` have real live screens, everything else runs headless like `lh` itself |
-| Architecture cleanup | **in progress** — behaviour-preserving refactors across all four crates, see [docs/architecture-cleanup.md](docs/architecture-cleanup.md) (A1–A6): A1 done (`ChecksumKind::from_path`, `checksum::check_entry`, `scan::collect`, `convert::destination` returning `Result`, and `lh_core::display` now hold what each front end used to reimplement); A2 done (`lh-cli`'s public surface is now just `Cli`/`Command`/the arg structs/`run`; `lh-tui` reaches `lh-core` directly for collecting files and telling a checksum kind, rather than through `lh-cli`'s internals); A3 done (`convert::to_wav`, `convert::to_flac`, `torrent::create` and `torrent::check` all take one `&mut dyn FnMut(u32, u32) -> bool` callback — `check` gained the cancellation checkpoint it lacked, wired through in both the GUI and TUI); A4–A6 not started |
+| Architecture cleanup | **in progress** — behaviour-preserving refactors across all four crates, see [docs/architecture-cleanup.md](docs/architecture-cleanup.md) (A1–A6): A1 done (`ChecksumKind::from_path`, `checksum::check_entry`, `scan::collect`, `convert::destination` returning `Result`, and `lh_core::display` now hold what each front end used to reimplement); A2 done (`lh-cli`'s public surface is now just `Cli`/`Command`/the arg structs/`run`; `lh-tui` reaches `lh-core` directly for collecting files and telling a checksum kind, rather than through `lh-cli`'s internals); A3 done (`convert::to_wav`, `convert::to_flac`, `torrent::create` and `torrent::check` all take one `&mut dyn FnMut(u32, u32) -> bool` callback — `check` gained the cancellation checkpoint it lacked, wired through in both the GUI and TUI); A4 done (SBE repair moved out of `analysis` into its own top-level `repair` module, so `analysis` is now only `sbe`/`verify`, read-only as its doc says; `tag::{read_comment_block, restore_comment_block}`, `output` and `format::wav::WavLayout` are `pub(crate)`, no longer reachable outside `lh-core`); A5–A6 not started |
 | M4 Packaging | not started |
 
 231 tests passing, clippy clean. Our FFP output matches `metaflac --show-md5sum` byte for byte
@@ -173,14 +173,22 @@ little-helper/            cargo workspace
 ├── lh-core/              domain logic — zero UI, zero CLI
 │   ├── format/           FLAC (claxon, metaflac), WAV reader/writer
 │   ├── checksum/         ffp, md5, st5 — compute, parse, write
-│   ├── analysis/         sbe, verify, info
+│   ├── analysis/         sbe, verify — read-only, pure Rust
+│   ├── repair/           sbe fix: plan and execute a boundary repair
 │   ├── convert/          flac→wav in-process, wav→flac via reference flac
+│   ├── etree/            show name/date parsing to the etree standard
+│   ├── tag/              etree Vorbis-comment fields, read/write/diff
+│   ├── rename/           etree track-name plan and execute
 │   ├── tools/            registry: discovery, version capture, argv, process runner
 │   ├── torrent/          metainfo, verify, create, encode, tracker list
 │   ├── job/              queue, worker pool, progress events, cancellation (docs/job-queue.md)
-│   ├── report/           structured results + provenance/audit trail
+│   ├── scan.rs           expand files/folders into probed AudioFiles, with skip reasons
+│   ├── model.rs          AudioFile, AudioFormat, StreamInfo
+│   ├── output.rs         stage-then-rename commit, single file or a set at once
+│   ├── display.rs        shared display formatters (bytes, dates, durations, pieces)
 │   └── config.rs         where config files live (LH_CONFIG_DIR, then the platform's)
-├── lh-cli/               headless batch (clap)
+├── lh-cli/               headless batch (clap): the grammar, every cmd_*, and run
+├── lh-tui/               terminal UI (ratatui); shares lh-cli's Cli/Command grammar
 └── lh-gui/               iced 0.14
 ```
 

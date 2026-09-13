@@ -17,10 +17,10 @@
 //!   nor will it change the FLAC Fingerprint (FFP)". [`assert_audio_unchanged`] turns that
 //!   from a claim into a postcondition every caller is expected to enforce.
 //!
-//! The block-level pair ([`read_comment_block`], [`restore_comment_block`]) lives here too.
-//! It was written for SBE repair, which re-encodes a file and has to put its tags back
-//! afterwards (docs/sbe-repair.md §4 step 5e); it is the same concern as this module's, so
-//! it belongs here rather than privately inside `analysis::sbe_fix`.
+//! The block-level pair (`read_comment_block`, `restore_comment_block`, `pub(crate)` since
+//! only `repair` calls them) lives here too. It was written for SBE repair, which re-encodes
+//! a file and has to put its tags back afterwards (docs/sbe-repair.md §4 step 5e); it is the
+//! same concern as this module's, so it belongs here rather than privately inside `repair`.
 
 use crate::checksum;
 use crate::error::{Error, Result};
@@ -244,7 +244,7 @@ pub fn assert_audio_unchanged(path: &Path, before: [u8; 16]) -> Result<()> {
 /// with zero comments in it, which is still worth writing back so a custom vendor string
 /// round-trips too. In practice every FLAC `convert` or `flac` itself produces has one; this
 /// only matters for a file with no metadata block whatsoever.
-pub fn read_comment_block(path: &Path) -> Result<Option<metaflac::block::VorbisComment>> {
+pub(crate) fn read_comment_block(path: &Path) -> Result<Option<metaflac::block::VorbisComment>> {
     Ok(open(path)?.vorbis_comments().cloned())
 }
 
@@ -255,7 +255,7 @@ pub fn read_comment_block(path: &Path) -> Result<Option<metaflac::block::VorbisC
 /// repair calls this on a file the reference `flac` binary has just written, and `flac`'s own
 /// vendor string is the provenance marker the new file should keep (Principle 2). What is
 /// being restored is what the tags said, not who encoded the audio they were attached to.
-pub fn restore_comment_block(
+pub(crate) fn restore_comment_block(
     path: &Path,
     original: &Option<metaflac::block::VorbisComment>,
 ) -> Result<()> {

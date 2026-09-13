@@ -26,10 +26,7 @@ use lh_cli::{
     ChecksumArgs, Cli, Command, ConvertArgs, Direction as SbeFixDirection, Paths, RenameArgs,
     SbeFixArgs, SbeSub, TagArgs, Target, TorrentCommand, TorrentCreateArgs,
 };
-use lh_core::analysis::{
-    BoundaryDirection, FixPlan, Fixed, RepairEncode, Sbe, TailPolicy, Verification, execute_fix,
-    plan_fix, sbe, verify,
-};
+use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{
     ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute, ffp,
 };
@@ -40,6 +37,9 @@ use lh_core::etree::ShowName;
 use lh_core::job::{CancelToken, Event, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::rename::{NameSpec, RenamePlan, RenameStatus, execute_rename, plan_rename};
+use lh_core::repair::{
+    BoundaryDirection, FixPlan, Fixed, RepairEncode, TailPolicy, execute_fix, plan_fix,
+};
 use lh_core::scan;
 use lh_core::tag::{self, Tags};
 use lh_core::tools::{Registry, Tool, ToolId};

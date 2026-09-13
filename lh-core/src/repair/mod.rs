@@ -1,8 +1,8 @@
 //! Planning and executing an SBE repair (docs/sbe-repair.md).
 //!
 //! R1 is [`plan_fix`]: pure arithmetic over each file's declared frame count — the same
-//! header-only read [`super::sbe::sbe`] already does, so a plan can be shown to a user with
-//! no decode.
+//! header-only read [`crate::analysis::sbe`] already does, so a plan can be shown to a user
+//! with no decode.
 //!
 //! R2/R3 is [`execute_fix`]: decode, shift (chained left to right across as many files as
 //! the plan has), pad the tail when asked, re-encode, restore tags, and commit every file
@@ -61,7 +61,7 @@ pub struct FixPlan {
     pub boundaries: Vec<BoundaryFix>,
     /// `Some` only when the tail needed padding and [`TailPolicy::Pad`] was given.
     pub tail_padding_frames: Option<u64>,
-    /// True when every file in the set would report [`super::Sbe::Aligned`] after this
+    /// True when every file in the set would report [`crate::analysis::Sbe::Aligned`] after this
     /// plan is applied (a padded tail counts as aligned by construction).
     pub fully_fixed: bool,
 }
@@ -71,7 +71,7 @@ pub struct FixPlan {
 ///
 /// Refuses the set if any file is not CD audio, or its length is not stated in its header:
 /// repair has nothing to align for a file with no sector concept, the same case
-/// [`super::sbe`] reports as `NotApplicable`.
+/// [`crate::analysis::sbe`] reports as `NotApplicable`.
 pub fn plan_fix(
     files: &[AudioFile],
     direction: BoundaryDirection,

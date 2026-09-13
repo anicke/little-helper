@@ -5,12 +5,12 @@
 //!
 //! Tests needing `flac` skip when it is absent, the same convention `convert.rs` uses.
 
-use lh_core::analysis::{
-    BoundaryDirection, RepairEncode, TailPolicy, execute_fix, execute_single_boundary, plan_fix,
-};
 use lh_core::convert::{EncodeOpts, to_flac};
 use lh_core::format;
 use lh_core::model::AudioFile;
+use lh_core::repair::{
+    BoundaryDirection, RepairEncode, TailPolicy, execute_fix, execute_single_boundary, plan_fix,
+};
 use lh_core::tools::{Registry, Tool, ToolId};
 use std::path::{Path, PathBuf};
 
