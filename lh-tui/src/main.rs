@@ -43,9 +43,9 @@ use lh_core::scan;
 use lh_core::tag::{self, Tags};
 use lh_core::tools::{Registry, Tool, ToolId};
 use lh_core::torrent::{
-    CreateOpts, Created, FileStatus, Metainfo, Passkeys, Resolved, TorrentReport, Tracker,
-    TrackerList, Verdict, check_sizes, check_with_progress, create_with_progress, default_output,
-    resolve,
+    CreateOpts, Created, FileStatus, Metainfo, Passkeys, PreviewFile, Resolved, TorrentReport,
+    Tracker, TrackerList, Verdict, check_sizes, check_with_progress, create_with_progress,
+    default_output, preview, resolve,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -2664,6 +2664,19 @@ fn run_torrent_create_screen(
     let mut focus = CreateFocus::None;
     let mut pick_error: Option<String> = None;
 
+    // Walked once, up front: the tracker pick doesn't change what's on disk, so there is
+    // nothing to re-walk for as the user picks. Shares `create`'s own file-collection logic
+    // (`lh_core::torrent::preview`) so this can never show a list that `create` would then
+    // include or exclude differently.
+    let (preview_files, preview_excluded, preview_error): (
+        Vec<PreviewFile>,
+        usize,
+        Option<String>,
+    ) = match preview(source, args.include_all) {
+        Ok(p) => (p.files, p.excluded.len(), None),
+        Err(e) => (Vec::new(), 0, Some(format!("{e:#}"))),
+    };
+
     let mut stage = CreateStage::ChoosingTrackers;
     let mut started: Option<Started> = None;
     let mut chosen = Resolved::default();
@@ -2713,6 +2726,9 @@ fn run_torrent_create_screen(
                 &custom,
                 focus,
                 pick_error.as_deref(),
+                &preview_files,
+                preview_excluded,
+                preview_error.as_deref(),
                 &chosen,
                 private,
                 &source_tag,
@@ -2856,6 +2872,9 @@ fn draw_torrent_create(
     custom: &Field,
     focus: CreateFocus,
     pick_error: Option<&str>,
+    preview_files: &[PreviewFile],
+    preview_excluded: usize,
+    preview_error: Option<&str>,
     chosen: &Resolved,
     private: bool,
     source_tag: &Option<String>,
@@ -2896,8 +2915,20 @@ fn draw_torrent_create(
     );
 
     if matches!(stage, CreateStage::ChoosingTrackers) {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(chunks[1]);
         draw_tracker_picker(
-            frame, chunks[1], entries, picked, cursor, custom, focus, theme,
+            frame, cols[0], entries, picked, cursor, custom, focus, theme,
+        );
+        draw_file_preview(
+            frame,
+            cols[1],
+            preview_files,
+            preview_excluded,
+            preview_error,
+            theme,
         );
         let status = match pick_error {
             Some(e) => Line::styled(format!(" {e}"), theme.error),
@@ -3013,6 +3044,58 @@ fn draw_tracker_picker(
         ),
         rows[1],
     );
+}
+
+/// What the tracker picker sits next to: what `create` would actually put in the torrent,
+/// walked once up front (`preview`) since the tracker pick doesn't change it.
+fn draw_file_preview(
+    frame: &mut Frame,
+    area: Rect,
+    files: &[PreviewFile],
+    excluded: usize,
+    error: Option<&str>,
+    theme: &Theme,
+) {
+    if let Some(e) = error {
+        frame.render_widget(
+            Paragraph::new(Line::styled(format!(" {e}"), theme.error)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" files ")
+                    .border_style(theme.dim),
+            ),
+            area,
+        );
+        return;
+    }
+
+    let total: u64 = files.iter().map(|f| f.length).sum();
+    let excluded_note = if excluded > 0 {
+        format!(", {excluded} excluded")
+    } else {
+        String::new()
+    };
+    let title = format!(
+        " files: {} ({}{excluded_note}) ",
+        files.len(),
+        format_bytes(total)
+    );
+    let items: Vec<ListItem> = files
+        .iter()
+        .map(|f| {
+            ListItem::new(Line::from(vec![
+                Span::raw(f.path.clone()),
+                Span::styled(format!("  {}", format_bytes(f.length)), theme.dim),
+            ]))
+        })
+        .collect();
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(theme.dim),
+    );
+    frame.render_widget(list, area);
 }
 
 #[allow(clippy::too_many_arguments)]

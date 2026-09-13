@@ -573,6 +573,32 @@ confirmed by the status line reverting to "no trackers picked yet." `q` quit cle
 picker itself (immediately, nothing running yet) and from the progress screen after a run
 finished.
 
+**Follow-ups.**
+
+* **The header clock no longer runs while picking trackers.** `elapsed` reported
+  `start.elapsed()` from the moment the screen opened even during `ChoosingTrackers`, so
+  the time spent deciding which trackers to use counted toward the shown duration —
+  misleading, since nothing is being done with the payload yet. The header now shows a flat
+  `0.0s` for that stage, and `start` itself resets to `Instant::now()` at the point `a`/`Enter`
+  actually confirms the picks and calls `start_create`, so the clock the rest of the screen
+  shows counts only the work, same as every other screen's header.
+* **A file-preview panel sits beside the tracker list**, since the picker alone left the
+  right half of the screen empty. `lh_core::torrent::create` gains `preview()`, returning a
+  `Preview { files: Vec<PreviewFile>, excluded: Vec<(PathBuf, Skipped)> }` built from the same
+  private `collect`/`walk` the real create path uses — so the preview can never show a file
+  list that `create` would then include or exclude differently, the way a second,
+  independent walk could drift. `run_torrent_create_screen` calls it once, up front (the
+  tracker pick does not change what is on disk, so there is nothing to re-walk for as the
+  user picks); the panel shows each file's path and size, and the block title rolls up count,
+  total size, and how many were excluded as noise.
+
+**Real evidence.** `cargo build --workspace`, `cargo test --workspace` (229 tests, unchanged),
+`cargo clippy --all-targets` and `cargo fmt --check` all clean. Run for real inside `tmux`
+against the 3-file `payload/verified` fixture: the picker opened with the known-trackers list
+on the left and a `files: 3 (500 B)` panel on the right listing `d1t01.flac` (100 B),
+`d1t02.flac` (250 B) and `d1t03.flac` (150 B); `q` quit cleanly from the picker with the panel
+on screen.
+
 ## 11. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:

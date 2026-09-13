@@ -236,6 +236,48 @@ fn draft_file_count(draft: &Draft) -> usize {
     }
 }
 
+/// A file `preview` found, before anything is hashed.
+#[derive(Debug, Clone)]
+pub struct PreviewFile {
+    /// Path components relative to the torrent root, joined with `/`.
+    pub path: String,
+    pub length: u64,
+}
+
+/// What `preview` found: what `create` would include, and what it would leave out.
+#[derive(Debug, Clone, Default)]
+pub struct Preview {
+    pub files: Vec<PreviewFile>,
+    /// Never dropped silently, same as `Created::excluded`.
+    pub excluded: Vec<(PathBuf, Skipped)>,
+}
+
+/// What `create` would do with `source`, without reading file contents or writing
+/// anything. Shares `collect`'s walk so the preview can never show a file list that
+/// `create` itself would then include or exclude differently.
+pub fn preview(source: &Path, include_all: bool) -> Result<Preview> {
+    let name = torrent_name(source)?;
+    let meta = std::fs::metadata(source).map_err(|e| Error::io(source, e))?;
+    let mut excluded = Vec::new();
+    let files = if meta.is_file() {
+        vec![SourceFile {
+            path: vec![name],
+            disk: source.to_path_buf(),
+            length: meta.len(),
+        }]
+    } else {
+        collect(source, include_all, &mut excluded)?
+    };
+    let files = files
+        .into_iter()
+        .map(|f| PreviewFile {
+            path: f.path.join("/"),
+            length: f.length,
+        })
+        .collect();
+    Ok(Preview { files, excluded })
+}
+
 /// The torrent's `name`, which is the folder's own name — or the file's, for a single-file
 /// torrent.
 fn torrent_name(source: &Path) -> Result<String> {
