@@ -30,9 +30,10 @@ pub(crate) fn run_torrent_info(file: PathBuf, list_files: bool, theme: ThemeName
         }
     };
 
-    let terminal = ratatui::init();
-    let result = run_torrent_info_screen(terminal, &t, list_files, Theme::new(theme));
-    ratatui::restore();
+    let result = {
+        let mut terminal = TerminalGuard::new();
+        run_torrent_info_screen(&mut terminal, &t, list_files, Theme::new(theme))
+    };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -44,7 +45,7 @@ pub(crate) fn run_torrent_info(file: PathBuf, list_files: bool, theme: ThemeName
 }
 
 pub(crate) fn run_torrent_info_screen(
-    mut terminal: DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     t: &Metainfo,
     list_files: bool,
     theme: Theme,

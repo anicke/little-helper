@@ -10,7 +10,7 @@ use lh_core::torrent::{FileStatus, Metainfo, TorrentReport, Verdict, check, chec
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::PathBuf;
 
@@ -50,10 +50,17 @@ pub(crate) fn run_torrent_check(
         }
     };
 
-    let terminal = ratatui::init();
-    let result =
-        run_torrent_check_screen(terminal, meta, file, path.clone(), quick, Theme::new(theme));
-    ratatui::restore();
+    let result = {
+        let mut terminal = TerminalGuard::new();
+        run_torrent_check_screen(
+            &mut terminal,
+            meta,
+            file,
+            path.clone(),
+            quick,
+            Theme::new(theme),
+        )
+    };
 
     match result {
         Ok(Ok(report)) => {
@@ -75,7 +82,7 @@ pub(crate) fn run_torrent_check(
 }
 
 pub(crate) fn run_torrent_check_screen(
-    mut terminal: DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     meta: Metainfo,
     torrent_path: PathBuf,
     given: PathBuf,
@@ -341,14 +348,5 @@ pub(crate) fn draw_check_gauge(frame: &mut Frame, area: Rect, stage: &CheckStage
             Err(_) => (1.0, theme.error, "failed".to_string()),
         },
     };
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.dim),
-        )
-        .gauge_style(style)
-        .ratio(ratio)
-        .label(label);
-    frame.render_widget(gauge, area);
+    draw_gauge(frame, area, ratio, style, label, theme);
 }

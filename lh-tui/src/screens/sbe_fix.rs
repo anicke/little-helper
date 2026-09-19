@@ -16,7 +16,7 @@ use lh_core::tools::{Registry, Tool, ToolId};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::{Path, PathBuf};
 
@@ -152,10 +152,16 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
     };
 
     if args.dry_run {
-        let terminal = ratatui::init();
-        let result =
-            run_sbe_fix_plan_screen(terminal, &args.dir, &set.files, &plan, Theme::new(theme));
-        ratatui::restore();
+        let result = {
+            let mut terminal = TerminalGuard::new();
+            run_sbe_fix_plan_screen(
+                &mut terminal,
+                &args.dir,
+                &set.files,
+                &plan,
+                Theme::new(theme),
+            )
+        };
         return match result {
             Ok(()) if plan.fully_fixed => ExitCode::SUCCESS,
             Ok(()) => ExitCode::from(1),
@@ -205,18 +211,19 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
         }
     }
 
-    let terminal = ratatui::init();
-    let result = run_sbe_fix_execute_screen(
-        terminal,
-        &args.dir,
-        set.files.clone(),
-        plan.clone(),
-        dsts,
-        flac,
-        args.overwrite,
-        Theme::new(theme),
-    );
-    ratatui::restore();
+    let result = {
+        let mut terminal = TerminalGuard::new();
+        run_sbe_fix_execute_screen(
+            &mut terminal,
+            &args.dir,
+            set.files.clone(),
+            plan.clone(),
+            dsts,
+            flac,
+            args.overwrite,
+            Theme::new(theme),
+        )
+    };
 
     match result {
         Ok(Ok(fixed)) => {
@@ -259,7 +266,7 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
 }
 
 pub(crate) fn run_sbe_fix_plan_screen(
-    mut terminal: DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     dir: &Path,
     files: &[AudioFile],
     plan: &FixPlan,
@@ -302,7 +309,7 @@ pub(crate) fn run_sbe_fix_plan_screen(
 /// waits on), so waiting would just mean waiting for work that can't be told to stop early.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sbe_fix_execute_screen(
-    mut terminal: DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     dir: &Path,
     files: Vec<AudioFile>,
     plan: FixPlan,
@@ -540,14 +547,5 @@ pub(crate) fn draw_fix_gauge(
             Err(e) => (1.0, theme.error, format!("failed: {e:#}")),
         },
     };
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.dim),
-        )
-        .gauge_style(style)
-        .ratio(ratio)
-        .label(label);
-    frame.render_widget(gauge, area);
+    draw_gauge(frame, area, ratio, style, label, theme);
 }

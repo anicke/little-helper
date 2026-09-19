@@ -13,19 +13,23 @@
 //! visible sub-progress — the queue's own `Started`/`Finished` events are enough to drive
 //! the table and the overall gauge.
 
+mod batch;
 mod common;
 mod fields;
 mod screens;
+mod terminal;
 mod theme;
 
 use std::process::ExitCode;
 
+use batch::*;
 use clap::Parser;
 use common::*;
 use fields::*;
 use lh_cli::{Cli, Command, SbeSub, TorrentCommand};
 use lh_core::checksum::ChecksumKind;
 use screens::*;
+use terminal::*;
 use theme::*;
 
 /// `lh-tui`'s own top-level args: the same subcommands `lh_cli::Cli` parses, plus a

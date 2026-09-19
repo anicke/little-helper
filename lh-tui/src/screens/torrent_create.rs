@@ -14,7 +14,7 @@ use lh_core::torrent::{
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::Path;
 
@@ -107,17 +107,18 @@ pub(crate) fn run_torrent_create(args: TorrentCreateArgs, theme: ThemeName) -> E
         );
     }
 
-    let terminal = ratatui::init();
-    let result = run_torrent_create_screen(
-        terminal,
-        &source,
-        &dst,
-        &args,
-        &list,
-        &keys,
-        Theme::new(theme),
-    );
-    ratatui::restore();
+    let result = {
+        let mut terminal = TerminalGuard::new();
+        run_torrent_create_screen(
+            &mut terminal,
+            &source,
+            &dst,
+            &args,
+            &list,
+            &keys,
+            Theme::new(theme),
+        )
+    };
 
     match result {
         Ok(Ok(made)) => {
@@ -185,7 +186,7 @@ pub(crate) fn start_create(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_torrent_create_screen(
-    mut terminal: DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     source: &Path,
     dst: &Path,
     args: &TorrentCreateArgs,
@@ -751,14 +752,5 @@ pub(crate) fn draw_create_gauge(
             Err(_) => (1.0, theme.error, "failed".to_string()),
         },
     };
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.dim),
-        )
-        .gauge_style(style)
-        .ratio(ratio)
-        .label(label);
-    frame.render_widget(gauge, area);
+    draw_gauge(frame, area, ratio, style, label, theme);
 }

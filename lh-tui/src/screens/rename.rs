@@ -3,10 +3,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use crate::*;
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, KeyCode, KeyEventKind,
-    KeyModifiers,
-};
+use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lh_cli::RenameArgs;
 use lh_core::etree::ShowDate;
 use lh_core::etree::ShowName;
@@ -16,7 +13,7 @@ use lh_core::scan;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::{Path, PathBuf};
 
@@ -83,20 +80,19 @@ pub(crate) fn run_rename(args: RenameArgs, theme: ThemeName) -> ExitCode {
 
     let files: Vec<PathBuf> = set.files.iter().map(|f| f.path.clone()).collect();
 
-    let terminal = ratatui::init();
-    let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste);
-    let result = run_rename_screen(
-        terminal,
-        &args.dir,
-        files,
-        band,
-        date,
-        args.short_year,
-        disc,
-        Theme::new(theme),
-    );
-    let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
-    ratatui::restore();
+    let result = {
+        let mut terminal = TerminalGuard::with_paste();
+        run_rename_screen(
+            &mut terminal,
+            &args.dir,
+            files,
+            band,
+            date,
+            args.short_year,
+            disc,
+            Theme::new(theme),
+        )
+    };
 
     match result {
         Ok(ok) => {
@@ -147,7 +143,7 @@ pub(crate) fn current_spec(
 /// call.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_rename_screen(
-    mut terminal: DefaultTerminal,
+    terminal: &mut DefaultTerminal,
     dir: &Path,
     files: Vec<PathBuf>,
     band: String,
@@ -608,14 +604,5 @@ pub(crate) fn draw_rename_gauge(
             (1.0, style, label)
         }
     };
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.dim),
-        )
-        .gauge_style(style)
-        .ratio(ratio)
-        .label(label);
-    frame.render_widget(gauge, area);
+    draw_gauge(frame, area, ratio, style, label, theme);
 }
