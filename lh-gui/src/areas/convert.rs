@@ -13,9 +13,12 @@ pub(crate) fn convert_panel(app: &App) -> Element<'_, Message> {
         .on_toggle(Message::ConvertOverwriteToggled);
     let run =
         button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
-    let cancel = button("Cancel").on_press(Message::CancelPressed);
+    let cancel = button("Cancel")
+        .on_press(Message::CancelPressed)
+        .style(button::secondary);
 
     row![text("Direction:"), direction, overwrite, run, cancel]
         .spacing(8)
+        .align_y(iced::Alignment::Center)
         .into()
 }

@@ -1,6 +1,6 @@
 use crate::*;
 use iced::widget::{Column, button, checkbox, column, container, row, scrollable, table, text};
-use iced::{Element, Length};
+use iced::{Element, Length, Padding};
 use lh_core::analysis::{self, Sbe};
 use lh_core::display;
 use lh_core::job::JobId;
@@ -18,35 +18,47 @@ pub(crate) fn rail(app: &App) -> Element<'_, Message> {
             Some("") => {
                 col = col.push(container(text("")).height(Length::Fixed(8.0)));
             }
-            Some(h) => col = col.push(text(*h).size(12)),
+            Some(h) => {
+                col = col.push(
+                    container(text(*h).size(12).style(style::muted)).padding(Padding {
+                        top: 8.0,
+                        bottom: 2.0,
+                        left: 10.0,
+                        right: 10.0,
+                    }),
+                )
+            }
             None => {}
         }
         col = col.push(rail_row(label, *area, app.area == *area));
     }
-    scrollable(col).into()
+    // A thin bar: at the minimum window height the rail just fits (`docs/gui-shell.md` §10
+    // Q7), and a full-width bar would eat into the rows' own width whenever it does not.
+    scrollable(col)
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new().width(4).scroller_width(4),
+        ))
+        .into()
 }
 
 /// One rail row. The selected row is styled, not merely remembered
-/// (`docs/gui-shell.md` §4) — `button::secondary` for the current area, `button::text`
-/// (no visible chrome) for every other one.
+/// (`docs/gui-shell.md` §4) — [`style::choice`] gives the current area the theme's accent
+/// and every other row no chrome until hovered.
 pub(crate) fn rail_row(label: &str, area: Area, selected: bool) -> Element<'_, Message> {
     button(text(label))
         .width(Length::Fill)
+        .padding([4, 10])
         .on_press(Message::AreaSelected(area))
-        .style(move |theme, status| {
-            if selected {
-                button::secondary(theme, status)
-            } else {
-                button::text(theme, status)
-            }
-        })
+        .style(style::choice(selected))
         .into()
 }
 
 pub(crate) fn run_cancel_row(app: &App) -> Element<'_, Message> {
     let run =
         button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
-    let cancel = button("Cancel").on_press(Message::CancelPressed);
+    let cancel = button("Cancel")
+        .on_press(Message::CancelPressed)
+        .style(button::secondary);
     row![run, cancel].spacing(8).into()
 }
 
@@ -63,34 +75,41 @@ pub(crate) fn dock(app: &App) -> Element<'_, Message> {
 
     let jobs_tab = dock_tab_button("Jobs", DockTab::Jobs, app.dock_tab == DockTab::Jobs);
     let log_tab = dock_tab_button("Log", DockTab::Log, app.dock_tab == DockTab::Log);
+    // Red only while it would actually stop something — an always-red Cancel over an idle
+    // queue reads as the window's main action.
+    let running = done < total;
+    let cancel = button("Cancel")
+        .on_press(Message::CancelPressed)
+        .style(if running {
+            button::danger
+        } else {
+            button::secondary
+        });
     let header = row![
         text(format!("Jobs: {done} of {total} done")),
         jobs_tab,
         log_tab,
-        button("Cancel").on_press(Message::CancelPressed),
+        cancel,
     ]
-    .spacing(8);
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
 
     let dock_body = match app.dock_tab {
         DockTab::Jobs => job_queue_panel(&app.jobs),
         DockTab::Log => log_panel(&app.log),
     };
 
-    container(column![header, dock_body].spacing(4).padding(8))
+    container(column![header, dock_body].spacing(8).padding([8, 12]))
+        .width(Length::Fill)
         .height(Length::FillPortion(2))
+        .style(style::surface)
         .into()
 }
 
 pub(crate) fn dock_tab_button(label: &str, tab: DockTab, selected: bool) -> Element<'_, Message> {
     button(text(label))
         .on_press(Message::DockTabSelected(tab))
-        .style(move |theme, status| {
-            if selected {
-                button::secondary(theme, status)
-            } else {
-                button::text(theme, status)
-            }
-        })
+        .style(style::choice(selected))
         .into()
 }
 
@@ -105,7 +124,9 @@ pub(crate) const SELECT_COLUMN: Length = Length::Fixed(24.0);
 /// makes room for the encoder vendor string TLH's `lh info` has always had nowhere to put.
 pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
     let Some(set) = app.working_set.as_ref() else {
-        return text("Drop a folder here, or use Browse / Scan.").into();
+        return text("Drop a folder here, or use Browse / Scan.")
+            .style(style::muted)
+            .into();
     };
 
     // Select-all reflects the current selection rather than being remembered separately
@@ -124,11 +145,15 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
             },
         )
         .width(SELECT_COLUMN),
-        table::column(text("Name"), |file: AudioFile| text(file.file_name()))
-            .width(Length::FillPortion(4)),
-        table::column(text("Format"), |file: AudioFile| text(file.format.name()))
-            .width(Length::FillPortion(1)),
-        table::column(text("Rate/Bits/Ch"), |file: AudioFile| {
+        table::column(column_header("Name"), |file: AudioFile| {
+            text(file.file_name())
+        })
+        .width(Length::FillPortion(4)),
+        table::column(column_header("Format"), |file: AudioFile| {
+            text(file.format.name())
+        })
+        .width(Length::FillPortion(1)),
+        table::column(column_header("Rate/Bits/Ch"), |file: AudioFile| {
             let info = &file.stream_info;
             text(format!(
                 "{} Hz / {}-bit / {}ch",
@@ -136,7 +161,7 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
             ))
         })
         .width(Length::FillPortion(2)),
-        table::column(text("Duration"), |file: AudioFile| {
+        table::column(column_header("Duration"), |file: AudioFile| {
             text(
                 file.stream_info
                     .duration_secs()
@@ -145,15 +170,15 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
             )
         })
         .width(Length::FillPortion(1)),
-        table::column(text("Encoder"), |file: AudioFile| {
+        table::column(column_header("Encoder"), |file: AudioFile| {
             text(file.encoder.clone().unwrap_or_else(|| "—".to_string()))
         })
         .width(Length::FillPortion(3)),
-        table::column(text("SBE"), |file: AudioFile| {
+        table::column(column_header("SBE"), |file: AudioFile| {
             text(sbe_label(&analysis::sbe(&file.stream_info)))
         })
         .width(Length::FillPortion(2)),
-        table::column(text("Status"), |file: AudioFile| {
+        table::column(column_header("Status"), |file: AudioFile| {
             let status = app
                 .latest_job_by_path
                 .get(&file.path)
@@ -165,14 +190,25 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
         .width(Length::FillPortion(3)),
     ];
 
-    let mut content = Column::new()
-        .spacing(4)
-        .push(table::table(columns, set.files.iter().cloned()));
+    let mut content = Column::new().spacing(4).push(
+        table::table(columns, set.files.iter().cloned())
+            // Row rules only: `separator_x` is the one drawn *between columns*.
+            .separator_x(0)
+            .padding_y(6),
+    );
     for (path, reason) in &set.skipped {
         content = content.push(text(format!("{} — skipped: {reason}", path.display())));
     }
 
-    scrollable(content).height(Length::FillPortion(3)).into()
+    container(scrollable(content).height(Length::Fill))
+        .padding(4)
+        .height(Length::FillPortion(3))
+        .style(style::card)
+        .into()
+}
+
+fn column_header(label: &str) -> iced::widget::Text<'_> {
+    text(label).size(14).style(style::muted)
 }
 
 /// The log/audit pane — `Provenance::render()` text from every finished job that produced

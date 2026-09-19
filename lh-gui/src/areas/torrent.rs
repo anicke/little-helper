@@ -54,7 +54,9 @@ pub(crate) fn torrent_check_panel(app: &App) -> Element<'_, Message> {
         Some(p) => p.display().to_string(),
         None => "No .torrent chosen — Browse or drop one on the window.".to_string(),
     };
-    let browse = button("Browse .torrent...").on_press(Message::TorrentCheckBrowsePressed);
+    let browse = button("Browse .torrent...")
+        .on_press(Message::TorrentCheckBrowsePressed)
+        .style(button::secondary);
 
     let info: Element<'_, Message> = match &app.torrent_check_meta {
         Some(meta) => text(format!(
@@ -71,8 +73,9 @@ pub(crate) fn torrent_check_panel(app: &App) -> Element<'_, Message> {
 
     let against = text_input("Folder to check against", &app.torrent_check_against)
         .on_input(Message::TorrentCheckAgainstChanged);
-    let against_browse =
-        button("Browse folder...").on_press(Message::TorrentCheckAgainstBrowsePressed);
+    let against_browse = button("Browse folder...")
+        .on_press(Message::TorrentCheckAgainstBrowsePressed)
+        .style(button::secondary);
     let quick = checkbox(app.torrent_check_quick)
         .label("Quick (sizes only)")
         .on_toggle(Message::TorrentCheckQuickToggled);

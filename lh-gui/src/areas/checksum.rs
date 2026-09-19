@@ -14,10 +14,14 @@ pub(crate) fn checksum_create_panel(app: &App) -> Element<'_, Message> {
     .spacing(4);
     let output = text_input("Output file (.ffp/.md5/.st5)", &app.checksum_output)
         .on_input(Message::ChecksumOutputChanged);
-    let browse = button("Browse...").on_press(Message::ChecksumOutputBrowsePressed);
+    let browse = button("Browse...")
+        .on_press(Message::ChecksumOutputBrowsePressed)
+        .style(button::secondary);
     let run =
         button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
-    let cancel = button("Cancel").on_press(Message::CancelPressed);
+    let cancel = button("Cancel")
+        .on_press(Message::CancelPressed)
+        .style(button::secondary);
 
     column![
         row![text("Kind:"), kinds].spacing(8),
@@ -31,13 +35,7 @@ pub(crate) fn checksum_create_panel(app: &App) -> Element<'_, Message> {
 pub(crate) fn kind_button(kind: ChecksumKind, selected: bool) -> Element<'static, Message> {
     button(text(kind.label()))
         .on_press(Message::ChecksumKindSelected(kind))
-        .style(move |theme, status| {
-            if selected {
-                button::secondary(theme, status)
-            } else {
-                button::text(theme, status)
-            }
-        })
+        .style(style::choice(selected))
         .into()
 }
 
@@ -52,7 +50,9 @@ pub(crate) fn checksum_check_panel(app: &App) -> Element<'_, Message> {
             "No checksum file chosen — Browse or drop a .ffp/.md5/.st5 on the window.".to_string()
         }
     };
-    let browse = button("Browse...").on_press(Message::ChecksumCheckBrowsePressed);
+    let browse = button("Browse...")
+        .on_press(Message::ChecksumCheckBrowsePressed)
+        .style(button::secondary);
 
     let info: Element<'_, Message> = match (&app.checksum_check_kind, &app.checksum_check_file) {
         (Some(kind), Some(file)) => text(format!(
@@ -69,7 +69,9 @@ pub(crate) fn checksum_check_panel(app: &App) -> Element<'_, Message> {
             .is_some()
             .then_some(Message::ChecksumCheckPressed),
     );
-    let cancel = button("Cancel").on_press(Message::CancelPressed);
+    let cancel = button("Cancel")
+        .on_press(Message::CancelPressed)
+        .style(button::secondary);
 
     column![
         text("Check checksum file"),

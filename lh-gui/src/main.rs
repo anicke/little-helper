@@ -20,13 +20,14 @@
 mod app;
 mod areas;
 mod job;
+mod style;
 mod widgets;
 
 #[cfg(test)]
 mod tests;
 
 use areas::*;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, rule, text, text_input};
 use iced::{Element, Length, Subscription, Task};
 use job::JobOutcome;
 use lh_core::checksum::{ChecksumFile, ChecksumKind};
@@ -257,6 +258,9 @@ struct App {
     /// table). Replaced wholesale on each `JobUpdate::Finished` that carries one; not
     /// cleared between runs otherwise, same convention as `jobs` and `log`.
     torrent_check_rows: Vec<job::FileRow>,
+    /// The desktop's light/dark preference, which picks the theme (`style::theme_for`).
+    /// Asked for once at boot and then kept current by `iced::system::theme_changes`.
+    theme_mode: iced::theme::Mode,
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +301,7 @@ enum Message {
     TorrentCheckAgainstPicked(Option<PathBuf>),
     TorrentCheckQuickToggled(bool),
     TorrentCheckPressed,
+    ThemeModeChanged(iced::theme::Mode),
 }
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
@@ -448,6 +453,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TorrentCheckAgainstPicked(None) => {}
         Message::TorrentCheckQuickToggled(v) => app.torrent_check_quick = v,
         Message::TorrentCheckPressed => app.run_torrent_check(),
+        Message::ThemeModeChanged(mode) => app.theme_mode = mode,
     }
     Task::none()
 }
@@ -461,12 +467,16 @@ fn view(app: &App) -> Element<'_, Message> {
         text_input("Folder to scan...", &app.path_input)
             .on_input(Message::PathInputChanged)
             .on_submit(Message::ScanPressed),
-        button("Browse...").on_press(Message::BrowsePressed),
+        button("Browse...")
+            .on_press(Message::BrowsePressed)
+            .style(button::secondary),
         button("Scan").on_press(Message::ScanPressed),
     ]
     .spacing(8);
 
-    let error: Element<'_, Message> = text(app.error.as_deref().unwrap_or("")).into();
+    let error: Element<'_, Message> = text(app.error.as_deref().unwrap_or(""))
+        .style(text::danger)
+        .into();
 
     let content = column![path_bar, error, area_pane(app)]
         .spacing(12)
@@ -474,12 +484,17 @@ fn view(app: &App) -> Element<'_, Message> {
         .height(Length::Fill);
 
     let body = row![
-        container(rail(app)).width(Length::Fixed(140.0)).padding(8),
+        container(rail(app))
+            .width(Length::Fixed(140.0))
+            .height(Length::Fill)
+            .padding(8)
+            .style(style::surface),
+        rule::vertical(1),
         container(content).width(Length::Fill),
     ]
     .height(Length::FillPortion(3));
 
-    container(column![body, dock(app)]).into()
+    container(column![body, rule::horizontal(1), dock(app)]).into()
 }
 
 /// One area's controls, matching `Area` (`docs/gui-shell.md` §5). Working-set areas
@@ -546,6 +561,7 @@ fn subscription(app: &App) -> Subscription<Message> {
             }
             _ => None,
         }),
+        iced::system::theme_changes().map(Message::ThemeModeChanged),
     ])
 }
 
@@ -553,6 +569,7 @@ fn main() -> iced::Result {
     // Rail + table + dock has a floor below which it stops being usable
     // (`docs/gui-shell.md` §5) — TLH's own window is 634×407 and is not resizable smaller.
     iced::application(App::boot, update, view)
+        .theme(|app: &App| style::theme_for(app.theme_mode))
         .subscription(subscription)
         .title("Little Helper")
         .window(iced::window::Settings {

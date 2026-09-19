@@ -57,8 +57,9 @@ impl App {
                 torrent_check_against: ".".to_string(),
                 torrent_check_quick: false,
                 torrent_check_rows: Vec::new(),
+                theme_mode: iced::theme::Mode::None,
             },
-            Task::none(),
+            iced::system::theme().map(Message::ThemeModeChanged),
         )
     }
 
