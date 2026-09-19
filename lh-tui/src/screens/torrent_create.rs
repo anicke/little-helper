@@ -24,7 +24,7 @@ use std::path::Path;
 // piece-hashing pass, not a batch of independent files (`docs/tui.md` §4) — so there is one
 // job on a queue of one, and one row of progress to show, not a table. Its progress
 // callback returns a `bool` the same way `lh-cli`'s own `cmd_torrent_create` uses it
-// (`lh-cli/src/lib.rs`): `false` stops the hash within one piece, so `q`/`Esc`/`Ctrl-C`
+// (`lh-cli/src/commands/torrent.rs`): `false` stops the hash within one piece, so `q`/`Esc`/`Ctrl-C`
 // here waits for the job's own `Done` rather than breaking the draw loop immediately the
 // way verify/checksum do — the wait is bounded by a single piece's hash time, and waiting
 // for it means the screen reports what actually happened (cancelled vs. finished) instead

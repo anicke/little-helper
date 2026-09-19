@@ -40,7 +40,7 @@ pub(crate) struct ConvertRow {
     status: ConvertStatus,
 }
 
-/// Mirrors `lh-cli`'s own (private) `ConvertOutcome` (`lh-cli/src/lib.rs`) — small enough
+/// Mirrors `lh-cli`'s own (private) `ConvertOutcome` (`lh-cli/src/commands/convert.rs`) — small enough
 /// that duplicating it here beats exporting an internal type just for this screen, the
 /// same call every other screen's own `Status` enum already makes.
 pub(crate) enum ConvertOutcome {
