@@ -1,0 +1,174 @@
+use crate::*;
+use anyhow::{Context, Result};
+use lh_core::analysis::{Sbe, sbe};
+use lh_core::convert::{EncodeOpts, destination};
+use lh_core::model::{AudioFile, AudioFormat};
+use lh_core::repair::{
+    BoundaryDirection, FixPlan, RepairEncode, TailPolicy, execute_fix, plan_fix,
+};
+use lh_core::scan;
+use lh_core::tools::{Registry, ToolId};
+use std::path::Path;
+
+pub(crate) fn cmd_sbe(p: &Paths) -> Result<bool> {
+    let (files, mut ok) = collect(p)?;
+    let results = run_batch(&files, |f, _| sbe(&f.stream_info));
+    for (f, result) in &results {
+        match result {
+            Some(Sbe::Aligned) => println!("ALIGNED   {}", f.file_name()),
+            Some(Sbe::Misaligned { remainder_frames }) => {
+                ok = false;
+                println!("SBE       {} (+{remainder_frames} frames)", f.file_name());
+            }
+            Some(Sbe::NotApplicable { reason }) => {
+                println!("N/A       {} ({reason})", f.file_name())
+            }
+            None => {
+                ok = false;
+                println!("CANCELLED {}", f.file_name());
+            }
+        }
+    }
+    Ok(ok)
+}
+
+/// Plan a sector-boundary repair for one directory's files, in filename order, and — unless
+/// `--dry-run` — execute it: every boundary shift chained left to right, and the tail
+/// padded with silence when `--pad-tail` is given (docs/sbe-repair.md R1–R3).
+pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
+    if !args.dir.is_dir() {
+        anyhow::bail!("{} is not a directory", args.dir.display());
+    }
+    let set =
+        scan::scan(&args.dir, false).with_context(|| format!("scanning {}", args.dir.display()))?;
+    for (skipped, why) in &set.skipped {
+        eprintln!("skipped {}: {why}", skipped.display());
+    }
+    if set.files.is_empty() {
+        anyhow::bail!("no audio files found in {}", args.dir.display());
+    }
+
+    let direction = match args.direction {
+        Direction::Backward => BoundaryDirection::Backward,
+        Direction::Forward => BoundaryDirection::Forward,
+        Direction::Nearest => BoundaryDirection::Nearest,
+    };
+    let tail = if args.pad_tail {
+        TailPolicy::Pad
+    } else {
+        TailPolicy::Report
+    };
+
+    let plan = plan_fix(&set.files, direction, tail)
+        .with_context(|| format!("planning a fix for {}", args.dir.display()))?;
+
+    if args.dry_run {
+        print_fix_plan(&args.dir, &set.files, &plan, args.pad_tail);
+        return Ok(plan.fully_fixed);
+    }
+
+    let out_dir = args.output.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "sbe fix needs -o/--output to execute — it never writes over the originals \
+             (Principle 1)"
+        )
+    })?;
+    for f in &set.files {
+        if f.format != AudioFormat::Flac {
+            anyhow::bail!(
+                "sbe fix can only execute against FLAC ({} is {}); other formats have no \
+                 repair path yet",
+                f.file_name(),
+                f.format
+            );
+        }
+    }
+
+    let flac = Registry::discover_one(ToolId::Flac)
+        .require(ToolId::Flac)
+        .cloned()?;
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: args.overwrite,
+    };
+
+    let dsts = set
+        .files
+        .iter()
+        .map(|f| {
+            destination(&f.path, "flac", Some(out_dir))
+                .map_err(|_| anyhow::anyhow!("{} has no file name", f.path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let fixed = execute_fix(&set.files, &plan, &dsts, &encode)
+        .with_context(|| format!("repairing {}", args.dir.display()))?;
+
+    for (f, fixed) in set.files.iter().zip(&fixed) {
+        println!(
+            "FIXED     {} -> {}   audio md5 {}",
+            f.file_name(),
+            fixed.path.display(),
+            hex::encode(fixed.audio_md5)
+        );
+    }
+    if !plan.fully_fixed {
+        println!(
+            "{}   still misaligned — rerun with --pad-tail to close it with silence",
+            set.files
+                .last()
+                .expect("checked non-empty above")
+                .file_name()
+        );
+    }
+
+    Ok(plan.fully_fixed)
+}
+
+fn print_fix_plan(dir: &Path, files: &[AudioFile], plan: &FixPlan, pad_tail: bool) {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dir.display().to_string());
+    println!("{name}");
+
+    let file_name = |i: usize| files[i].file_name();
+    for b in &plan.boundaries {
+        let a = file_name(b.index);
+        let bn = file_name(b.index + 1);
+        match b.shifted_frames.cmp(&0) {
+            std::cmp::Ordering::Equal => println!("  {a} → {bn}   already aligned"),
+            std::cmp::Ordering::Greater => println!(
+                "  {a} → {bn}   shift {n} frames backward   ({a} was +{n} past a sector)",
+                n = b.shifted_frames
+            ),
+            std::cmp::Ordering::Less => println!(
+                "  {a} → {bn}   shift {n} frames forward   ({a} borrows {n} frames from {bn})",
+                n = -b.shifted_frames
+            ),
+        }
+    }
+
+    let tail_name = file_name(files.len() - 1);
+    match plan.tail_padding_frames {
+        Some(pad) => println!(
+            "  {tail_name}        last file, would be padded with {pad} frames of silence \
+             (not written — planning only)"
+        ),
+        None if plan.fully_fixed => println!("  {tail_name}        last file, already aligned"),
+        None => println!(
+            "  {tail_name}        last file, still misaligned once every other boundary is \
+             fixed — rerun with --pad-tail to close it with silence"
+        ),
+    }
+
+    if plan.fully_fixed {
+        println!("plan only, nothing written — every file would end up aligned");
+    } else if pad_tail {
+        println!("plan only, nothing written");
+    } else {
+        println!("plan only, nothing written — pass --pad-tail to fully align the set");
+    }
+}
