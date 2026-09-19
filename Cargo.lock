@@ -1797,6 +1797,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "iced_fonts"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "214cff7c8499e328774216690e58e315a1a5f8f6fdd1035aed6298e62ffc4c1d"
+dependencies = [
+ "iced_core",
+ "iced_fonts_macros",
+ "iced_widget",
+]
+
+[[package]]
+name = "iced_fonts_macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef5125e110cb19cd1910a28298661c98c5d9ab02eef43594968352940e8752e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "ttf-parser",
+]
+
+[[package]]
 name = "iced_futures"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2165,6 +2188,7 @@ dependencies = [
  "crossbeam-channel",
  "hex",
  "iced",
+ "iced_fonts",
  "lh-core",
  "rfd",
  "tempfile",

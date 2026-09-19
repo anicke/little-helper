@@ -32,6 +32,7 @@ crossbeam-channel = "0.5"
 rayon = "1"
 ctrlc = "3"
 iced = "0.14"
+iced_fonts = { version = "0.3", default-features = false, features = ["lucide"] }
 rfd = "0.17"
 ratatui = "0.30"
 crossterm = "0.29"

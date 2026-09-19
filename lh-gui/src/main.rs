@@ -467,10 +467,10 @@ fn view(app: &App) -> Element<'_, Message> {
         text_input("Folder to scan...", &app.path_input)
             .on_input(Message::PathInputChanged)
             .on_submit(Message::ScanPressed),
-        button("Browse...")
+        button(labelled(iced_fonts::lucide::folder(), "Browse..."))
             .on_press(Message::BrowsePressed)
             .style(button::secondary),
-        button("Scan").on_press(Message::ScanPressed),
+        button(labelled(iced_fonts::lucide::scan_search(), "Scan")).on_press(Message::ScanPressed),
     ]
     .spacing(8);
 
@@ -568,7 +568,12 @@ fn subscription(app: &App) -> Subscription<Message> {
 fn main() -> iced::Result {
     // Rail + table + dock has a floor below which it stops being usable
     // (`docs/gui-shell.md` §5) — TLH's own window is 634×407 and is not resizable smaller.
-    iced::application(App::boot, update, view)
+    style::FONTS
+        .into_iter()
+        .fold(iced::application(App::boot, update, view), |app, font| {
+            app.font(font)
+        })
+        .default_font(style::INTER)
         .theme(|app: &App| style::theme_for(app.theme_mode))
         .subscription(subscription)
         .title("Little Helper")

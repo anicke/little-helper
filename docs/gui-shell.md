@@ -414,8 +414,11 @@ signature has been read.
   §3's "v0.2" column stays v0.2; a rail with disabled rows advertising features that do not
   exist is worse than a rail without them.
 * **A Preferences area.** `lh-core::config` exists but nothing writes settings; §10 Q1.
-* **Icons.** Iced bundles no icon font, and the rail is legible as text. Not a design
-  preference — an unevaluated dependency.
+* ~~**Icons.**~~ Since evaluated and added: `iced_fonts` 0.3 (MIT, targets iced 0.14) with
+  only its `lucide` feature, so one icon set is compiled in rather than all of them. The
+  same change bundles Inter (SIL OFL 1.1) as the default font; its licence,
+  `lh-gui/fonts/Inter-OFL.txt`, has to ship with the binary — an M4 packaging item, next to
+  the GPL sidecar notice below. See `lh-gui/src/style.rs`.
 * **Persisting the working set, the selection, or the current area across restarts.**
 * **`.cfp` and `.sfv`** (§0), `Test wav files for MPEG`, `Strip audio file header`.
 * **M4 packaging**, including whether About is where the GPL sidecar notice actually

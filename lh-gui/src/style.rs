@@ -2,10 +2,32 @@
 //! the container, button and text styles the views share. Every colour is read from the
 //! theme's extended palette rather than written as a literal, so a style never needs a
 //! second definition for the other theme.
+//!
+//! Also the bundled fonts: Inter for all text, so the window reads the same on every
+//! desktop instead of inheriting whatever sans the system resolves, and Lucide (via
+//! `iced_fonts`) for icons. Inter is SIL OFL 1.1 — `fonts/Inter-OFL.txt` has to ship
+//! alongside the binary (M4 packaging); Lucide is ISC and compiled in by `iced_fonts`.
 
+use iced::font::Weight;
 use iced::theme::Mode;
 use iced::widget::{button, container, text};
-use iced::{Background, Border, Theme};
+use iced::{Background, Border, Font, Theme};
+
+/// Every font the app loads at startup, in the form `iced::application(..).font()` takes.
+pub(crate) const FONTS: [&[u8]; 3] = [
+    include_bytes!("../fonts/Inter-Regular.ttf"),
+    include_bytes!("../fonts/Inter-SemiBold.ttf"),
+    iced_fonts::LUCIDE_FONT_BYTES,
+];
+
+/// The default font for all text.
+pub(crate) const INTER: Font = Font::with_name("Inter");
+
+/// Headings and labels: rail group headers, table column headers.
+pub(crate) const INTER_SEMIBOLD: Font = Font {
+    weight: Weight::Semibold,
+    ..INTER
+};
 
 /// Tokyo Night Storm on a dark desktop, Catppuccin Latte otherwise — including
 /// `Mode::None`, which is what a desktop that states no preference reports. Both were

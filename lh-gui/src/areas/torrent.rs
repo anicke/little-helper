@@ -1,6 +1,7 @@
 use crate::*;
 use iced::widget::{Column, button, checkbox, column, row, scrollable, text, text_input};
 use iced::{Element, Length};
+use iced_fonts::lucide;
 use lh_core::display;
 
 /// `docs/torrent-creation.md` C5: folder (`App::working_root`, already scanned above) →
@@ -29,7 +30,7 @@ pub(crate) fn torrent_create_panel(app: &App) -> Element<'_, Message> {
     let overwrite = checkbox(app.torrent_overwrite)
         .label("Overwrite existing .torrent")
         .on_toggle(Message::TorrentOverwriteToggled);
-    let create = button("Create torrent").on_press_maybe(
+    let create = button(labelled(lucide::magnet(), "Create torrent")).on_press_maybe(
         app.working_root
             .is_some()
             .then_some(Message::TorrentCreatePressed),
@@ -54,7 +55,7 @@ pub(crate) fn torrent_check_panel(app: &App) -> Element<'_, Message> {
         Some(p) => p.display().to_string(),
         None => "No .torrent chosen — Browse or drop one on the window.".to_string(),
     };
-    let browse = button("Browse .torrent...")
+    let browse = button(labelled(lucide::folder(), "Browse .torrent..."))
         .on_press(Message::TorrentCheckBrowsePressed)
         .style(button::secondary);
 
@@ -73,13 +74,13 @@ pub(crate) fn torrent_check_panel(app: &App) -> Element<'_, Message> {
 
     let against = text_input("Folder to check against", &app.torrent_check_against)
         .on_input(Message::TorrentCheckAgainstChanged);
-    let against_browse = button("Browse folder...")
+    let against_browse = button(labelled(lucide::folder(), "Browse folder..."))
         .on_press(Message::TorrentCheckAgainstBrowsePressed)
         .style(button::secondary);
     let quick = checkbox(app.torrent_check_quick)
         .label("Quick (sizes only)")
         .on_toggle(Message::TorrentCheckQuickToggled);
-    let run = button("Check").on_press_maybe(
+    let run = button(labelled(lucide::file_search(), "Check")).on_press_maybe(
         app.torrent_check_path
             .is_some()
             .then_some(Message::TorrentCheckPressed),

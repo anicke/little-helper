@@ -1,6 +1,7 @@
 use crate::*;
 use iced::Element;
 use iced::widget::{button, column, row, text, text_input};
+use iced_fonts::lucide;
 use lh_core::checksum::ChecksumKind;
 
 /// Checksum → Create (`docs/gui-shell.md` §6, S3): the digest-per-file computation
@@ -14,12 +15,12 @@ pub(crate) fn checksum_create_panel(app: &App) -> Element<'_, Message> {
     .spacing(4);
     let output = text_input("Output file (.ffp/.md5/.st5)", &app.checksum_output)
         .on_input(Message::ChecksumOutputChanged);
-    let browse = button("Browse...")
+    let browse = button(labelled(lucide::folder(), "Browse..."))
         .on_press(Message::ChecksumOutputBrowsePressed)
         .style(button::secondary);
-    let run =
-        button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
-    let cancel = button("Cancel")
+    let run = button(labelled(lucide::play(), "Run"))
+        .on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
+    let cancel = button(labelled(lucide::circle_x(), "Cancel"))
         .on_press(Message::CancelPressed)
         .style(button::secondary);
 
@@ -50,7 +51,7 @@ pub(crate) fn checksum_check_panel(app: &App) -> Element<'_, Message> {
             "No checksum file chosen — Browse or drop a .ffp/.md5/.st5 on the window.".to_string()
         }
     };
-    let browse = button("Browse...")
+    let browse = button(labelled(lucide::folder(), "Browse..."))
         .on_press(Message::ChecksumCheckBrowsePressed)
         .style(button::secondary);
 
@@ -64,12 +65,12 @@ pub(crate) fn checksum_check_panel(app: &App) -> Element<'_, Message> {
         _ => text("").into(),
     };
 
-    let run = button("Check").on_press_maybe(
+    let run = button(labelled(lucide::file_check(), "Check")).on_press_maybe(
         app.checksum_check_file
             .is_some()
             .then_some(Message::ChecksumCheckPressed),
     );
-    let cancel = button("Cancel")
+    let cancel = button(labelled(lucide::circle_x(), "Cancel"))
         .on_press(Message::CancelPressed)
         .style(button::secondary);
 

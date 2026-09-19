@@ -1,6 +1,9 @@
 use crate::*;
-use iced::widget::{Column, button, checkbox, column, container, row, scrollable, table, text};
-use iced::{Element, Length, Padding};
+use iced::widget::{
+    Column, Row, Text, button, checkbox, column, container, row, scrollable, table, text,
+};
+use iced::{Alignment, Element, Length, Padding};
+use iced_fonts::lucide;
 use lh_core::analysis::{self, Sbe};
 use lh_core::display;
 use lh_core::job::JobId;
@@ -20,7 +23,13 @@ pub(crate) fn rail(app: &App) -> Element<'_, Message> {
             }
             Some(h) => {
                 col = col.push(
-                    container(text(*h).size(12).style(style::muted)).padding(Padding {
+                    container(
+                        text(*h)
+                            .size(12)
+                            .font(style::INTER_SEMIBOLD)
+                            .style(style::muted),
+                    )
+                    .padding(Padding {
                         top: 8.0,
                         bottom: 2.0,
                         left: 10.0,
@@ -45,7 +54,7 @@ pub(crate) fn rail(app: &App) -> Element<'_, Message> {
 /// (`docs/gui-shell.md` §4) — [`style::choice`] gives the current area the theme's accent
 /// and every other row no chrome until hovered.
 pub(crate) fn rail_row(label: &str, area: Area, selected: bool) -> Element<'_, Message> {
-    button(text(label))
+    button(labelled(area_icon(area), label))
         .width(Length::Fill)
         .padding([4, 10])
         .on_press(Message::AreaSelected(area))
@@ -53,10 +62,34 @@ pub(crate) fn rail_row(label: &str, area: Area, selected: bool) -> Element<'_, M
         .into()
 }
 
+/// The rail's icon for each area — Lucide glyphs chosen for what the area *does*, so the
+/// two `Create`/`Check` pairs stay distinguishable at a glance without their group label.
+pub(crate) fn area_icon<'a>(area: Area) -> Text<'a> {
+    match area {
+        Area::Files => lucide::folder_open(),
+        Area::Convert => lucide::arrow_left_right(),
+        Area::ChecksumCreate => lucide::hash(),
+        Area::ChecksumCheck => lucide::file_check(),
+        Area::TorrentCreate => lucide::magnet(),
+        Area::TorrentCheck => lucide::file_search(),
+        Area::Verify => lucide::shield_check(),
+        Area::Sbe => lucide::audio_waveform(),
+        Area::Binaries => lucide::wrench(),
+        Area::About => lucide::info(),
+    }
+}
+
+/// An icon followed by its label — the content of every button that has an icon.
+pub(crate) fn labelled<'a>(icon: Text<'a>, label: &'a str) -> Row<'a, Message> {
+    row![icon, text(label)]
+        .spacing(8)
+        .align_y(Alignment::Center)
+}
+
 pub(crate) fn run_cancel_row(app: &App) -> Element<'_, Message> {
-    let run =
-        button("Run").on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
-    let cancel = button("Cancel")
+    let run = button(labelled(lucide::play(), "Run"))
+        .on_press_maybe(app.working_set.is_some().then_some(Message::RunPressed));
+    let cancel = button(labelled(lucide::circle_x(), "Cancel"))
         .on_press(Message::CancelPressed)
         .style(button::secondary);
     row![run, cancel].spacing(8).into()
@@ -73,12 +106,22 @@ pub(crate) fn dock(app: &App) -> Element<'_, Message> {
         .filter(|e| !matches!(e.status, JobStatus::Running { .. }))
         .count();
 
-    let jobs_tab = dock_tab_button("Jobs", DockTab::Jobs, app.dock_tab == DockTab::Jobs);
-    let log_tab = dock_tab_button("Log", DockTab::Log, app.dock_tab == DockTab::Log);
+    let jobs_tab = dock_tab_button(
+        lucide::list_checks(),
+        "Jobs",
+        DockTab::Jobs,
+        app.dock_tab == DockTab::Jobs,
+    );
+    let log_tab = dock_tab_button(
+        lucide::scroll_text(),
+        "Log",
+        DockTab::Log,
+        app.dock_tab == DockTab::Log,
+    );
     // Red only while it would actually stop something — an always-red Cancel over an idle
     // queue reads as the window's main action.
     let running = done < total;
-    let cancel = button("Cancel")
+    let cancel = button(labelled(lucide::circle_x(), "Cancel"))
         .on_press(Message::CancelPressed)
         .style(if running {
             button::danger
@@ -106,8 +149,13 @@ pub(crate) fn dock(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-pub(crate) fn dock_tab_button(label: &str, tab: DockTab, selected: bool) -> Element<'_, Message> {
-    button(text(label))
+pub(crate) fn dock_tab_button<'a>(
+    icon: Text<'a>,
+    label: &'a str,
+    tab: DockTab,
+    selected: bool,
+) -> Element<'a, Message> {
+    button(labelled(icon, label))
         .on_press(Message::DockTabSelected(tab))
         .style(style::choice(selected))
         .into()
@@ -155,12 +203,14 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
         .width(Length::FillPortion(1)),
         table::column(column_header("Rate/Bits/Ch"), |file: AudioFile| {
             let info = &file.stream_info;
+            // U+2011 (non-breaking hyphen): the column is narrow enough to wrap, and
+            // "16-" / "bit" split across lines reads as a typo.
             text(format!(
-                "{} Hz / {}-bit / {}ch",
+                "{} Hz / {}\u{2011}bit / {}ch",
                 info.sample_rate, info.bits_per_sample, info.channels
             ))
         })
-        .width(Length::FillPortion(2)),
+        .width(Length::FillPortion(3)),
         table::column(column_header("Duration"), |file: AudioFile| {
             text(
                 file.stream_info
@@ -169,7 +219,7 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
                     .unwrap_or_else(|| "?".to_string()),
             )
         })
-        .width(Length::FillPortion(1)),
+        .width(Length::FillPortion(2)),
         table::column(column_header("Encoder"), |file: AudioFile| {
             text(file.encoder.clone().unwrap_or_else(|| "—".to_string()))
         })
@@ -187,7 +237,7 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
                 .unwrap_or_else(|| "—".to_string());
             text(status)
         })
-        .width(Length::FillPortion(3)),
+        .width(Length::FillPortion(2)),
     ];
 
     let mut content = Column::new().spacing(4).push(
@@ -208,7 +258,10 @@ pub(crate) fn file_table(app: &App) -> Element<'_, Message> {
 }
 
 fn column_header(label: &str) -> iced::widget::Text<'_> {
-    text(label).size(14).style(style::muted)
+    text(label)
+        .size(14)
+        .font(style::INTER_SEMIBOLD)
+        .style(style::muted)
 }
 
 /// The log/audit pane — `Provenance::render()` text from every finished job that produced
@@ -218,7 +271,7 @@ fn column_header(label: &str) -> iced::widget::Text<'_> {
 /// produced one, oldest first, plus an Export button (`docs/gui.md` §2). The `Jobs | Log`
 /// header lives in [`dock`], not here — the aggregate line applies to Jobs only.
 pub(crate) fn log_panel(log: &[String]) -> Element<'_, Message> {
-    let export = button("Export log...")
+    let export = button(labelled(lucide::download(), "Export log..."))
         .on_press_maybe((!log.is_empty()).then_some(Message::ExportLogPressed));
     let mut list = Column::new().spacing(4).push(row![export]);
     for entry in log {
