@@ -1,6 +1,6 @@
 use std::io;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
@@ -171,14 +171,18 @@ pub(crate) fn run_rename_screen(
     let mut stage = RenameStage::Editing;
     let mut rows: Vec<RenameRowStatus> = Vec::new();
     let mut queue: Option<Queue<lh_core::Result<Vec<PathBuf>>>> = None;
+    // The plan `a` applied, kept so the result table can show from → to after the files
+    // have moved; re-planning from `files` then would describe names that no longer exist.
+    let mut applied: Option<RenamePlan> = None;
 
-    let start = Instant::now();
-    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
-        let spec = current_spec(&band_field, &date_field, &disc_field, short_year);
-        let plan = spec.as_ref().map(|s| plan_rename(&files, s));
+        let plan = match &applied {
+            Some(a) => Some(a.clone()),
+            None => current_spec(&band_field, &date_field, &disc_field, short_year)
+                .map(|s| plan_rename(&files, &s)),
+        };
 
         if let Some(q) = &queue {
             while let Ok(event) = q.events().try_recv() {
@@ -205,7 +209,6 @@ pub(crate) fn run_rename_screen(
             }
         }
 
-        let elapsed = header_elapsed(start, &mut finished_at, matches!(stage, RenameStage::Done));
         terminal.draw(|frame| {
             draw_rename(
                 frame,
@@ -219,7 +222,6 @@ pub(crate) fn run_rename_screen(
                 plan.as_ref(),
                 &rows,
                 &stage,
-                elapsed,
                 tick,
                 &theme,
             )
@@ -255,6 +257,7 @@ pub(crate) fn run_rename_screen(
                                             .iter()
                                             .map(|_| RenameRowStatus::Ok)
                                             .collect();
+                                        applied = Some(plan.clone());
                                         stage = RenameStage::Done;
                                     } else {
                                         let q: Queue<lh_core::Result<Vec<PathBuf>>> = Queue::new();
@@ -268,6 +271,7 @@ pub(crate) fn run_rename_screen(
                                             .map(|_| RenameRowStatus::Pending)
                                             .collect();
                                         queue = Some(q);
+                                        applied = Some(plan.clone());
                                         stage = RenameStage::Renaming;
                                     }
                                 }
@@ -339,7 +343,6 @@ pub(crate) fn draw_rename(
     plan: Option<&RenamePlan>,
     rows: &[RenameRowStatus],
     stage: &RenameStage,
-    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -364,7 +367,6 @@ pub(crate) fn draw_rename(
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(format!(" {mode}  ")),
         Span::styled(dir.display().to_string(), theme.dim),
-        Span::raw(format!("   {elapsed:.1}s")),
     ]);
     frame.render_widget(
         Paragraph::new(header).block(
@@ -395,7 +397,7 @@ pub(crate) fn draw_rename(
             ),
         },
         RenameStage::Renaming | RenameStage::Done => {
-            draw_rename_write_table(frame, outer[2], names, rows, tick, theme)
+            draw_rename_write_table(frame, outer[2], names, plan, rows, tick, theme)
         }
     }
 
@@ -515,25 +517,36 @@ pub(crate) fn draw_rename_write_table(
     frame: &mut Frame,
     area: Rect,
     names: &[String],
+    plan: Option<&RenamePlan>,
     rows: &[RenameRowStatus],
     tick: usize,
     theme: &Theme,
 ) {
     let spin = SPINNER[tick / 2 % SPINNER.len()];
+    let entries = plan.map(|p| p.entries.as_slice()).unwrap_or_default();
     let table_rows = names.iter().enumerate().map(|(i, name)| {
+        let entry = entries.get(i);
+        let unchanged = entry.is_some_and(|e| e.status == RenameStatus::Unchanged);
         let (label, style) = match rows.get(i) {
             None | Some(RenameRowStatus::Pending) => (format!("{spin} pending"), theme.accent),
-            Some(RenameRowStatus::Ok) => ("OK".to_string(), theme.ok),
+            Some(RenameRowStatus::Ok) if unchanged => ("unchanged".to_string(), theme.dim),
+            Some(RenameRowStatus::Ok) => ("renamed".to_string(), theme.ok),
+            // The whole plan rolls back together, so every row failed for the one reason
+            // the gauge below already prints.
             Some(RenameRowStatus::Failed(_)) => ("FAILED".to_string(), theme.error),
         };
-        let detail = match rows.get(i) {
-            Some(RenameRowStatus::Failed(e)) => e.clone(),
-            _ => String::new(),
-        };
+        let to = entry
+            .map(|e| {
+                e.to.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default();
         Row::new(vec![
             Cell::from(label).style(style),
-            Cell::from(name.clone()),
-            Cell::from(detail).style(theme.dim),
+            Cell::from(name.clone()).style(theme.dim),
+            Cell::from(to).style(style),
         ])
     });
     let table = Table::new(
@@ -544,7 +557,7 @@ pub(crate) fn draw_rename_write_table(
             Constraint::Percentage(45),
         ],
     )
-    .header(Row::new(vec!["status", "file", "detail"]).style(theme.header))
+    .header(Row::new(vec!["status", "from", "to"]).style(theme.header))
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -599,7 +612,16 @@ pub(crate) fn draw_rename_gauge(
                     .unwrap_or_default();
                 format!("failed: {msg}")
             } else {
-                format!("{} files renamed", rows.len())
+                let renamed = plan.map_or(0, |p| {
+                    p.entries
+                        .iter()
+                        .filter(|e| e.status == RenameStatus::Changed)
+                        .count()
+                });
+                match rows.len() - renamed {
+                    0 => format!("{renamed} files renamed"),
+                    same => format!("{renamed} files renamed, {same} already had their name"),
+                }
             };
             (1.0, style, label)
         }

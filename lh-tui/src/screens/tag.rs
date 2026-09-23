@@ -1,6 +1,6 @@
 use std::io;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
@@ -300,8 +300,6 @@ pub(crate) fn run_tag_screen(
     let mut wrote = 0usize;
     let mut failed = 0usize;
 
-    let start = Instant::now();
-    let mut finished_at = None;
     let mut tick = 0usize;
 
     loop {
@@ -341,11 +339,10 @@ pub(crate) fn run_tag_screen(
             }
         }
 
-        let elapsed = header_elapsed(start, &mut finished_at, matches!(stage, TagStage::Done));
         terminal.draw(|frame| {
             draw_tag(
                 frame, dir, &files, &taggable, &before, &fields, &titles, focus, title_idx, &rows,
-                &stage, wrote, failed, elapsed, tick, &theme,
+                &stage, wrote, failed, tick, &theme,
             )
         })?;
 
@@ -455,7 +452,6 @@ pub(crate) fn draw_tag(
     stage: &TagStage,
     wrote: usize,
     failed: usize,
-    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -479,7 +475,6 @@ pub(crate) fn draw_tag(
         Span::styled(" lh-tui ", theme.accent.bold()),
         Span::raw(format!(" {mode}  ")),
         Span::styled(dir.display().to_string(), theme.dim),
-        Span::raw(format!("   {elapsed:.1}s")),
     ]);
     frame.render_widget(
         Paragraph::new(header).block(
