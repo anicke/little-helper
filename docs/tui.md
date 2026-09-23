@@ -94,6 +94,27 @@ same idea:
   document, not a retrofit of this one — nothing in §2's per-screen design forecloses it,
   since each screen is already self-contained.
 
+**Revisited 2026-09-23: the workspace.** Preparing a show is in practice always the same
+sequence on one folder — rename → convert → tag — and quitting to retype
+`lh-tui <command> <folder>` between each was the friction. `lh-tui <folder>` (no
+subcommand; `lh-tui` alone means the current directory) now opens a small menu
+(`screens/workspace.rs`) listing rename, convert → FLAC, tag, verify and convert → WAV.
+Each entry opens the *same* screen its subcommand does, on an already-open terminal, and
+quitting it returns to the menu. That is narrower than the "held-open working set" above: the
+only shared state is the folder path, rescanned every time a step opens (a rename or a
+conversion changes what is in it), plus each step's last result. Every subcommand works
+exactly as before. To support it, a screen's setup is split from its draw loop
+(`scan_folder`, `prepare_tag`, `find_encoder` return a `Refusal` rather than printing and
+exiting), and rename/tag report `None` when left without applying, so the menu does not
+mark them done.
+
+The workspace's convert → FLAC runs with `--move-sources` on: once a WAV's FLAC has checked
+out against it (`Conversion::move_source_to_originals`), the WAV moves into `_original/`
+inside the show folder, so rename and tag after it see only the FLACs. Moved, never deleted;
+a WAV that failed, was unchecked (8-bit), or would land on a file already in `_original/`
+stays put and its row reads `KEPT`, which counts against a clean run. Standalone
+`lh convert`/`lh-tui convert` only do this when asked, and refuse the flag with `--to wav`.
+
 Everything else about scope matches `lh-gui`'s own framing: `lh-tui` adds no operation
 `lh-core` does not already expose (Principle 4), and a command with no screen yet keeps
 working exactly as `lh` does — `run_headless` is not a placeholder to delete, it is the
@@ -382,16 +403,16 @@ editing is a live form plus a live diff, not a job table — the job table only 
 `a` (apply) has been pressed, and only then does either screen touch a file.
 
 * **Tag**: a `show` pane (the six show-level `tag::Field`s `Tab`/`Shift-Tab` cycle through,
-  seeded from the first taggable file that already carries any tags, then from the folder's
+  seeded from the first FLAC that already carries any tags, then from the folder's
   own `ShowName::parse` where that leaves `DATE` blank), a `titles` pane (`e` enters it, `↑`/
   `↓` selects a line, a paste replaces the whole block, `Esc` leaves it), and a `diff` pane
   recomputed every frame from `Tags::changes` — the exact function `cmd_tag` prints its own
   preview from, so the screen's diff and the CLI's are provably the same computation, not two
-  hand-kept-in-step renderings of it. Pressing `a` builds one write job per taggable,
-  changed file (`ffp` before, `tag::apply`, `tag::assert_audio_unchanged` — docs/tagging.md
+  hand-kept-in-step renderings of it. Only FLAC files are listed and numbered; the diff
+  pane's title counts any other files left out (docs/tagging.md). Pressing `a` builds one
+  write job per changed file (`ffp` before, `tag::apply`, `tag::assert_audio_unchanged` — docs/tagging.md
   §1 contract point 2, inside the job so a file that somehow changed fails on its own row);
-  an unchanged or non-taggable file gets no job and is already `Unchanged`/`N/A` the moment
-  `a` is pressed.
+  an unchanged file gets no job and is already `Unchanged` the moment `a` is pressed.
 * **Rename**: a `spec` pane (`BAND`/`DATE`/`DISC`/`SHORT YEAR`, seeded from `ShowName::parse`
   the same way `cmd_rename`'s own defaults are) above a `plan` table recomputed every frame by
   `plan_rename` — pure arithmetic over names already in memory, the reason this is cheap

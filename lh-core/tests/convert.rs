@@ -6,7 +6,7 @@
 //! Tests needing `flac` skip when it is absent rather than failing — Windows CI has no
 //! package for it — and say so, so a green run is never mistaken for a complete one.
 
-use lh_core::convert::{EncodeOpts, to_flac, to_wav};
+use lh_core::convert::{EncodeOpts, ORIGINALS_DIR, move_to_originals, to_flac, to_wav};
 use lh_core::tools::{Agent, Registry, Tool, ToolId};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -314,5 +314,38 @@ fn to_wav_cancelled_mid_decode_leaves_nothing() {
     assert!(
         leftovers.is_empty(),
         "partial files left behind: {leftovers:?}"
+    );
+}
+
+#[test]
+fn a_converted_source_moves_into_originals_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("t01.wav");
+    std::fs::copy(fixture("cdda-aligned.wav"), &src).unwrap();
+    let bytes = std::fs::read(&src).unwrap();
+
+    let moved = move_to_originals(&src).unwrap();
+
+    assert_eq!(moved, dir.path().join(ORIGINALS_DIR).join("t01.wav"));
+    assert!(!src.exists());
+    assert_eq!(std::fs::read(&moved).unwrap(), bytes);
+}
+
+#[test]
+fn a_source_is_never_moved_over_one_already_in_originals() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("t01.wav");
+    std::fs::copy(fixture("cdda-aligned.wav"), &src).unwrap();
+    let originals = dir.path().join(ORIGINALS_DIR);
+    std::fs::create_dir(&originals).unwrap();
+    std::fs::write(originals.join("t01.wav"), b"already here").unwrap();
+
+    let err = move_to_originals(&src).unwrap_err();
+
+    assert!(matches!(err, lh_core::Error::OutputExists { .. }), "{err}");
+    assert!(src.exists(), "the source must stay where it was");
+    assert_eq!(
+        std::fs::read(originals.join("t01.wav")).unwrap(),
+        b"already here"
     );
 }

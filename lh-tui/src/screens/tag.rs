@@ -9,7 +9,6 @@ use lh_core::checksum::ffp;
 use lh_core::etree::ShowName;
 use lh_core::job::{Event, Queue};
 use lh_core::model::AudioFile;
-use lh_core::scan;
 use lh_core::tag::{self, Tags};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -50,7 +49,6 @@ pub(crate) enum TagStage {
 pub(crate) enum WriteStatus {
     Pending,
     Running,
-    NotApplicable,
     Unchanged,
     Ok,
     Failed(String),
@@ -61,41 +59,83 @@ pub(crate) struct WriteRow {
     status: WriteStatus,
 }
 
+/// Everything the tag screen opens with: the files, their tags as they stand, and the
+/// seeded show fields and titles.
+pub(crate) struct TagSetup {
+    files: Vec<AudioFile>,
+    /// How many files in the folder were left out for not being taggable — only FLAC
+    /// carries Vorbis comments, so a WAV next to its converted FLAC is not a track.
+    ignored: usize,
+    before: Vec<Tags>,
+    show: Tags,
+    titles: Vec<String>,
+}
+
 pub(crate) fn run_tag(args: TagArgs, theme: ThemeName) -> ExitCode {
-    if !args.dir.is_dir() {
-        eprintln!("lh-tui: {} is not a directory", args.dir.display());
-        return ExitCode::from(2);
-    }
-    let set = match scan::scan(&args.dir, false) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("lh-tui: scanning {}: {e:#}", args.dir.display());
-            return ExitCode::from(2);
-        }
+    let folder = match scan_folder(&args.dir) {
+        Ok(f) => f,
+        Err(refusal) => return refusal.exit(),
     };
-    for (skipped, why) in &set.skipped {
-        eprintln!("skipped {}: {why}", skipped.display());
+    for line in &folder.skipped {
+        eprintln!("{line}");
     }
-    if set.files.is_empty() {
-        eprintln!("no audio files found in {}", args.dir.display());
-        return ExitCode::from(1);
+    let setup = match prepare_tag(&args, folder.files) {
+        Ok(s) => s,
+        Err(refusal) => return refusal.exit(),
+    };
+
+    let result = {
+        let mut terminal = TerminalGuard::with_paste();
+        tag_screen(&mut terminal, &args.dir, setup, Theme::new(theme))
+    };
+
+    match result {
+        // Leaving without applying anything is not a failure, same as today's `$?`.
+        Ok(ok) => {
+            if ok.unwrap_or(true) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("lh-tui: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Reads every file's tags and seeds the edit from them, the folder name and `args` —
+/// everything that can fail before the screen opens.
+pub(crate) fn prepare_tag(args: &TagArgs, files: Vec<AudioFile>) -> Result<TagSetup, Refusal> {
+    // Only taggable files are tracks: numbering, titles and the diff all run over them
+    // alone, so a WAV left beside its converted FLAC doesn't shift every track number.
+    let total = files.len();
+    let files: Vec<AudioFile> = files
+        .into_iter()
+        .filter(|f| tag::is_taggable(f.format))
+        .collect();
+    let ignored = total - files.len();
+    if files.is_empty() {
+        return Err(Refusal::new(
+            1,
+            format!("no FLAC files to tag in {}", args.dir.display()),
+        ));
     }
 
-    // Read every taggable file's existing tags up front — the "before" state the diff
-    // pane and the apply stage's audio-unchanged postcondition are both built from
+    // Read every file's existing tags up front — the "before" state the diff pane and
+    // the apply stage's audio-unchanged postcondition are both built from
     // (docs/tagging.md §1 contract point 2).
-    let mut before: Vec<Tags> = Vec::with_capacity(set.files.len());
-    for f in &set.files {
-        if tag::is_taggable(f.format) {
-            match tag::read(&f.path) {
-                Ok(t) => before.push(t),
-                Err(e) => {
-                    eprintln!("lh-tui: reading tags from {}: {e:#}", f.path.display());
-                    return ExitCode::from(2);
-                }
+    let mut before: Vec<Tags> = Vec::with_capacity(files.len());
+    for f in &files {
+        match tag::read(&f.path) {
+            Ok(t) => before.push(t),
+            Err(e) => {
+                return Err(Refusal::new(
+                    2,
+                    format!("lh-tui: reading tags from {}: {e:#}", f.path.display()),
+                ));
             }
-        } else {
-            before.push(Tags::default());
         }
     }
 
@@ -105,7 +145,7 @@ pub(crate) fn run_tag(args: TagArgs, theme: ThemeName) -> ExitCode {
         .and_then(|n| n.to_str())
         .and_then(ShowName::parse);
 
-    // Seed the show-level fields from the first taggable file that already carries any
+    // Seed the show-level fields from the first file that already carries any
     // tags, then from the folder name's own date where that leaves it blank
     // (docs/tagging.md §6).
     let mut show = before
@@ -143,61 +183,53 @@ pub(crate) fn run_tag(args: TagArgs, theme: ThemeName) -> ExitCode {
         .collect();
     if let Some(path) = &args.titles {
         let text = if path == Path::new("-") {
-            match io::read_to_string(io::stdin()) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("lh-tui: reading titles from stdin: {e}");
-                    return ExitCode::from(2);
-                }
-            }
+            io::read_to_string(io::stdin())
+                .map_err(|e| Refusal::new(2, format!("lh-tui: reading titles from stdin: {e}")))?
         } else {
-            match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("lh-tui: reading {}: {e}", path.display());
-                    return ExitCode::from(2);
-                }
-            }
+            std::fs::read_to_string(path)
+                .map_err(|e| Refusal::new(2, format!("lh-tui: reading {}: {e}", path.display())))?
         };
         let lines: Vec<String> = text.lines().map(str::to_string).collect();
-        if lines.len() != set.files.len() {
-            eprintln!(
-                "lh-tui: {} titles given but {} files in {}",
-                lines.len(),
-                set.files.len(),
-                args.dir.display()
-            );
-            return ExitCode::from(2);
+        if lines.len() != files.len() {
+            return Err(Refusal::new(
+                2,
+                format!(
+                    "lh-tui: {} titles given but {} FLAC files in {}",
+                    lines.len(),
+                    files.len(),
+                    args.dir.display()
+                ),
+            ));
         }
         titles = lines;
     }
 
-    let result = {
-        let mut terminal = TerminalGuard::with_paste();
-        run_tag_screen(
-            &mut terminal,
-            &args.dir,
-            set.files,
-            before,
-            show,
-            titles,
-            Theme::new(theme),
-        )
-    };
+    Ok(TagSetup {
+        files,
+        ignored,
+        before,
+        show,
+        titles,
+    })
+}
 
-    match result {
-        Ok(ok) => {
-            if ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
-        Err(e) => {
-            eprintln!("lh-tui: {e}");
-            ExitCode::from(2)
-        }
-    }
+/// `None` when the person left without writing; otherwise whether every write landed.
+pub(crate) fn tag_screen(
+    terminal: &mut DefaultTerminal,
+    dir: &Path,
+    setup: TagSetup,
+    theme: Theme,
+) -> io::Result<Option<bool>> {
+    run_tag_screen(
+        terminal,
+        dir,
+        setup.files,
+        setup.ignored,
+        setup.before,
+        setup.show,
+        setup.titles,
+        theme,
+    )
 }
 
 pub(crate) fn tag_edit(fields: &[Field; 6], titles: &[Field], track: usize) -> Tags {
@@ -210,14 +242,13 @@ pub(crate) fn tag_edit(fields: &[Field; 6], titles: &[Field], track: usize) -> T
     edit
 }
 
-/// Builds the write queue for the current edit, or `None` when there is nothing taggable
-/// to change — the interactive equivalent of `cmd_tag`'s "nothing to change" early return.
+/// Builds the write queue for the current edit, or `None` when there is nothing to
+/// change — the interactive equivalent of `cmd_tag`'s "nothing to change" early return.
 /// Returns the rows to show immediately (covering every file, including the ones that
-/// never get a job) alongside them, since a row's final status for `NotApplicable` and
-/// `Unchanged` is already known without running anything.
+/// never get a job) alongside them, since an `Unchanged` row's final status is already
+/// known without running anything.
 pub(crate) fn start_tag_write(
     files: &[AudioFile],
-    taggable: &[bool],
     before: &[Tags],
     fields: &[Field; 6],
     titles: &[Field],
@@ -230,9 +261,7 @@ pub(crate) fn start_tag_write(
     let mut edits = Vec::with_capacity(files.len());
     for (i, f) in files.iter().enumerate() {
         let edit = tag_edit(fields, titles, i);
-        let status = if !taggable[i] {
-            WriteStatus::NotApplicable
-        } else if before[i].changes(&edit).is_empty() {
+        let status = if before[i].changes(&edit).is_empty() {
             WriteStatus::Unchanged
         } else {
             WriteStatus::Pending
@@ -275,12 +304,12 @@ pub(crate) fn run_tag_screen(
     terminal: &mut DefaultTerminal,
     dir: &Path,
     files: Vec<AudioFile>,
+    ignored: usize,
     before: Vec<Tags>,
     show_seed: Tags,
     title_seed: Vec<String>,
     theme: Theme,
-) -> io::Result<bool> {
-    let taggable: Vec<bool> = files.iter().map(|f| tag::is_taggable(f.format)).collect();
+) -> io::Result<Option<bool>> {
     let mut fields: [Field; 6] =
         TAG_SHOW_FIELDS.map(|f| Field::new(show_seed.get(f).unwrap_or_default()));
     let mut titles: Vec<Field> = title_seed.into_iter().map(Field::new).collect();
@@ -341,7 +370,7 @@ pub(crate) fn run_tag_screen(
 
         terminal.draw(|frame| {
             draw_tag(
-                frame, dir, &files, &taggable, &before, &fields, &titles, focus, title_idx, &rows,
+                frame, dir, &files, ignored, &before, &fields, &titles, focus, title_idx, &rows,
                 &stage, wrote, failed, tick, &theme,
             )
         })?;
@@ -363,7 +392,7 @@ pub(crate) fn run_tag_screen(
                             KeyCode::Char('q') if focus == TagFocus::None => break,
                             KeyCode::Char('a') if focus == TagFocus::None => {
                                 let (q, subs, initial_rows) =
-                                    start_tag_write(&files, &taggable, &before, &fields, &titles);
+                                    start_tag_write(&files, &before, &fields, &titles);
                                 rows = initial_rows;
                                 submitted_rows = subs;
                                 stage = if q.is_some() {
@@ -434,7 +463,10 @@ pub(crate) fn run_tag_screen(
         }
         tick = tick.wrapping_add(1);
     }
-    Ok(failed == 0)
+    if matches!(stage, TagStage::Editing) {
+        return Ok(None);
+    }
+    Ok(Some(failed == 0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,7 +474,7 @@ pub(crate) fn draw_tag(
     frame: &mut Frame,
     dir: &Path,
     files: &[AudioFile],
-    taggable: &[bool],
+    ignored: usize,
     before: &[Tags],
     fields: &[Field; 6],
     titles: &[Field],
@@ -487,7 +519,7 @@ pub(crate) fn draw_tag(
 
     match stage {
         TagStage::Editing => draw_tag_editor(
-            frame, outer[1], files, taggable, before, fields, titles, focus, title_idx, theme,
+            frame, outer[1], files, ignored, before, fields, titles, focus, title_idx, theme,
         ),
         TagStage::Writing | TagStage::Done => draw_write_table(frame, outer[1], rows, tick, theme),
     }
@@ -510,7 +542,7 @@ pub(crate) fn draw_tag_editor(
     frame: &mut Frame,
     area: Rect,
     files: &[AudioFile],
-    taggable: &[bool],
+    ignored: usize,
     before: &[Tags],
     fields: &[Field; 6],
     titles: &[Field],
@@ -530,7 +562,7 @@ pub(crate) fn draw_tag_editor(
     draw_show_fields(frame, left[0], fields, focus, theme);
     draw_titles(frame, left[1], titles, focus, title_idx, theme);
     draw_tag_diff(
-        frame, cols[1], files, taggable, before, fields, titles, theme,
+        frame, cols[1], files, ignored, before, fields, titles, theme,
     );
 }
 
@@ -611,20 +643,13 @@ pub(crate) fn draw_tag_diff(
     frame: &mut Frame,
     area: Rect,
     files: &[AudioFile],
-    taggable: &[bool],
+    ignored: usize,
     before: &[Tags],
     fields: &[Field; 6],
     titles: &[Field],
     theme: &Theme,
 ) {
     let table_rows = files.iter().enumerate().map(|(i, f)| {
-        if !taggable[i] {
-            return Row::new(vec![
-                Cell::from(f.file_name()),
-                Cell::from("N/A").style(theme.dim),
-                Cell::from("no Vorbis comments").style(theme.dim),
-            ]);
-        }
         let edit = tag_edit(fields, titles, i);
         let changes = before[i].changes(&edit);
         if changes.is_empty() {
@@ -649,6 +674,12 @@ pub(crate) fn draw_tag_diff(
         }
     });
 
+    // Say what was left out rather than dropping it silently (Principle 5).
+    let title = match ignored {
+        0 => " diff ".to_string(),
+        1 => " diff — 1 non-FLAC file not tagged ".to_string(),
+        n => format!(" diff — {n} non-FLAC files not tagged "),
+    };
     let table = Table::new(
         table_rows,
         [
@@ -661,7 +692,7 @@ pub(crate) fn draw_tag_diff(
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" diff ")
+            .title(title)
             .border_style(theme.dim),
     );
 
@@ -713,11 +744,6 @@ pub(crate) fn write_row_cells(
     match status {
         WriteStatus::Pending => ("pending".to_string(), theme.dim, String::new()),
         WriteStatus::Running => (format!("{spin} running"), theme.accent, String::new()),
-        WriteStatus::NotApplicable => (
-            "N/A".to_string(),
-            theme.dim,
-            "no Vorbis comments".to_string(),
-        ),
         WriteStatus::Unchanged => ("unchanged".to_string(), theme.dim, String::new()),
         WriteStatus::Ok => ("OK".to_string(), theme.ok, String::new()),
         WriteStatus::Failed(e) => ("FAILED".to_string(), theme.error, e.clone()),

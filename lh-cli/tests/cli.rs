@@ -160,6 +160,58 @@ fn convert_to_flac_without_the_encoder_is_a_command_failure() {
     assert!(!dir.path().join("cdda-aligned.flac").exists());
 }
 
+/// `--move-sources` sets a checked WAV aside in `_original/`, byte-for-byte itself, so
+/// the show folder holds only the FLAC afterwards.
+#[test]
+fn convert_to_flac_with_move_sources_sets_the_wav_aside() {
+    use lh_core::tools::{Registry, ToolId};
+    if Registry::discover_one(ToolId::Flac)
+        .require(ToolId::Flac)
+        .is_err()
+    {
+        eprintln!("skipping: reference flac not found");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("cdda-aligned.wav");
+    std::fs::copy(fixtures().join("cdda-aligned.wav"), &src).unwrap();
+    let before = std::fs::read(&src).unwrap();
+
+    lh().arg("convert")
+        .arg(dir.path())
+        .args(["--to", "flac", "--move-sources"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "MOVED     cdda-aligned.wav -> _original/",
+        ));
+
+    assert!(dir.path().join("cdda-aligned.flac").exists());
+    assert!(!src.exists());
+    let moved = dir.path().join("_original").join("cdda-aligned.wav");
+    assert_eq!(std::fs::read(moved).unwrap(), before);
+}
+
+/// A FLAC source is the archival copy; setting it aside after decoding is refused outright.
+#[test]
+fn convert_to_wav_refuses_move_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.flac"),
+        dir.path().join("cdda-aligned.flac"),
+    )
+    .unwrap();
+
+    lh().arg("convert")
+        .arg(dir.path())
+        .args(["--to", "wav", "--move-sources"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("only applies to --to flac"));
+
+    assert!(!dir.path().join("cdda-aligned.wav").exists());
+}
+
 /// Creating a torrent writes one new file beside the show and touches nothing inside it.
 #[test]
 fn torrent_create_writes_beside_the_show_and_reads_back() {
@@ -601,6 +653,37 @@ fn tag_reports_a_non_flac_member_as_not_applicable_rather_than_failing() {
         .stdout(predicates::str::contains("wrote 1 files"));
 }
 
+/// The WAVs a conversion leaves beside their FLACs are not tracks: numbering and the
+/// `--titles` count run over the FLAC files alone, so `t01.wav` sorting between
+/// `t01.flac` and `t02.flac` doesn't turn the second FLAC into track 3.
+#[test]
+fn tag_numbers_tracks_among_flac_files_only() {
+    let dir = tempfile::tempdir().unwrap();
+    for (fixture, name) in [
+        ("cdda-aligned.flac", "t01.flac"),
+        ("cdda-aligned.wav", "t01.wav"),
+        ("cdda-sbe.flac", "t02.flac"),
+        ("cdda-sbe.wav", "t02.wav"),
+    ] {
+        std::fs::copy(fixtures().join(fixture), dir.path().join(name)).unwrap();
+    }
+    let titles = dir.path().join("titles.txt");
+    std::fs::write(&titles, "One\nTwo\n").unwrap();
+
+    lh().arg("tag")
+        .arg(dir.path())
+        .args(["--titles"])
+        .arg(&titles)
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("wrote 2 files"));
+
+    let second = lh_core::tag::read(&dir.path().join("t02.flac")).unwrap();
+    assert_eq!(second.get(lh_core::tag::Field::TrackNumber), Some("2"));
+    assert_eq!(second.get(lh_core::tag::Field::Title), Some("Two"));
+}
+
 /// A titles file with the wrong number of lines is a command failure naming both counts —
 /// never a best-effort partial apply (docs/tagging.md §5).
 #[test]
@@ -625,7 +708,7 @@ fn tag_titles_count_mismatch_is_a_command_failure() {
         .arg(&titles)
         .assert()
         .code(2)
-        .stderr(predicates::str::contains("1 titles given but 2 files"));
+        .stderr(predicates::str::contains("1 titles given but 2 FLAC files"));
 }
 
 /// The preview is the command here too: without `--yes` nothing is renamed.

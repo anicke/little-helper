@@ -9,6 +9,7 @@ mod torrent_check;
 mod torrent_create;
 mod torrent_info;
 mod verify;
+mod workspace;
 
 pub(crate) use check::*;
 pub(crate) use checksum::*;
@@ -21,3 +22,4 @@ pub(crate) use torrent_check::*;
 pub(crate) use torrent_create::*;
 pub(crate) use torrent_info::*;
 pub(crate) use verify::*;
+pub(crate) use workspace::*;

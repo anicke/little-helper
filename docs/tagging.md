@@ -157,9 +157,12 @@ second implementation of the same thing.
 `assert_audio_unchanged(path, before)` — re-probe, compare STREAMINFO MD5 — is §1 contract
 point 2, and both executors call it.
 
-Non-FLAC members of a set have no Vorbis comments at all. They report *not applicable*, the
-shape `analysis::sbe` already uses for non-CDDA files (`Sbe::NotApplicable`), never a silent
-skip (Principle 5).
+Non-FLAC members of a set have no Vorbis comments at all, and they are not tracks either: a
+WAV left beside its converted FLAC would otherwise sort between the FLACs and shift every
+track number after it. So tagging runs over the FLAC files alone — `TRACKNUMBER`, the titles
+list and the `--titles` line count all count FLACs only — and what was left out is still
+said, never a silent skip (Principle 5): `lh tag` prints an `N/A` line per non-FLAC file, the
+TUI's diff pane title counts them. A folder with no FLAC at all is refused.
 
 ### `lh-core/src/rename/mod.rs`
 

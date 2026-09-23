@@ -92,7 +92,7 @@ pub(crate) fn run_verify(paths: Paths, theme: ThemeName) -> ExitCode {
 
     let result = {
         let mut terminal = TerminalGuard::new();
-        run(&mut terminal, &label, &files, Theme::new(theme))
+        run_verify_screen(&mut terminal, &label, &files, Theme::new(theme))
     };
 
     match result {
@@ -114,7 +114,7 @@ pub(crate) fn run_verify(paths: Paths, theme: ThemeName) -> ExitCode {
 /// Returns whether every file verified cleanly (no mismatches, no failures) — the same
 /// notion of "ok" `lh verify`'s exit code uses, so quitting the screen early still leaves
 /// scripts able to tell success from trouble via `$?`.
-fn run(
+pub(crate) fn run_verify_screen(
     terminal: &mut DefaultTerminal,
     root: &str,
     files: &[AudioFile],

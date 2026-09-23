@@ -58,6 +58,22 @@ pub struct Conversion {
     pub checked_against_source: bool,
 }
 
+impl Conversion {
+    /// [`move_to_originals`] for this conversion's source — but only when the output was
+    /// checked against it. An unchecked conversion (8-bit WAV, a source with no MD5) is a
+    /// weaker result, and its source stays where it is rather than looking set aside for
+    /// the same reason a checked one is.
+    pub fn move_source_to_originals(&self) -> Result<PathBuf> {
+        if !self.checked_against_source {
+            return Err(Error::malformed(
+                &self.provenance.input,
+                "not checked against its output, so left in place",
+            ));
+        }
+        move_to_originals(&self.provenance.input)
+    }
+}
+
 /// Decode a FLAC to WAV, in-process.
 ///
 /// The decoded audio is hashed as it is written and compared against the MD5 in the
@@ -243,6 +259,28 @@ pub(crate) fn encode_flac_staged(
             "the encoded FLAC carries no audio MD5, so it cannot be checked; it was discarded",
         )),
     }
+}
+
+/// The folder, inside a show's own folder, that converted sources are moved into.
+pub const ORIGINALS_DIR: &str = "_original";
+
+/// Move a source that has just converted cleanly into [`ORIGINALS_DIR`] beside it, so every
+/// later step on the show folder (rename, tag, checksum) sees only the converted files.
+/// Moved, never deleted (Principle 1): the person clears it out once satisfied. Refuses
+/// with [`Error::OutputExists`] rather than replace a file already there. Returns where
+/// the source now is.
+pub fn move_to_originals(src: &Path) -> Result<PathBuf> {
+    let no_file_name = || Error::malformed(src, "has no file name to work from");
+    let name = src.file_name().ok_or_else(no_file_name)?;
+    let dir = src.parent().ok_or_else(no_file_name)?.join(ORIGINALS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
+    let dst = dir.join(name);
+    // `symlink_metadata` so a dangling symlink still counts as something in the way.
+    if dst.symlink_metadata().is_ok() {
+        return Err(Error::OutputExists { path: dst });
+    }
+    std::fs::rename(src, &dst).map_err(|e| Error::io(src, e))?;
+    Ok(dst)
 }
 
 /// Same stem, new extension, beside `src` unless told otherwise. Shared by `lh-cli` and

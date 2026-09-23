@@ -272,6 +272,10 @@ pub struct ConvertArgs {
     /// Print the full provenance record for every file written.
     #[arg(long)]
     pub provenance: bool,
+    /// Once a WAV's FLAC checks out against it, move the WAV into `_original/` beside it.
+    /// Only with `--to flac`; a FLAC source is the archival copy and stays put.
+    #[arg(long)]
+    pub move_sources: bool,
 }
 
 #[derive(clap::Args)]

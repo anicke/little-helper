@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use crate::*;
 use lh_cli::{ConvertArgs, Target};
-use lh_core::convert::{Conversion, EncodeOpts, destination, to_flac, to_wav};
+use lh_core::convert::{Conversion, EncodeOpts, ORIGINALS_DIR, destination, to_flac, to_wav};
 use lh_core::job::Queue;
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::tools::{Registry, Tool, ToolId};
@@ -24,10 +24,27 @@ use ratatui::style::Style;
 #[derive(Clone)]
 pub(crate) enum ConvertStatus {
     Pending,
-    Running { done: u32, total: u32 },
+    Running {
+        done: u32,
+        total: u32,
+    },
     Skipped(AudioFormat),
-    Done { unchecked: bool, output: String },
+    Done {
+        unchecked: bool,
+        output: String,
+        source: SourceFate,
+    },
     Failed(String),
+}
+
+/// What became of a converted file's source.
+#[derive(Clone)]
+pub(crate) enum SourceFate {
+    /// Moving it aside wasn't asked for.
+    Stays,
+    Moved,
+    /// Asked for, but it couldn't be — the reason why.
+    Kept(String),
 }
 
 impl RowStatus for ConvertStatus {
@@ -52,6 +69,10 @@ impl RowStatus for ConvertStatus {
             }
             ConvertStatus::Running { .. } => (format!("{spin} running"), theme.accent),
             ConvertStatus::Skipped(_) => ("SKIPPED".to_string(), theme.dim),
+            ConvertStatus::Done {
+                source: SourceFate::Kept(_),
+                ..
+            } => ("KEPT".to_string(), theme.warn),
             ConvertStatus::Done { .. } => ("OK".to_string(), theme.ok),
             ConvertStatus::Failed(_) => ("FAILED".to_string(), theme.error),
         }
@@ -61,12 +82,21 @@ impl RowStatus for ConvertStatus {
         match self {
             ConvertStatus::Pending | ConvertStatus::Running { .. } => String::new(),
             ConvertStatus::Skipped(want) => format!("already {want}"),
-            ConvertStatus::Done { unchecked, output } => {
+            ConvertStatus::Done {
+                unchecked,
+                output,
+                source,
+            } => {
+                let mut detail = format!("-> {output}");
                 if *unchecked {
-                    format!("-> {output}  (unchecked: nothing to compare against)")
-                } else {
-                    format!("-> {output}")
+                    detail.push_str("  (unchecked: nothing to compare against)");
                 }
+                match source {
+                    SourceFate::Stays => {}
+                    SourceFate::Moved => detail.push_str(&format!(", source -> {ORIGINALS_DIR}/")),
+                    SourceFate::Kept(why) => detail.push_str(&format!(", source kept: {why}")),
+                }
+                detail
             }
             ConvertStatus::Failed(e) => e.clone(),
         }
@@ -76,6 +106,11 @@ impl RowStatus for ConvertStatus {
         match self {
             ConvertStatus::Pending | ConvertStatus::Running { .. } => {}
             ConvertStatus::Skipped(_) => counts.good("skipped"),
+            // The FLAC stands, but the folder still holds a source it was meant not to.
+            ConvertStatus::Done {
+                source: SourceFate::Kept(_),
+                ..
+            } => counts.bad("kept"),
             ConvertStatus::Done { .. } => counts.good("written"),
             ConvertStatus::Failed(_) => counts.bad("failed"),
         }
@@ -88,11 +123,15 @@ impl RowStatus for ConvertStatus {
 pub(crate) enum ConvertOutcome {
     Skipped,
     NoFileName,
-    Done(Box<Conversion>),
+    Done(Box<Conversion>, SourceFate),
     Failed(lh_core::Error),
 }
 
 pub(crate) fn run_convert(args: ConvertArgs, theme: ThemeName) -> ExitCode {
+    if args.move_sources && args.to != Target::Flac {
+        eprintln!("lh-tui: --move-sources only applies to --to flac");
+        return ExitCode::from(2);
+    }
     let label = describe(&args.paths);
     let (files, mut clean) = match collect(&args.paths) {
         Ok(v) => v,
@@ -102,17 +141,9 @@ pub(crate) fn run_convert(args: ConvertArgs, theme: ThemeName) -> ExitCode {
         }
     };
 
-    // Discovered once, up front, exactly like `cmd_convert`: if the encoder is missing,
-    // say so before converting anything rather than after half a show.
-    let encoder = match args.to {
-        Target::Flac => match Registry::discover_one(ToolId::Flac).require(ToolId::Flac) {
-            Ok(t) => Some(t.clone()),
-            Err(e) => {
-                eprintln!("lh-tui: {e:#}");
-                return ExitCode::from(2);
-            }
-        },
-        Target::Wav => None,
+    let encoder = match find_encoder(args.to) {
+        Ok(e) => e,
+        Err(refusal) => return refusal.exit(),
     };
 
     if files.is_empty() {
@@ -163,10 +194,23 @@ pub(crate) fn run_convert(args: ConvertArgs, theme: ThemeName) -> ExitCode {
     }
 }
 
+/// Discovered once, up front, exactly like `cmd_convert`: if the encoder is missing, say
+/// so before converting anything rather than after half a show. `None` for WAV, which
+/// needs no external tool.
+pub(crate) fn find_encoder(to: Target) -> Result<Option<Tool>, Refusal> {
+    match to {
+        Target::Flac => Registry::discover_one(ToolId::Flac)
+            .require(ToolId::Flac)
+            .map(|t| Some(t.clone()))
+            .map_err(|e| Refusal::new(2, format!("lh-tui: {e:#}"))),
+        Target::Wav => Ok(None),
+    }
+}
+
 /// Returns whether every file converted cleanly (a skip counts as clean, same as
 /// `cmd_convert`'s own exit code) plus every successful conversion's record, in
 /// submission order — used only for the post-loop `--provenance` dump above.
-fn run_convert_screen(
+pub(crate) fn run_convert_screen(
     terminal: &mut DefaultTerminal,
     root: &str,
     files: &[AudioFile],
@@ -181,6 +225,7 @@ fn run_convert_screen(
     let to = args.to;
     let force = args.force;
     let out_dir = args.out_dir.clone();
+    let move_sources = args.move_sources && to == Target::Flac;
     let opts = EncodeOpts {
         compression_level: args.level,
         ..EncodeOpts::default()
@@ -219,7 +264,17 @@ fn run_convert_screen(
                 ),
             };
             match result {
-                Ok(done) => ConvertOutcome::Done(Box::new(done)),
+                Ok(done) => {
+                    let source = if !move_sources {
+                        SourceFate::Stays
+                    } else {
+                        match done.move_source_to_originals() {
+                            Ok(_) => SourceFate::Moved,
+                            Err(e) => SourceFate::Kept(e.to_string()),
+                        }
+                    };
+                    ConvertOutcome::Done(Box::new(done), source)
+                }
                 Err(e) => ConvertOutcome::Failed(e),
             }
         });
@@ -231,7 +286,7 @@ fn run_convert_screen(
         unit: "files",
         detail: "detail",
         widths: (35, 55),
-        labels: &["written", "skipped", "failed"],
+        labels: &["written", "kept", "skipped", "failed"],
     };
     let names: Vec<String> = files.iter().map(AudioFile::file_name).collect();
     let mut conversions: Vec<Option<Conversion>> = (0..files.len()).map(|_| None).collect();
@@ -245,8 +300,9 @@ fn run_convert_screen(
             ConvertOutcome::NoFileName => {
                 ConvertStatus::Failed("has no file name to work from".to_string())
             }
-            ConvertOutcome::Done(c) => {
+            ConvertOutcome::Done(c, source) => {
                 let status = ConvertStatus::Done {
+                    source,
                     unchecked: !c.checked_against_source,
                     output: c
                         .output

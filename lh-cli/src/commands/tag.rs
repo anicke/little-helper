@@ -7,8 +7,10 @@ use std::path::Path;
 
 /// Write the etree Vorbis-comment tags for one show (docs/tagging.md §1, §4, §5).
 ///
-/// `TRACKNUMBER` always comes from position in the scan, never typed. Every other field
-/// is show-level — one value applied to every taggable file — except `TITLE`, which comes
+/// Only FLAC files are tracks; anything else in the folder (a WAV left beside its converted
+/// FLAC) is reported as N/A and left out entirely. `TRACKNUMBER` always comes from position
+/// among the FLAC files, never typed. Every other field is show-level — one value applied
+/// to every file — except `TITLE`, which comes
 /// from `--titles` in file order when given. The full diff is always printed; nothing is
 /// written unless `--yes` is given, and a write is followed immediately by the
 /// audio-MD5 recheck docs/tagging.md §1's contract requires — a mismatch aborts the rest
@@ -26,6 +28,20 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
     if set.files.is_empty() {
         anyhow::bail!("no audio files found in {}", args.dir.display());
     }
+    let (files, others): (Vec<_>, Vec<_>) = set
+        .files
+        .into_iter()
+        .partition(|f| tag::is_taggable(f.format));
+    for f in &others {
+        println!(
+            "N/A       {} ({} carries no Vorbis comments)",
+            f.file_name(),
+            f.format
+        );
+    }
+    if files.is_empty() {
+        anyhow::bail!("no FLAC files to tag in {}", args.dir.display());
+    }
 
     let titles = match &args.titles {
         Some(path) if path == Path::new("-") => Some(read_titles(
@@ -37,11 +53,11 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
         None => None,
     };
     if let Some(titles) = &titles {
-        if titles.len() != set.files.len() {
+        if titles.len() != files.len() {
             anyhow::bail!(
-                "{} titles given but {} files in {}",
+                "{} titles given but {} FLAC files in {}",
                 titles.len(),
-                set.files.len(),
+                files.len(),
                 args.dir.display()
             );
         }
@@ -60,15 +76,7 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
 
     let mut any_change = false;
     let mut wrote = 0usize;
-    for (i, f) in set.files.iter().enumerate() {
-        if !tag::is_taggable(f.format) {
-            println!(
-                "N/A       {} ({} carries no Vorbis comments)",
-                f.file_name(),
-                f.format
-            );
-            continue;
-        }
+    for (i, f) in files.iter().enumerate() {
         let mut edit = show_edit.clone();
         edit.track_number = Some((i + 1).to_string());
         if let Some(titles) = &titles {

@@ -1,12 +1,17 @@
 use crate::*;
 use anyhow::Result;
-use lh_core::convert::{Conversion, EncodeOpts, destination, to_flac, to_wav};
+use lh_core::convert::{Conversion, EncodeOpts, ORIGINALS_DIR, destination, to_flac, to_wav};
 use lh_core::model::AudioFormat;
 use lh_core::tools::{Registry, ToolId};
+use std::path::PathBuf;
 
 /// The one command that produces files people will trade, so it says exactly what
-/// produced each one. Sources are never modified and never deleted (Principle 1).
+/// produced each one. Sources are never modified and never deleted (Principle 1) — with
+/// `--move-sources` a checked one is only moved into `_original/`.
 pub(crate) fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
+    if args.move_sources && args.to != Target::Flac {
+        anyhow::bail!("--move-sources only applies to --to flac");
+    }
     let (files, mut ok) = collect(&args.paths)?;
 
     // Discovered once, before any work: if the encoder is missing, say so now rather
@@ -32,6 +37,7 @@ pub(crate) fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
     let to = args.to;
     let force = args.force;
     let out_dir = args.out_dir.clone();
+    let move_sources = args.move_sources;
     let results = run_batch(&files, move |f, progress| -> ConvertOutcome {
         if f.format == want {
             return ConvertOutcome::Skipped;
@@ -56,7 +62,10 @@ pub(crate) fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
             ),
         };
         match result {
-            Ok(done) => ConvertOutcome::Done(Box::new(done)),
+            Ok(done) => {
+                let moved = move_sources.then(|| done.move_source_to_originals());
+                ConvertOutcome::Done(Box::new(done), moved)
+            }
             Err(e) => ConvertOutcome::Failed(e),
         }
     });
@@ -74,9 +83,19 @@ pub(crate) fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
                     f.path.display()
                 );
             }
-            Some(ConvertOutcome::Done(done)) => {
+            Some(ConvertOutcome::Done(done, moved)) => {
                 written += 1;
                 report_conversion(done, args.provenance);
+                match moved {
+                    Some(Ok(_)) => println!("MOVED     {} -> {ORIGINALS_DIR}/", f.file_name()),
+                    // The FLAC stands; the folder just still holds its source, which is
+                    // what a clean run promised it wouldn't.
+                    Some(Err(e)) => {
+                        ok = false;
+                        println!("KEPT      {}: {e}", f.file_name());
+                    }
+                    None => {}
+                }
             }
             Some(ConvertOutcome::Failed(e)) => {
                 ok = false;
@@ -93,13 +112,13 @@ pub(crate) fn cmd_convert(args: &ConvertArgs) -> Result<bool> {
     Ok(ok)
 }
 
-/// What became of one file's conversion. `Conversion` is boxed only to keep this enum
-/// small relative to its rarest, biggest variant — it is moved through the job queue's
-/// channel once per file.
+/// What became of one file's conversion, and of its source when `--move-sources` asked for
+/// it to be set aside. `Conversion` is boxed only to keep this enum small relative to its
+/// rarest, biggest variant — it is moved through the job queue's channel once per file.
 enum ConvertOutcome {
     Skipped,
     NoFileName,
-    Done(Box<Conversion>),
+    Done(Box<Conversion>, Option<lh_core::Result<PathBuf>>),
     Failed(lh_core::Error),
 }
 

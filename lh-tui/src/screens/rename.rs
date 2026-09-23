@@ -8,8 +8,8 @@ use lh_cli::RenameArgs;
 use lh_core::etree::ShowDate;
 use lh_core::etree::ShowName;
 use lh_core::job::{Event, Queue};
+use lh_core::model::AudioFile;
 use lh_core::rename::{NameSpec, RenamePlan, RenameStatus, execute_rename, plan_rename};
-use lh_core::scan;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -42,25 +42,44 @@ pub(crate) enum RenameRowStatus {
 }
 
 pub(crate) fn run_rename(args: RenameArgs, theme: ThemeName) -> ExitCode {
-    if !args.dir.is_dir() {
-        eprintln!("lh-tui: {} is not a directory", args.dir.display());
-        return ExitCode::from(2);
-    }
-    let set = match scan::scan(&args.dir, false) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("lh-tui: scanning {}: {e:#}", args.dir.display());
-            return ExitCode::from(2);
-        }
+    let folder = match scan_folder(&args.dir) {
+        Ok(f) => f,
+        Err(refusal) => return refusal.exit(),
     };
-    for (skipped, why) in &set.skipped {
-        eprintln!("skipped {}: {why}", skipped.display());
-    }
-    if set.files.is_empty() {
-        eprintln!("no audio files found in {}", args.dir.display());
-        return ExitCode::from(1);
+    for line in &folder.skipped {
+        eprintln!("{line}");
     }
 
+    let result = {
+        let mut terminal = TerminalGuard::with_paste();
+        rename_screen(&mut terminal, &args, &folder.files, Theme::new(theme))
+    };
+
+    match result {
+        // Leaving without applying anything is not a failure, same as today's `$?`.
+        Ok(ok) => {
+            if ok.unwrap_or(true) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("lh-tui: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Seeds the spec from `args`, then from the folder's own name where that is an etree show
+/// name, and runs the screen on an already-open terminal — the part the workspace shares.
+/// `None` when the person left without applying; otherwise whether every rename landed.
+pub(crate) fn rename_screen(
+    terminal: &mut DefaultTerminal,
+    args: &RenameArgs,
+    files: &[AudioFile],
+    theme: Theme,
+) -> io::Result<Option<bool>> {
     let show_name = args
         .dir
         .file_name()
@@ -78,35 +97,18 @@ pub(crate) fn run_rename(args: RenameArgs, theme: ThemeName) -> ExitCode {
         .unwrap_or_default();
     let disc = args.disc.map(|d| d.to_string()).unwrap_or_default();
 
-    let files: Vec<PathBuf> = set.files.iter().map(|f| f.path.clone()).collect();
+    let files: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
 
-    let result = {
-        let mut terminal = TerminalGuard::with_paste();
-        run_rename_screen(
-            &mut terminal,
-            &args.dir,
-            files,
-            band,
-            date,
-            args.short_year,
-            disc,
-            Theme::new(theme),
-        )
-    };
-
-    match result {
-        Ok(ok) => {
-            if ok {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
-        Err(e) => {
-            eprintln!("lh-tui: {e}");
-            ExitCode::from(2)
-        }
-    }
+    run_rename_screen(
+        terminal,
+        &args.dir,
+        files,
+        band,
+        date,
+        args.short_year,
+        disc,
+        theme,
+    )
 }
 
 pub(crate) fn current_spec(
@@ -151,7 +153,7 @@ pub(crate) fn run_rename_screen(
     short_year: bool,
     disc: String,
     theme: Theme,
-) -> io::Result<bool> {
+) -> io::Result<Option<bool>> {
     let names: Vec<String> = files
         .iter()
         .map(|p| {
@@ -327,7 +329,10 @@ pub(crate) fn run_rename_screen(
         tick = tick.wrapping_add(1);
     }
 
-    Ok(rows.iter().all(|r| matches!(r, RenameRowStatus::Ok)))
+    if applied.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(rows.iter().all(|r| matches!(r, RenameRowStatus::Ok))))
 }
 
 #[allow(clippy::too_many_arguments)]

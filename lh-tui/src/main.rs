@@ -3,6 +3,10 @@
 //! every command `lh` knows is callable here too — `lh-tui convert --to flac .` works the
 //! same as `lh convert --to flac .`.
 //!
+//! Given a folder instead of a command, `lh-tui <folder>` opens the workspace: a menu of
+//! the screens a show goes through (rename, convert, tag, ...) on that one folder, each
+//! returning to the menu when quit (`screens/workspace.rs`, `docs/tui.md` §1).
+//!
 //! Most commands have an actual screen by now (`docs/tui.md` tracks which); a command with
 //! none yet runs exactly as `lh` would — printing to the terminal rather than drawing one —
 //! via `run_headless`, which is the permanent fallback for commands that never earn a screen
@@ -20,6 +24,7 @@ mod screens;
 mod terminal;
 mod theme;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use batch::*;
@@ -34,7 +39,8 @@ use theme::*;
 
 /// `lh-tui`'s own top-level args: the same subcommands `lh_cli::Cli` parses, plus a
 /// `--theme` flag that only makes sense for a screen-drawing binary, so it lives here
-/// rather than on the `Cli` shared with the headless `lh` binary.
+/// rather than on the `Cli` shared with the headless `lh` binary — and, instead of a
+/// subcommand, a bare folder, which opens the workspace (`screens/workspace.rs`).
 #[derive(Parser)]
 #[command(
     name = "lh-tui",
@@ -45,14 +51,29 @@ struct Args {
     /// Color theme for the verify/checksum/torrent screens.
     #[arg(long, value_enum, default_value = "default")]
     theme: ThemeName,
+    /// A show folder to open the workspace on: rename, convert and tag it from one
+    /// session, without restarting for each screen. Defaults to the current directory
+    /// when no command is given either.
+    dir: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 fn main() -> ExitCode {
     let cli = Args::parse();
     let theme = cli.theme;
-    match cli.command {
+    let command = match (cli.command, cli.dir) {
+        (Some(command), None) => command,
+        (None, dir) => return run_workspace(dir.unwrap_or_else(|| PathBuf::from(".")), theme),
+        (Some(_), Some(dir)) => {
+            eprintln!(
+                "lh-tui: give either a folder or a command, not both ({} came first)",
+                dir.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match command {
         Command::Verify(paths) => run_verify(paths, theme),
         Command::Sbe(a) => match a.command {
             Some(SbeSub::Fix(fix_args)) => run_sbe_fix(fix_args, theme),

@@ -1,3 +1,4 @@
+use std::process::ExitCode;
 use std::time::Instant;
 
 use lh_cli::Paths;
@@ -59,4 +60,61 @@ pub(crate) fn describe(paths: &Paths) -> String {
         [one] => one.display().to_string(),
         many => format!("{} paths", many.len()),
     }
+}
+
+/// Why a screen could not open: what to tell the person, and the exit code `lh` itself
+/// would have used for it. The single-command entry points print it and exit; the
+/// workspace shows it beside the step instead, since stderr is hidden behind its screen.
+pub(crate) struct Refusal {
+    pub(crate) message: String,
+    pub(crate) code: u8,
+}
+
+impl Refusal {
+    pub(crate) fn new(code: u8, message: impl Into<String>) -> Self {
+        Refusal {
+            message: message.into(),
+            code,
+        }
+    }
+
+    pub(crate) fn exit(self) -> ExitCode {
+        eprintln!("{}", self.message);
+        ExitCode::from(self.code)
+    }
+}
+
+/// One show folder's audio files (not recursive — a show is one folder), plus a line for
+/// each file the scan skipped, left for the caller to print or show.
+pub(crate) struct Folder {
+    pub(crate) files: Vec<AudioFile>,
+    pub(crate) skipped: Vec<String>,
+}
+
+/// The scan tag and rename open with, and every workspace step: refuses a path that is not
+/// a folder, or a folder with no audio in it.
+pub(crate) fn scan_folder(dir: &Path) -> Result<Folder, Refusal> {
+    if !dir.is_dir() {
+        return Err(Refusal::new(
+            2,
+            format!("lh-tui: {} is not a directory", dir.display()),
+        ));
+    }
+    let set = scan::scan(dir, false)
+        .map_err(|e| Refusal::new(2, format!("lh-tui: scanning {}: {e:#}", dir.display())))?;
+    if set.files.is_empty() {
+        return Err(Refusal::new(
+            1,
+            format!("no audio files found in {}", dir.display()),
+        ));
+    }
+    let skipped = set
+        .skipped
+        .iter()
+        .map(|(path, why)| format!("skipped {}: {why}", path.display()))
+        .collect();
+    Ok(Folder {
+        files: set.files,
+        skipped,
+    })
 }
