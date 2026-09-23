@@ -1,6 +1,8 @@
 //! Vorbis comments, read and written to the etree tagging standard (docs/tagging.md §4).
 //!
-//! Eight fields, named by [wiki.etree.org/FlacMetadata](http://wiki.etree.org/index.php?page=FlacMetadata).
+//! Eight fields, named by [wiki.etree.org/FlacMetadata](http://wiki.etree.org/index.php?page=FlacMetadata),
+//! plus `TRACKTOTAL`, which the etree page does not name but Xiph's own field
+//! recommendations do, and which players (VLC, foobar2000) read to show "track 1 of 16".
 //! They are ordinary Vorbis comments — "the only officially supported tagging mechanism in
 //! FLAC", UTF-8 throughout — so this module is a thin, careful layer over `metaflac` rather
 //! than a format implementation.
@@ -27,9 +29,9 @@ use crate::error::{Error, Result};
 use crate::model::AudioFormat;
 use std::path::Path;
 
-/// One of the eight fields the etree standard names.
+/// One of the eight fields the etree standard names, or `TRACKTOTAL` (see the module docs).
 ///
-/// An enum rather than eight loose accessors because every caller past this module wants to
+/// An enum rather than nine loose accessors because every caller past this module wants to
 /// walk them: the CLI prints a diff of the ones that change, and the TUI draws the same diff
 /// in a pane. Neither should carry its own copy of the list, or of the order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +41,7 @@ pub enum Field {
     Album,
     Date,
     TrackNumber,
+    TrackTotal,
     Genre,
     Comment,
     Location,
@@ -47,12 +50,13 @@ pub enum Field {
 impl Field {
     /// In the order a person reads them, not alphabetically: what the track is, then what
     /// the show was, then the notes about it.
-    pub const ALL: [Field; 8] = [
+    pub const ALL: [Field; 9] = [
         Self::Title,
         Self::Artist,
         Self::Album,
         Self::Date,
         Self::TrackNumber,
+        Self::TrackTotal,
         Self::Genre,
         Self::Comment,
         Self::Location,
@@ -67,6 +71,7 @@ impl Field {
             Self::Album => "ALBUM",
             Self::Date => "DATE",
             Self::TrackNumber => "TRACKNUMBER",
+            Self::TrackTotal => "TRACKTOTAL",
             Self::Genre => "GENRE",
             Self::Comment => "COMMENT",
             Self::Location => "LOCATION",
@@ -76,14 +81,16 @@ impl Field {
     /// Whether the field describes one track or the whole show. The show-level six are
     /// filled in once and applied to every file; only `TITLE` and `TRACKNUMBER` differ per
     /// track, which is what makes a show's tags a small form plus a list of titles.
+    /// `TRACKTOTAL` is show-level too — the same count on every file — but, like
+    /// `TRACKNUMBER`, it is derived from the files rather than typed.
     pub fn is_per_track(self) -> bool {
         matches!(self, Self::Title | Self::TrackNumber)
     }
 }
 
-/// The eight etree fields of one file.
+/// The etree fields of one file, plus `TRACKTOTAL`.
 ///
-/// Every field is a `String`, `TRACKNUMBER` included, because this type has to report what a
+/// Every field is a `String`, `TRACKNUMBER` and `TRACKTOTAL` included, because this type has to report what a
 /// file actually says. Real files in circulation carry `1/17` and `01`, and typing the field
 /// as a number would make [`read`] lossy and any diff built on it a lie about what is there.
 /// [`Tags::track_number`] parses it for the callers that want the number.
@@ -97,6 +104,7 @@ pub struct Tags {
     pub album: Option<String>,
     pub date: Option<String>,
     pub track_number: Option<String>,
+    pub track_total: Option<String>,
     pub genre: Option<String>,
     pub comment: Option<String>,
     pub location: Option<String>,
@@ -110,6 +118,7 @@ impl Tags {
             Field::Album => &self.album,
             Field::Date => &self.date,
             Field::TrackNumber => &self.track_number,
+            Field::TrackTotal => &self.track_total,
             Field::Genre => &self.genre,
             Field::Comment => &self.comment,
             Field::Location => &self.location,
@@ -124,6 +133,7 @@ impl Tags {
             Field::Album => &mut self.album,
             Field::Date => &mut self.date,
             Field::TrackNumber => &mut self.track_number,
+            Field::TrackTotal => &mut self.track_total,
             Field::Genre => &mut self.genre,
             Field::Comment => &mut self.comment,
             Field::Location => &mut self.location,
@@ -139,6 +149,22 @@ impl Tags {
 
     pub fn is_empty(&self) -> bool {
         Field::ALL.iter().all(|f| self.get(*f).is_none())
+    }
+
+    /// What a file carrying `self` carries once [`apply`] has written `edit`: the edit's
+    /// value where it names one, nothing where it clears one (`Some("")`), and `self`'s
+    /// value everywhere it is `None`. A screen shows this before a write lands, then swaps
+    /// in a fresh [`read`] once it has.
+    pub fn applied(&self, edit: &Tags) -> Tags {
+        let mut out = self.clone();
+        for field in Field::ALL {
+            match edit.get(field) {
+                None => {}
+                Some("") => out.set(field, None),
+                Some(value) => out.set(field, Some(value.to_string())),
+            }
+        }
+        out
     }
 
     /// Every field where `self` and `other` disagree, in [`Field::ALL`] order, as
@@ -170,7 +196,7 @@ pub fn is_taggable(format: AudioFormat) -> bool {
     matches!(format, AudioFormat::Flac)
 }
 
-/// Read the eight etree fields. Every other comment in the file is ignored, not lost —
+/// Read the etree fields and `TRACKTOTAL`. Every other comment in the file is ignored, not lost —
 /// [`apply`] preserves what it does not set.
 ///
 /// A field the file does not carry comes back `None`. A field it carries more than once
@@ -352,6 +378,24 @@ mod tests {
         let mut edit = Tags::default();
         edit.set(Field::Genre, Some(String::new()));
         assert_eq!(before.changes(&edit), [(Field::Genre, Some("Polka"), "")]);
+    }
+
+    #[test]
+    fn applied_sets_clears_and_keeps_as_apply_would() {
+        let mut before = Tags::default();
+        before.set(Field::Artist, Some("Grateful Dead".into()));
+        before.set(Field::Genre, Some("Polka".into()));
+        before.set(Field::Title, Some("Bertha".into()));
+
+        let mut edit = Tags::default();
+        edit.set(Field::Title, Some("Sugaree".into())); // set
+        edit.set(Field::Genre, Some(String::new())); // cleared
+        // ARTIST left None: kept.
+
+        let after = before.applied(&edit);
+        assert_eq!(after.get(Field::Title), Some("Sugaree"));
+        assert_eq!(after.get(Field::Genre), None);
+        assert_eq!(after.get(Field::Artist), Some("Grateful Dead"));
     }
 
     #[test]

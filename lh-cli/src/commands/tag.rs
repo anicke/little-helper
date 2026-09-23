@@ -9,7 +9,7 @@ use std::path::Path;
 ///
 /// Only FLAC files are tracks; anything else in the folder (a WAV left beside its converted
 /// FLAC) is reported as N/A and left out entirely. `TRACKNUMBER` always comes from position
-/// among the FLAC files, never typed. Every other field is show-level — one value applied
+/// among the FLAC files and `TRACKTOTAL` from their count, never typed. Every other field is show-level — one value applied
 /// to every file — except `TITLE`, which comes
 /// from `--titles` in file order when given. The full diff is always printed; nothing is
 /// written unless `--yes` is given, and a write is followed immediately by the
@@ -72,6 +72,7 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
         location: args.location.clone(),
         title: None,
         track_number: None,
+        track_total: Some(files.len().to_string()),
     };
 
     let mut any_change = false;

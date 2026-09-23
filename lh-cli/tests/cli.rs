@@ -600,7 +600,7 @@ fn tag_without_yes_writes_nothing() {
 }
 
 /// `--yes` writes the show-level fields to every taggable file plus the position-derived
-/// `TRACKNUMBER`, and the audio survives untouched (docs/tagging.md §1 contract point 2).
+/// `TRACKNUMBER` and count-derived `TRACKTOTAL`, and the audio survives untouched (docs/tagging.md §1 contract point 2).
 #[test]
 fn tag_yes_writes_artist_and_track_number() {
     let dir = tempfile::tempdir().unwrap();
@@ -621,6 +621,7 @@ fn tag_yes_writes_artist_and_track_number() {
     let tags = lh_core::tag::read(&dir.path().join("t01.flac")).unwrap();
     assert_eq!(tags.get(lh_core::tag::Field::Artist), Some("Grateful Dead"));
     assert_eq!(tags.get(lh_core::tag::Field::TrackNumber), Some("1"));
+    assert_eq!(tags.get(lh_core::tag::Field::TrackTotal), Some("1"));
     assert_eq!(
         lh_core::analysis::verify(&dir.path().join("t01.flac")).unwrap(),
         lh_core::analysis::Verification::Ok
@@ -655,7 +656,7 @@ fn tag_reports_a_non_flac_member_as_not_applicable_rather_than_failing() {
 
 /// The WAVs a conversion leaves beside their FLACs are not tracks: numbering and the
 /// `--titles` count run over the FLAC files alone, so `t01.wav` sorting between
-/// `t01.flac` and `t02.flac` doesn't turn the second FLAC into track 3.
+/// `t01.flac` and `t02.flac` doesn't turn the second FLAC into track 3 of 4.
 #[test]
 fn tag_numbers_tracks_among_flac_files_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -681,6 +682,7 @@ fn tag_numbers_tracks_among_flac_files_only() {
 
     let second = lh_core::tag::read(&dir.path().join("t02.flac")).unwrap();
     assert_eq!(second.get(lh_core::tag::Field::TrackNumber), Some("2"));
+    assert_eq!(second.get(lh_core::tag::Field::TrackTotal), Some("2"));
     assert_eq!(second.get(lh_core::tag::Field::Title), Some("Two"));
 }
 

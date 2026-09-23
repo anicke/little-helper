@@ -20,9 +20,9 @@ use std::path::Path;
 // --- Tag ---------------------------------------------------------------------------------
 
 /// The six show-level fields a person edits directly, in the order shown on screen. The
-/// other two of `tag::Field::ALL` are handled separately: `TITLE` is per-track (the
-/// titles pane below), `TRACKNUMBER` is always derived from position and has no field at
-/// all (docs/tagging.md §5).
+/// other three of `tag::Field::ALL` are handled separately: `TITLE` is per-track (the
+/// titles pane below), `TRACKNUMBER` and `TRACKTOTAL` are always derived from position and
+/// count and have no field at all (docs/tagging.md §5).
 pub(crate) const TAG_SHOW_FIELDS: [tag::Field; 6] = [
     tag::Field::Artist,
     tag::Field::Album,
@@ -39,10 +39,13 @@ pub(crate) enum TagFocus {
     Titles,
 }
 
+/// The screen opens on `Viewing` — what the files carry now — and the person chooses to
+/// edit from there. A finished write lands back in `Viewing`, showing the result, so
+/// another round of edits is one `e` away rather than a relaunch.
 pub(crate) enum TagStage {
+    Viewing,
     Editing,
     Writing,
-    Done,
 }
 
 #[derive(Clone)]
@@ -57,6 +60,10 @@ pub(crate) enum WriteStatus {
 pub(crate) struct WriteRow {
     name: String,
     status: WriteStatus,
+    /// What the file carries: the edit applied over its old tags while the write is
+    /// pending, then what a fresh read found once it has landed. So the done screen shows
+    /// the file, not the plan.
+    tags: Tags,
 }
 
 /// Everything the tag screen opens with: the files, their tags as they stand, and the
@@ -232,12 +239,13 @@ pub(crate) fn tag_screen(
     )
 }
 
-pub(crate) fn tag_edit(fields: &[Field; 6], titles: &[Field], track: usize) -> Tags {
+pub(crate) fn tag_edit(fields: &[Field; 6], titles: &[Field], track: usize, total: usize) -> Tags {
     let mut edit = Tags::default();
     for (field, value) in TAG_SHOW_FIELDS.iter().zip(fields.iter()) {
         edit.set(*field, value.edit_value());
     }
     edit.track_number = Some((track + 1).to_string());
+    edit.track_total = Some(total.to_string());
     edit.title = titles.get(track).and_then(Field::edit_value);
     edit
 }
@@ -253,14 +261,14 @@ pub(crate) fn start_tag_write(
     fields: &[Field; 6],
     titles: &[Field],
 ) -> (
-    Option<Queue<lh_core::Result<()>>>,
+    Option<Queue<lh_core::Result<Tags>>>,
     Vec<usize>,
     Vec<WriteRow>,
 ) {
     let mut rows = Vec::with_capacity(files.len());
     let mut edits = Vec::with_capacity(files.len());
     for (i, f) in files.iter().enumerate() {
-        let edit = tag_edit(fields, titles, i);
+        let edit = tag_edit(fields, titles, i, files.len());
         let status = if before[i].changes(&edit).is_empty() {
             WriteStatus::Unchanged
         } else {
@@ -269,6 +277,7 @@ pub(crate) fn start_tag_write(
         rows.push(WriteRow {
             name: f.file_name(),
             status,
+            tags: before[i].applied(&edit),
         });
         edits.push(edit);
     }
@@ -280,7 +289,7 @@ pub(crate) fn start_tag_write(
         return (None, Vec::new(), rows);
     }
 
-    let queue: Queue<lh_core::Result<()>> = Queue::new();
+    let queue: Queue<lh_core::Result<Tags>> = Queue::new();
     let mut submitted = Vec::new();
     for (i, f) in files.iter().enumerate() {
         if !matches!(rows[i].status, WriteStatus::Pending) {
@@ -288,11 +297,11 @@ pub(crate) fn start_tag_write(
         }
         let path = f.path.clone();
         let edit = edits[i].clone();
-        queue.submit(f.file_name(), move |_progress| -> lh_core::Result<()> {
+        queue.submit(f.file_name(), move |_progress| -> lh_core::Result<Tags> {
             let audio_before = ffp(&path)?;
             tag::apply(&path, &edit)?;
             tag::assert_audio_unchanged(&path, audio_before)?;
-            Ok(())
+            tag::read(&path)
         });
         submitted.push(i);
     }
@@ -305,7 +314,7 @@ pub(crate) fn run_tag_screen(
     dir: &Path,
     files: Vec<AudioFile>,
     ignored: usize,
-    before: Vec<Tags>,
+    mut before: Vec<Tags>,
     show_seed: Tags,
     title_seed: Vec<String>,
     theme: Theme,
@@ -316,18 +325,22 @@ pub(crate) fn run_tag_screen(
     let mut focus = TagFocus::None;
     let mut title_idx = 0usize;
 
-    let mut stage = TagStage::Editing;
+    let mut stage = TagStage::Viewing;
     let mut rows: Vec<WriteRow> = files
         .iter()
-        .map(|f| WriteRow {
+        .zip(&before)
+        .map(|(f, tags)| WriteRow {
             name: f.file_name(),
             status: WriteStatus::Pending,
+            tags: tags.clone(),
         })
         .collect();
-    let mut queue: Option<Queue<lh_core::Result<()>>> = None;
+    let mut queue: Option<Queue<lh_core::Result<Tags>>> = None;
     let mut submitted_rows: Vec<usize> = Vec::new();
     let mut wrote = 0usize;
     let mut failed = 0usize;
+    // `None` until a write has run; then whether every write so far landed.
+    let mut applied: Option<bool> = None;
 
     let mut tick = 0usize;
 
@@ -342,8 +355,9 @@ pub(crate) fn run_tag_screen(
                     Event::Finished { id, output, .. } => {
                         let row = submitted_rows[id.index()];
                         rows[row].status = match output {
-                            Ok(()) => {
+                            Ok(tags) => {
                                 wrote += 1;
+                                rows[row].tags = tags;
                                 WriteStatus::Ok
                             }
                             Err(e) => {
@@ -364,14 +378,39 @@ pub(crate) fn run_tag_screen(
                     .iter()
                     .all(|r| !matches!(r.status, WriteStatus::Pending | WriteStatus::Running))
             {
-                stage = TagStage::Done;
+                // The files are the new "before": the next edit diffs against what they
+                // carry now. A failed row shows what is actually on disk, not the plan.
+                for &i in &submitted_rows {
+                    if !matches!(rows[i].status, WriteStatus::Ok) {
+                        rows[i].tags =
+                            tag::read(&files[i].path).unwrap_or_else(|_| before[i].clone());
+                    }
+                    before[i] = rows[i].tags.clone();
+                }
+                applied = Some(applied.unwrap_or(true) && failed == 0);
+                queue = None;
+                stage = TagStage::Viewing;
             }
         }
 
         terminal.draw(|frame| {
             draw_tag(
-                frame, dir, &files, ignored, &before, &fields, &titles, focus, title_idx, &rows,
-                &stage, wrote, failed, tick, &theme,
+                frame,
+                dir,
+                &files,
+                ignored,
+                &before,
+                &fields,
+                &titles,
+                focus,
+                title_idx,
+                &rows,
+                &stage,
+                applied.is_some(),
+                wrote,
+                failed,
+                tick,
+                &theme,
             )
         })?;
 
@@ -387,7 +426,15 @@ pub(crate) fn run_tag_screen(
                         break;
                     }
                     match stage {
+                        TagStage::Viewing => match key.code {
+                            KeyCode::Char('e') => stage = TagStage::Editing,
+                            KeyCode::Char('q') | KeyCode::Esc => break,
+                            _ => {}
+                        },
                         TagStage::Editing => match key.code {
+                            // Esc steps out one level: a field, then the editor. The edits
+                            // are kept, so `e` picks up where this left off.
+                            KeyCode::Esc if focus == TagFocus::None => stage = TagStage::Viewing,
                             KeyCode::Esc => focus = TagFocus::None,
                             KeyCode::Char('q') if focus == TagFocus::None => break,
                             KeyCode::Char('a') if focus == TagFocus::None => {
@@ -395,10 +442,13 @@ pub(crate) fn run_tag_screen(
                                     start_tag_write(&files, &before, &fields, &titles);
                                 rows = initial_rows;
                                 submitted_rows = subs;
+                                wrote = 0;
+                                failed = 0;
                                 stage = if q.is_some() {
                                     TagStage::Writing
                                 } else {
-                                    TagStage::Done
+                                    applied = Some(applied.unwrap_or(true));
+                                    TagStage::Viewing
                                 };
                                 queue = q;
                             }
@@ -442,7 +492,7 @@ pub(crate) fn run_tag_screen(
                                 TagFocus::None => {}
                             },
                         },
-                        TagStage::Writing | TagStage::Done => {
+                        TagStage::Writing => {
                             if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                                 if let Some(q) = &queue {
                                     q.cancel_token().cancel();
@@ -452,10 +502,16 @@ pub(crate) fn run_tag_screen(
                         }
                     }
                 }
+                // Pasting titles is the common reason to edit at all, so it works straight
+                // from the overview too and opens the editor on the result.
                 CtEvent::Paste(text)
-                    if matches!(stage, TagStage::Editing) && focus == TagFocus::Titles =>
+                    if matches!(stage, TagStage::Viewing)
+                        || (matches!(stage, TagStage::Editing)
+                            && matches!(focus, TagFocus::None | TagFocus::Titles)) =>
                 {
+                    stage = TagStage::Editing;
                     titles = paste_titles(&text, files.len());
+                    focus = TagFocus::Titles;
                     title_idx = title_idx.min(titles.len().saturating_sub(1));
                 }
                 _ => {}
@@ -463,10 +519,10 @@ pub(crate) fn run_tag_screen(
         }
         tick = tick.wrapping_add(1);
     }
-    if matches!(stage, TagStage::Editing) {
-        return Ok(None);
+    if matches!(stage, TagStage::Writing) {
+        applied = Some(applied.unwrap_or(true) && failed == 0);
     }
-    Ok(Some(failed == 0))
+    Ok(applied)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -482,6 +538,7 @@ pub(crate) fn draw_tag(
     title_idx: usize,
     rows: &[WriteRow],
     stage: &TagStage,
+    applied: bool,
     wrote: usize,
     failed: usize,
     tick: usize,
@@ -499,9 +556,10 @@ pub(crate) fn draw_tag(
         .split(area);
 
     let mode = match stage {
-        TagStage::Editing => "tag",
+        TagStage::Viewing if applied => "tag (done)",
+        TagStage::Viewing => "tag",
+        TagStage::Editing => "tag (editing)",
         TagStage::Writing => "tag (writing)",
-        TagStage::Done => "tag (done)",
     };
     let header = Line::from(vec![
         Span::styled(" lh-tui ", theme.accent.bold()),
@@ -521,13 +579,19 @@ pub(crate) fn draw_tag(
         TagStage::Editing => draw_tag_editor(
             frame, outer[1], files, ignored, before, fields, titles, focus, title_idx, theme,
         ),
-        TagStage::Writing | TagStage::Done => draw_write_table(frame, outer[1], rows, tick, theme),
+        TagStage::Viewing | TagStage::Writing => {
+            let show_status = applied || matches!(stage, TagStage::Writing);
+            draw_tag_result(frame, outer[1], rows, ignored, show_status, tick, theme)
+        }
     }
 
-    draw_write_gauge(frame, outer[2], rows, stage, wrote, failed, theme);
+    draw_write_gauge(frame, outer[2], rows, stage, applied, wrote, failed, theme);
 
     let footer = match (stage, focus) {
-        (TagStage::Editing, TagFocus::None) => " tab fields   e titles   a apply   q/esc quit ",
+        (TagStage::Viewing, _) => " e edit   paste titles   q/esc quit ",
+        (TagStage::Editing, TagFocus::None) => {
+            " tab fields   e titles   a apply   esc back   q quit "
+        }
         (TagStage::Editing, TagFocus::Titles) => {
             " ↑/↓ select line   paste replaces all   esc leave "
         }
@@ -649,11 +713,38 @@ pub(crate) fn draw_tag_diff(
     titles: &[Field],
     theme: &Theme,
 ) {
+    // Sized to the content so the file names are never clipped; the changes column takes
+    // whatever is left.
+    let number_width = format!("{0}/{0}", files.len()).len() as u16;
+    let name_width = files
+        .iter()
+        .map(|f| f.file_name().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("file".len()) as u16;
     let table_rows = files.iter().enumerate().map(|(i, f)| {
-        let edit = tag_edit(fields, titles, i);
+        let edit = tag_edit(fields, titles, i, files.len());
         let changes = before[i].changes(&edit);
+        // The number and total this file will carry, always shown: both are derived and
+        // never typed (docs/tagging.md §5), so this column is the only place to see them
+        // when they already match. Accented when writing either would change the file.
+        let number_style = if changes
+            .iter()
+            .any(|(f, ..)| matches!(f, tag::Field::TrackNumber | tag::Field::TrackTotal))
+        {
+            theme.accent
+        } else {
+            theme.dim
+        };
+        let number = Cell::from(format!(
+            "{}/{}",
+            edit.track_number.as_deref().unwrap_or_default(),
+            edit.track_total.as_deref().unwrap_or_default()
+        ))
+        .style(number_style);
         if changes.is_empty() {
             Row::new(vec![
+                number,
                 Cell::from(f.file_name()),
                 Cell::from("unchanged").style(theme.dim),
                 Cell::from(""),
@@ -667,6 +758,7 @@ pub(crate) fn draw_tag_diff(
                 .collect::<Vec<_>>()
                 .join(", ");
             Row::new(vec![
+                number,
                 Cell::from(f.file_name()),
                 Cell::from("changed").style(theme.accent),
                 Cell::from(detail),
@@ -683,12 +775,13 @@ pub(crate) fn draw_tag_diff(
     let table = Table::new(
         table_rows,
         [
-            Constraint::Percentage(30),
+            Constraint::Length(number_width),
+            Constraint::Length(name_width),
             Constraint::Length(10),
-            Constraint::Percentage(60),
+            Constraint::Min(0),
         ],
     )
-    .header(Row::new(vec!["file", "status", "changes"]).style(theme.header))
+    .header(Row::new(vec!["#", "file", "status", "changes"]).style(theme.header))
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -699,41 +792,119 @@ pub(crate) fn draw_tag_diff(
     frame.render_widget(table, area);
 }
 
-/// Shared by the tag and rename apply stages: both settle into "one row per file, status
-/// going Pending → Running → OK/FAILED" (docs/tagging.md §6), just with a different
-/// `WriteStatus` producer behind it.
-pub(crate) fn draw_write_table(
+/// What every file carries now, one row per file — the screen's opening overview, and
+/// during and after a write the same table with a status column going
+/// Pending → Running → OK/FAILED (docs/tagging.md §6). The show-level fields are the same
+/// on every file, so they sit once in a pane above rather than repeating down the table;
+/// a field whose value differs between files says so instead of picking one.
+pub(crate) fn draw_tag_result(
     frame: &mut Frame,
     area: Rect,
     rows: &[WriteRow],
+    ignored: usize,
+    show_status: bool,
     tick: usize,
     theme: &Theme,
 ) {
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(TAG_SHOW_FIELDS.len() as u16 + 2),
+            Constraint::Min(3),
+        ])
+        .split(area);
+
+    let show_lines: Vec<Line> = TAG_SHOW_FIELDS
+        .iter()
+        .map(|&field| {
+            let first = rows.first().and_then(|r| r.tags.get(field));
+            let value = if rows.iter().all(|r| r.tags.get(field) == first) {
+                Span::raw(first.unwrap_or_default().to_string())
+            } else {
+                Span::styled("(differs between files)", theme.dim)
+            };
+            Line::from(vec![
+                Span::styled(format!("{:<11}", field.key()), theme.dim),
+                value,
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(show_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" show ")
+                .border_style(theme.dim),
+        ),
+        split[0],
+    );
+
     let spin = SPINNER[tick / 2 % SPINNER.len()];
+    let number = |t: &Tags| {
+        format!(
+            "{}/{}",
+            t.get(tag::Field::TrackNumber).unwrap_or("–"),
+            t.get(tag::Field::TrackTotal).unwrap_or("–")
+        )
+    };
+    let number_width = rows
+        .iter()
+        .map(|r| number(&r.tags).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(1) as u16;
+    let title_width = rows
+        .iter()
+        .map(|r| r.tags.title.as_deref().unwrap_or_default().chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp("title".len(), 48) as u16;
+    let name_width = rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("file".len()) as u16;
     let table_rows = rows.iter().map(|row| {
         let (label, style, detail) = write_row_cells(&row.status, spin, theme);
-        Row::new(vec![
-            Cell::from(label).style(style),
-            Cell::from(row.name.clone()),
-            Cell::from(detail).style(theme.dim),
-        ])
+        let mut cells = vec![
+            Cell::from(number(&row.tags)),
+            Cell::from(row.tags.title.clone().unwrap_or_default()),
+            Cell::from(row.name.clone()).style(theme.dim),
+        ];
+        if show_status {
+            cells.insert(0, Cell::from(label).style(style));
+            cells.push(Cell::from(detail).style(theme.error));
+        }
+        Row::new(cells)
     });
-    let table = Table::new(
-        table_rows,
-        [
-            Constraint::Length(10),
-            Constraint::Percentage(45),
-            Constraint::Percentage(45),
-        ],
-    )
-    .header(Row::new(vec!["status", "file", "detail"]).style(theme.header))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" files ")
-            .border_style(theme.dim),
-    );
-    frame.render_widget(table, area);
+    let mut widths = vec![
+        Constraint::Length(number_width),
+        Constraint::Length(title_width),
+        Constraint::Length(name_width),
+    ];
+    let mut header = vec!["#", "title", "file"];
+    if show_status {
+        widths.insert(0, Constraint::Length(10));
+        widths.push(Constraint::Min(0));
+        header.insert(0, "status");
+        header.push("detail");
+    }
+    // Say what was left out rather than dropping it silently (Principle 5).
+    let title = match ignored {
+        0 => " files ".to_string(),
+        1 => " files — 1 non-FLAC file not tagged ".to_string(),
+        n => format!(" files — {n} non-FLAC files not tagged "),
+    };
+    let table = Table::new(table_rows, widths)
+        .header(Row::new(header).style(theme.header))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(theme.dim),
+        );
+    frame.render_widget(table, split[1]);
 }
 
 pub(crate) fn write_row_cells(
@@ -750,17 +921,24 @@ pub(crate) fn write_row_cells(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_write_gauge(
     frame: &mut Frame,
     area: Rect,
     rows: &[WriteRow],
     stage: &TagStage,
+    applied: bool,
     wrote: usize,
     failed: usize,
     theme: &Theme,
 ) {
     let total = rows.len();
     let (ratio, style, label) = match stage {
+        TagStage::Viewing if !applied => (
+            0.0,
+            theme.accent,
+            format!("{total} files — press e to edit"),
+        ),
         TagStage::Editing => (
             0.0,
             theme.accent,

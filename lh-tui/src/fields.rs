@@ -112,8 +112,38 @@ impl Field {
 /// on a count mismatch (docs/tagging.md §5), this is a live editable field — a paste that
 /// is briefly the wrong length is finished by editing afterwards, not by failing the
 /// screen.
+///
+/// Many terminals (xterm, VTE, …) send pasted newlines as bare `\r`, which `str::lines`
+/// does not split on, so `\r\n` and `\r` are normalised to `\n` first.
 pub(crate) fn paste_titles(text: &str, len: usize) -> Vec<Field> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut fields: Vec<Field> = text.lines().map(Field::new).collect();
     fields.resize_with(len, Field::default);
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn values(fields: &[Field]) -> Vec<&str> {
+        fields.iter().map(|f| f.value.as_str()).collect()
+    }
+
+    #[test]
+    fn paste_titles_splits_every_newline_style() {
+        for text in [
+            "One\nTwo\nThree\n",
+            "One\r\nTwo\r\nThree\r\n",
+            "One\rTwo\rThree\r",
+        ] {
+            assert_eq!(values(&paste_titles(text, 3)), ["One", "Two", "Three"]);
+        }
+    }
+
+    #[test]
+    fn paste_titles_pads_and_truncates_to_the_track_count() {
+        assert_eq!(values(&paste_titles("One\rTwo", 3)), ["One", "Two", ""]);
+        assert_eq!(values(&paste_titles("One\rTwo\rThree", 2)), ["One", "Two"]);
+    }
 }

@@ -1,4 +1,4 @@
-//! N2 of docs/tagging.md: the eight etree fields, read and written.
+//! N2 of docs/tagging.md: the eight etree fields and `TRACKTOTAL`, read and written.
 //!
 //! Two things are being proved here, and only one of them is "the code does what it says".
 //!
@@ -75,6 +75,7 @@ fn full_edit() -> Tags {
         album: Some("Barton Hall, Ithaca, NY".into()),
         date: Some("1977-05-08".into()),
         track_number: Some("01".into()),
+        track_total: Some("17".into()),
         genre: Some("Rock".into()),
         comment: Some("SBD > MR > DAT > CD > EAC > FLAC".into()),
         location: Some("Barton Hall, Cornell University, Ithaca, NY, USA".into()),
@@ -272,7 +273,7 @@ fn changes_predicts_exactly_what_apply_does() {
 }
 
 /// A fixture straight from the reference encoder carries a vendor string and no fields at
-/// all — every one of the eight comes back `None`, not empty-string.
+/// all — every field comes back `None`, not empty-string.
 #[test]
 fn a_file_with_no_tags_reads_as_entirely_absent() {
     let tags = tag::read(&fixture("cdda-aligned.flac")).unwrap();

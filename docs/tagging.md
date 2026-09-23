@@ -53,6 +53,11 @@ FLAC", UTF-8 throughout:
 | `COMMENT` | "the source and other lineage information (taping rig, conversion...)" |
 | `LOCATION` | venue, city, state and country — and this "should not go in the ALBUM field" |
 
+On top of those eight we also write `TRACKTOTAL`, the number of tracks in the show. The etree
+page does not name it, but Xiph's own Vorbis comment field recommendations do, and it is what
+players such as VLC and foobar2000 read to show "track 1 of 16". Writing it as its own field
+keeps `TRACKNUMBER` a plain number, as the etree page expects, rather than the ID3-style `1/16`.
+
 The last two rows contradict each other about the venue. §7 Q1 records how we resolve it and
 why that is a judgement call rather than a reading of the standard.
 
@@ -102,7 +107,7 @@ every single file.
 Recorded here rather than left implicit, the way `docs/tui.md` §1 records what the TUI is for:
 
 * **Writes land in place**, per §1. Not into an `-o` copy.
-* **The full etree tag set**, all eight fields of §0, not just the three that started this
+* **The full etree tag set**, all eight fields of §0 plus `TRACKTOTAL`, not just the three that started this
   (`TITLE`, `ARTIST`, `TRACKNUMBER`). The other five are show-level — one value for the whole
   set — so they cost one small form, not per-track work.
 * **Titles are entered as one block**, one line per track in file order, pasted or edited.
@@ -143,7 +148,7 @@ Recorded here rather than left implicit, the way `docs/tui.md` §1 records what 
 
 ### `lh-core/src/tag/mod.rs`
 
-`Tags`, the eight fields of §0. `read(path)` and `apply(path, &Tags)`, over the `metaflac`
+`Tags`, the eight fields of §0 plus `TRACKTOTAL`. `read(path)` and `apply(path, &Tags)`, over the `metaflac`
 crate `format::flac::probe` already uses (`lh-core/src/format/flac.rs:11`). `apply` writes only
 the fields the edit names and **preserves every other comment in the block, and the vendor
 string** — that string is Principle 2's provenance marker and not ours to rewrite.
@@ -199,8 +204,8 @@ the unit, and a track number only means something relative to its siblings.
 * `--titles FILE` reads one title per line in file order; `-` reads stdin, which is the
   headless equivalent of the TUI's paste block. A line count that does not match the file
   count is an error naming both numbers — never a best-effort partial apply.
-* `TRACKNUMBER` is always derived from position, never typed. There is no case where typing it
-  by hand is right.
+* `TRACKNUMBER` is always derived from position, and `TRACKTOTAL` from the number of FLAC
+  files, never typed. There is no case where typing either by hand is right.
 * Band and date default from `ShowName::parse` of the directory's own name when it is an etree
   name. When it is not, they are required, and their absence is a specific error naming what
   it wanted (Principle 5).
@@ -243,7 +248,14 @@ No new dependency for text entry: a `Field { value, cursor }` handling
 `Char`/`Backspace`/`Left`/`Right`/`Home`/`End` covers eight single-line fields, and a
 `Vec<String>` with a selected index covers the titles block.
 
-**Tag screen** — three panes over the usual footer:
+**Tag screen** opens on an **overview** of what the files carry now: the show-level fields
+once in a pane at the top (or "differs between files" when they are not uniform), and per
+file its `#` (`1/16`), `TITLE` and name. Most folders need nothing, or only titles, so
+editing is a choice made from there: `e` opens the editor, and pasting titles straight into
+the overview opens it with the paste applied. `Esc` from the editor (with no field focused)
+goes back to the overview, keeping the edits.
+
+The **editor** is three panes over the usual footer:
 
 1. **Show fields**: `ARTIST`, `ALBUM`, `DATE`, `GENRE`, `COMMENT`, `LOCATION`, one value for
    the whole set, `Tab`/`Shift-Tab` between them. Seeded from `ShowName::parse` of the folder
@@ -251,7 +263,8 @@ No new dependency for text entry: a `Field { value, cursor }` handling
 2. **Titles**: N lines, one per file, in order, pre-filled from existing `TITLE` tags. `e`
    enters the block, paste replaces it wholesale, `Esc` leaves it.
 3. **Diff**: per file, every field that would change, `old -> new`, unchanged fields dim.
-   `TRACKNUMBER` appears here — visible, derived, not editable.
+   `TRACKNUMBER` and `TRACKTOTAL` appear here — visible, derived, not editable — as a
+   leading `#` column reading `1/16`, accented when either would change.
 
 **Rename screen**: the `NameSpec` fields above a live `from -> to` table, recomputed by
 `plan_rename` on every keystroke. That is pure arithmetic over names already in memory, the
@@ -264,6 +277,11 @@ job per file, status going `Pending → Running → OK/FAILED` with the gauge be
 write phase reuses `docs/tui.md` §2 unchanged and only the edit phase is new. The post-write
 audio-MD5 re-check (§1, point 2) runs inside each job, so a file that somehow changed shows
 `FAILED` on its own row rather than in a summary nobody reads.
+
+The tag screen's apply stage is the overview again, with a status column added: each job
+re-reads the file's tags after the audio check, and the row shows that read, so the table is
+the file's state rather than a restatement of the plan. When the writes finish the screen
+stays on that overview, and what the files now carry becomes the baseline for another `e`.
 
 Every colour comes from `Theme` (`lh-tui/src/main.rs:89`), never inlined — `docs/tui.md` §0.
 
