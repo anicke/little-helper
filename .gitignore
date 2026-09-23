@@ -3,3 +3,6 @@
 *.pdb
 .DS_Store
 __pycache__/
+
+# Show folders (etree naming, e.g. gd1977-05-08.sbd.flac16) — local test material, never committed
+*.flac16/
