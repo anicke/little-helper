@@ -16,7 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // --- Torrent create -----------------------------------------------------------------
 //
@@ -57,45 +57,14 @@ pub(crate) enum CreateFocus {
 }
 
 pub(crate) fn run_torrent_create(args: TorrentCreateArgs, theme: ThemeName) -> ExitCode {
-    let source = match args.path.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("lh-tui: reading {}: {e}", args.path.display());
-            return ExitCode::from(2);
-        }
-    };
-
-    // Tracker resolution (`lh_core::torrent::resolve`, same as `cmd_torrent_create`) now
-    // happens on the picker stage inside the screen itself, seeded from `--tracker` —
-    // an unknown id or a broken entry surfaces there as an inline error to fix, rather
-    // than a preflight exit, since the picker gives a way to fix it without restarting.
-    let list = match TrackerList::load() {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("lh-tui: reading the tracker list: {e:#}");
-            return ExitCode::from(2);
-        }
-    };
-    let keys = match Passkeys::load() {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("lh-tui: reading the passkey list: {e:#}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let dst = match &args.output {
-        Some(o) => o.clone(),
-        None => match default_output(&source) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "lh-tui: {} has no parent directory to write a torrent beside",
-                    source.display()
-                );
-                return ExitCode::from(2);
-            }
-        },
+    let CreateSetup {
+        source,
+        dst,
+        list,
+        keys,
+    } = match prepare_torrent_create(&args) {
+        Ok(s) => s,
+        Err(refusal) => return refusal.exit(),
     };
     // Writing the .torrent inside the folder it describes adds a file to that folder, so
     // re-creating it later would produce a different infohash.
@@ -138,6 +107,50 @@ pub(crate) fn run_torrent_create(args: TorrentCreateArgs, theme: ThemeName) -> E
             ExitCode::from(2)
         }
     }
+}
+
+/// What the create screen opens with: the source resolved, where the torrent goes, and
+/// the tracker and passkey lists the picker offers.
+pub(crate) struct CreateSetup {
+    pub(crate) source: PathBuf,
+    pub(crate) dst: PathBuf,
+    pub(crate) list: TrackerList,
+    pub(crate) keys: Passkeys,
+}
+
+pub(crate) fn prepare_torrent_create(args: &TorrentCreateArgs) -> Result<CreateSetup, Refusal> {
+    let source = args
+        .path
+        .canonicalize()
+        .map_err(|e| Refusal::new(2, format!("lh-tui: reading {}: {e}", args.path.display())))?;
+
+    // Tracker resolution (`lh_core::torrent::resolve`, same as `cmd_torrent_create`) now
+    // happens on the picker stage inside the screen itself, seeded from `--tracker` —
+    // an unknown id or a broken entry surfaces there as an inline error to fix, rather
+    // than a preflight exit, since the picker gives a way to fix it without restarting.
+    let list = TrackerList::load()
+        .map_err(|e| Refusal::new(2, format!("lh-tui: reading the tracker list: {e:#}")))?;
+    let keys = Passkeys::load()
+        .map_err(|e| Refusal::new(2, format!("lh-tui: reading the passkey list: {e:#}")))?;
+
+    let dst = match &args.output {
+        Some(o) => o.clone(),
+        None => default_output(&source).ok_or_else(|| {
+            Refusal::new(
+                2,
+                format!(
+                    "lh-tui: {} has no parent directory to write a torrent beside",
+                    source.display()
+                ),
+            )
+        })?,
+    };
+    Ok(CreateSetup {
+        source,
+        dst,
+        list,
+        keys,
+    })
 }
 
 /// Turns a confirmed tracker pick into the running job: resolves `picked` against the

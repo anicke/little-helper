@@ -304,11 +304,7 @@ pub(crate) fn run_convert_screen(
                 let status = ConvertStatus::Done {
                     source,
                     unchecked: !c.checked_against_source,
-                    output: c
-                        .output
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| c.output.display().to_string()),
+                    output: file_name(&c.output),
                 };
                 conversions[index] = Some(*c);
                 status

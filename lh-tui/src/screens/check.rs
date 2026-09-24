@@ -79,29 +79,27 @@ impl RowStatus for CheckStatus {
     }
 }
 
+/// The list in `file`, what kind it is, and the folder its entries are relative to.
+pub(crate) fn prepare_check(file: &Path) -> Result<(ChecksumKind, ChecksumFile, PathBuf), Refusal> {
+    let kind = checksum_kind_for(file).map_err(|e| Refusal::new(2, format!("lh-tui: {e:#}")))?;
+    let list = ChecksumFile::read(kind, file)
+        .map_err(|e| Refusal::new(2, format!("lh-tui: reading {}: {e:#}", file.display())))?;
+    let dir = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok((kind, list, dir))
+}
+
 pub(crate) fn run_check(file: PathBuf, theme: ThemeName) -> ExitCode {
-    let kind = match checksum_kind_for(&file) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("lh-tui: {e:#}");
-            return ExitCode::from(2);
-        }
-    };
-    let list = match ChecksumFile::read(kind, &file) {
+    let (kind, list, dir) = match prepare_check(&file) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("lh-tui: reading {}: {e:#}", file.display());
-            return ExitCode::from(2);
-        }
+        Err(refusal) => return refusal.exit(),
     };
     if list.entries.is_empty() {
         eprintln!("no entries in {}", file.display());
         return ExitCode::SUCCESS;
     }
-    let dir = file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
 
     let result = {
         let mut terminal = TerminalGuard::new();

@@ -52,6 +52,13 @@ pub(crate) fn checksum_kind_for(file: &Path) -> anyhow::Result<ChecksumKind> {
     })
 }
 
+/// A path's last component for display, or the whole path when it has none.
+pub(crate) fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// What the header shows for where these files came from: the one path given, or a count
 /// when there were several — `Paths` allows more than one, unlike the plain folder this
 /// screen used to assume.

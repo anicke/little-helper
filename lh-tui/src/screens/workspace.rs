@@ -4,12 +4,14 @@ use std::process::ExitCode;
 
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
-use lh_cli::{ConvertArgs, Paths, RenameArgs, TagArgs, Target, TorrentCreateArgs};
+use lh_cli::{
+    ConvertArgs, Direction as SbeFixDirection, Paths, RenameArgs, SbeFixArgs, TagArgs, Target,
+    TorrentCreateArgs,
+};
 use lh_core::checksum::{ChecksumFile, ChecksumKind};
-use lh_core::model::AudioFormat;
-use lh_core::repair::{BoundaryDirection, TailPolicy, plan_fix};
+use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::scan;
-use lh_core::torrent::{Metainfo, Passkeys, TrackerList, Verdict, default_output};
+use lh_core::torrent::{Metainfo, Verdict, default_output};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
@@ -21,32 +23,6 @@ use ratatui::{DefaultTerminal, Frame};
 // that one folder with the defaults its subcommand would use given just the folder.
 // Quitting a screen comes back here instead of exiting. The folder is rescanned every time
 // a screen opens, since the one before it (a rename, a conversion) changes what is in it.
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Group {
-    Prepare,
-    Inspect,
-    Checksums,
-    Torrent,
-}
-
-impl Group {
-    const ALL: [Group; 4] = [
-        Group::Prepare,
-        Group::Inspect,
-        Group::Checksums,
-        Group::Torrent,
-    ];
-
-    fn title(self) -> &'static str {
-        match self {
-            Group::Prepare => "Prepare",
-            Group::Inspect => "Inspect",
-            Group::Checksums => "Checksums",
-            Group::Torrent => "Torrent",
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -64,90 +40,124 @@ enum Step {
     TorrentCheck,
 }
 
-impl Step {
-    /// Grouped, and in menu order within each group.
-    const ALL: [Step; 14] = [
-        Step::Rename,
-        Step::ConvertFlac,
-        Step::ConvertWav,
-        Step::Tag,
-        Step::Verify,
-        Step::Sbe,
-        Step::SbeFix,
-        Step::Check,
-        Step::Create(ChecksumKind::Ffp),
-        Step::Create(ChecksumKind::Md5),
-        Step::Create(ChecksumKind::St5),
-        Step::TorrentCreate,
-        Step::TorrentInfo,
-        Step::TorrentCheck,
-    ];
+/// One menu line: the screen, the key that opens it, its name and what it does.
+struct Item {
+    step: Step,
+    key: char,
+    label: &'static str,
+    about: &'static str,
+}
 
-    fn group(self) -> Group {
-        match self {
-            Step::Rename | Step::ConvertFlac | Step::ConvertWav | Step::Tag => Group::Prepare,
-            Step::Verify | Step::Sbe | Step::SbeFix => Group::Inspect,
-            Step::Check | Step::Create(_) => Group::Checksums,
-            Step::TorrentCreate | Step::TorrentInfo | Step::TorrentCheck => Group::Torrent,
-        }
+const fn item(step: Step, key: char, label: &'static str, about: &'static str) -> Item {
+    Item {
+        step,
+        key,
+        label,
+        about,
     }
+}
 
-    fn key(self) -> char {
-        match self {
-            Step::Rename => 'r',
-            Step::ConvertFlac => 'c',
-            Step::ConvertWav => 'w',
-            Step::Tag => 't',
-            Step::Verify => 'v',
-            Step::Sbe => 's',
-            Step::SbeFix => 'x',
-            Step::Check => 'k',
-            Step::Create(ChecksumKind::Ffp) => 'f',
-            Step::Create(ChecksumKind::Md5) => 'm',
-            Step::Create(ChecksumKind::St5) => '5',
-            Step::TorrentCreate => 'n',
-            Step::TorrentInfo => 'i',
-            Step::TorrentCheck => 'h',
-        }
-    }
+/// The whole menu, grouped, in the order it is drawn. A screen's index everywhere else
+/// (`selected`, `results`) is its position in this list flattened.
+const MENU: [(&str, &[Item]); 4] = [
+    (
+        "Prepare",
+        &[
+            item(
+                Step::Rename,
+                'r',
+                "rename",
+                "name files from band, date and track",
+            ),
+            item(
+                Step::ConvertFlac,
+                'c',
+                "convert → FLAC",
+                "encode WAVs, move checked ones to _original/",
+            ),
+            item(
+                Step::ConvertWav,
+                'w',
+                "convert → WAV",
+                "decode FLACs back to WAV",
+            ),
+            item(Step::Tag, 't', "tag", "edit show fields and track titles"),
+        ],
+    ),
+    (
+        "Inspect",
+        &[
+            item(
+                Step::Verify,
+                'v',
+                "verify",
+                "check each FLAC's embedded MD5",
+            ),
+            item(Step::Sbe, 's', "sbe", "find sector-boundary errors"),
+            item(
+                Step::SbeFix,
+                'x',
+                "sbe fix preview",
+                "plan a sector-boundary repair (writes nothing)",
+            ),
+        ],
+    ),
+    (
+        "Checksums",
+        &[
+            item(
+                Step::Check,
+                'k',
+                "check checksums",
+                "check the folder's .ffp/.md5/.st5 files",
+            ),
+            item(
+                Step::Create(ChecksumKind::Ffp),
+                'f',
+                "create ffp",
+                "write <folder>.ffp inside the folder",
+            ),
+            item(
+                Step::Create(ChecksumKind::Md5),
+                'm',
+                "create md5",
+                "write <folder>.md5 inside the folder",
+            ),
+            item(
+                Step::Create(ChecksumKind::St5),
+                '5',
+                "create st5",
+                "write <folder>.st5 inside the folder",
+            ),
+        ],
+    ),
+    (
+        "Torrent",
+        &[
+            item(
+                Step::TorrentCreate,
+                'n',
+                "create torrent",
+                "hash the folder into <folder>.torrent beside it",
+            ),
+            item(
+                Step::TorrentInfo,
+                'i',
+                "torrent info",
+                "show <folder>.torrent",
+            ),
+            item(
+                Step::TorrentCheck,
+                'h',
+                "torrent check",
+                "check the folder against <folder>.torrent",
+            ),
+        ],
+    ),
+];
 
-    fn label(self) -> &'static str {
-        match self {
-            Step::Rename => "rename",
-            Step::ConvertFlac => "convert → FLAC",
-            Step::ConvertWav => "convert → WAV",
-            Step::Tag => "tag",
-            Step::Verify => "verify",
-            Step::Sbe => "sbe",
-            Step::SbeFix => "sbe fix preview",
-            Step::Check => "check checksums",
-            Step::Create(ChecksumKind::Ffp) => "create ffp",
-            Step::Create(ChecksumKind::Md5) => "create md5",
-            Step::Create(ChecksumKind::St5) => "create st5",
-            Step::TorrentCreate => "create torrent",
-            Step::TorrentInfo => "torrent info",
-            Step::TorrentCheck => "torrent check",
-        }
-    }
-
-    fn about(self) -> &'static str {
-        match self {
-            Step::Rename => "name files from band, date and track",
-            Step::ConvertFlac => "encode WAVs, move checked ones to _original/",
-            Step::ConvertWav => "decode FLACs back to WAV",
-            Step::Tag => "edit show fields and track titles",
-            Step::Verify => "check each FLAC's embedded MD5",
-            Step::Sbe => "find sector-boundary errors",
-            Step::SbeFix => "plan a sector-boundary repair (writes nothing)",
-            Step::Check => "check the folder's .ffp/.md5/.st5 files",
-            Step::Create(ChecksumKind::Ffp) => "write <folder>.ffp inside the folder",
-            Step::Create(ChecksumKind::Md5) => "write <folder>.md5 inside the folder",
-            Step::Create(ChecksumKind::St5) => "write <folder>.st5 inside the folder",
-            Step::TorrentCreate => "hash the folder into <folder>.torrent beside it",
-            Step::TorrentInfo => "show <folder>.torrent",
-            Step::TorrentCheck => "check the folder against <folder>.torrent",
-        }
-    }
+fn items() -> impl Iterator<Item = &'static Item> {
+    MENU.iter().flat_map(|(_, items)| items.iter())
 }
 
 /// How a screen last went, shown beside it.
@@ -170,14 +180,43 @@ impl StepResult {
     }
 }
 
-pub(crate) fn run_workspace(dir: PathBuf, theme: ThemeName) -> ExitCode {
-    if !dir.is_dir() {
-        eprintln!("lh-tui: {} is not a directory", dir.display());
-        return ExitCode::from(2);
+/// Why a step returned before an outcome: the terminal failed, or its screen never opened.
+/// Lets every refusal in [`open_step`] be a `?`.
+enum Stop {
+    Io(io::Error),
+    Refused(String),
+}
+
+impl From<io::Error> for Stop {
+    fn from(e: io::Error) -> Self {
+        Stop::Io(e)
     }
+}
+
+/// A refusal is worded for stderr; inside the menu, the `lh-tui: ` it opens with says nothing.
+impl From<Refusal> for Stop {
+    fn from(r: Refusal) -> Self {
+        let message = match r.message.strip_prefix("lh-tui: ") {
+            Some(rest) => rest.to_string(),
+            None => r.message,
+        };
+        Stop::Refused(message)
+    }
+}
+
+pub(crate) fn run_workspace(dir: PathBuf, theme: ThemeName) -> ExitCode {
+    // Resolved once, so `<folder>` in a checksum or torrent name is the folder's real name
+    // even when it was given as `.`.
+    let dir = match dir.canonicalize() {
+        Ok(d) if d.is_dir() => d,
+        _ => {
+            eprintln!("lh-tui: {} is not a directory", dir.display());
+            return ExitCode::from(2);
+        }
+    };
     let result = {
         let mut terminal = TerminalGuard::with_paste();
-        run_workspace_screen(&mut terminal, &dir, theme)
+        run_workspace_screen(&mut terminal, &dir, Theme::new(theme))
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -191,11 +230,11 @@ pub(crate) fn run_workspace(dir: PathBuf, theme: ThemeName) -> ExitCode {
 fn run_workspace_screen(
     terminal: &mut DefaultTerminal,
     dir: &Path,
-    theme_name: ThemeName,
+    theme: Theme,
 ) -> io::Result<()> {
-    let theme = Theme::new(theme_name);
+    let count = items().count();
     let mut selected = 0usize;
-    let mut results = vec![StepResult::NotRun; Step::ALL.len()];
+    let mut results = vec![StepResult::NotRun; count];
     let mut summary = summarize(dir);
 
     loop {
@@ -208,7 +247,7 @@ fn run_workspace_screen(
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        let step = match key.code {
+        let chosen = match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Up => {
@@ -216,7 +255,7 @@ fn run_workspace_screen(
                 None
             }
             KeyCode::Down => {
-                selected = (selected + 1).min(Step::ALL.len() - 1);
+                selected = (selected + 1).min(count - 1);
                 None
             }
             KeyCode::Home => {
@@ -224,19 +263,25 @@ fn run_workspace_screen(
                 None
             }
             KeyCode::End => {
-                selected = Step::ALL.len() - 1;
+                selected = count - 1;
                 None
             }
             KeyCode::Enter => Some(selected),
-            KeyCode::Char(c) => Step::ALL.iter().position(|s| s.key() == c),
+            KeyCode::Char(c) => items().position(|i| i.key == c),
             _ => None,
         };
-        let Some(index) = step else {
+        let Some(index) = chosen else {
             continue;
         };
 
         selected = index;
-        if let Some(result) = run_step(terminal, dir, Step::ALL[index], theme_name)? {
+        let step = items().nth(index).expect("index comes from items()").step;
+        let outcome = match open_step(terminal, dir, step, theme) {
+            Ok(outcome) => outcome,
+            Err(Stop::Refused(why)) => Some(StepResult::Refused(why)),
+            Err(Stop::Io(e)) => return Err(e),
+        };
+        if let Some(result) = outcome {
             results[index] = result;
         }
         terminal.clear()?;
@@ -248,25 +293,17 @@ fn run_workspace_screen(
 /// Opens `step`'s screen on `dir` with the defaults its subcommand would use given just the
 /// folder. `None` when the person left without an outcome — a rename or tag not applied, a
 /// torrent not created, info only looked at — so the step's last result still stands.
-fn run_step(
+fn open_step(
     terminal: &mut DefaultTerminal,
     dir: &Path,
     step: Step,
-    theme_name: ThemeName,
-) -> io::Result<Option<StepResult>> {
-    let theme = Theme::new(theme_name);
+    theme: Theme,
+) -> Result<Option<StepResult>, Stop> {
     let label = dir.display().to_string();
-
-    // The steps that work on the folder's audio files; the checksum-file and torrent steps
-    // below do not need any to be there.
-    let folder = || scan_folder(dir).map_err(|r| StepResult::Refused(r.message));
 
     let result = match step {
         Step::Rename => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
-            };
+            let folder = scan_folder(dir)?;
             let args = RenameArgs {
                 dir: dir.to_path_buf(),
                 band: None,
@@ -278,10 +315,7 @@ fn run_step(
             rename_screen(terminal, &args, &folder.files, theme)?.map(StepResult::from_clean)
         }
         Step::Tag => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
-            };
+            let folder = scan_folder(dir)?;
             let args = TagArgs {
                 dir: dir.to_path_buf(),
                 artist: None,
@@ -293,26 +327,17 @@ fn run_step(
                 titles: None,
                 yes: false,
             };
-            let setup = match prepare_tag(&args, folder.files) {
-                Ok(s) => s,
-                Err(refusal) => return Ok(Some(StepResult::Refused(refusal.message))),
-            };
+            let setup = prepare_tag(&args, folder.files)?;
             tag_screen(terminal, dir, setup, theme)?.map(StepResult::from_clean)
         }
         Step::ConvertFlac | Step::ConvertWav => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
-            };
+            let folder = scan_folder(dir)?;
             let to = if step == Step::ConvertFlac {
                 Target::Flac
             } else {
                 Target::Wav
             };
-            let encoder = match find_encoder(to) {
-                Ok(e) => e,
-                Err(refusal) => return Ok(Some(StepResult::Refused(refusal.message))),
-            };
+            let encoder = find_encoder(to)?;
             let args = ConvertArgs {
                 paths: Paths {
                     paths: vec![dir.to_path_buf()],
@@ -333,36 +358,27 @@ fn run_step(
             Some(StepResult::from_clean(ok))
         }
         Step::Verify => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
-            };
+            let folder = scan_folder(dir)?;
             let ok = run_verify_screen(terminal, &label, &folder.files, theme)?;
             Some(StepResult::from_clean(ok))
         }
         Step::Sbe => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
-            };
+            let folder = scan_folder(dir)?;
             let ok = run_sbe_screen(terminal, &label, &folder.files, theme)?;
             Some(StepResult::from_clean(ok))
         }
         Step::SbeFix => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
+            // `lh sbe fix --dry-run`. Executing needs an output folder, which is the
+            // subcommand's to ask for, not this menu's.
+            let args = SbeFixArgs {
+                dir: dir.to_path_buf(),
+                direction: SbeFixDirection::Backward,
+                pad_tail: false,
+                dry_run: true,
+                output: None,
+                overwrite: false,
             };
-            // `lh sbe fix --dry-run`'s defaults. Executing needs an output folder, which is
-            // the subcommand's to ask for, not this menu's.
-            let plan = match plan_fix(
-                &folder.files,
-                BoundaryDirection::Backward,
-                TailPolicy::Report,
-            ) {
-                Ok(p) => p,
-                Err(e) => return Ok(Some(StepResult::Refused(format!("planning a fix: {e:#}")))),
-            };
+            let (folder, plan) = prepare_sbe_fix(&args)?;
             run_sbe_fix_plan_screen(terminal, dir, &folder.files, &plan, theme)?;
             Some(if plan.fully_fixed {
                 StepResult::Clean("fix would align every file".to_string())
@@ -370,28 +386,42 @@ fn run_step(
                 StepResult::Unclean("last file stays misaligned without --pad-tail".to_string())
             })
         }
-        Step::Check => run_check_step(terminal, dir, theme_name)?,
+        Step::Check => run_check_step(terminal, dir, theme)?,
         Step::Create(kind) => {
-            let folder = match folder() {
-                Ok(f) => f,
-                Err(refused) => return Ok(Some(refused)),
-            };
-            run_create_checksum_step(terminal, dir, kind, &folder.files, theme)?
+            let folder = scan_folder(dir)?;
+            run_create_checksum_step(terminal, dir, &label, kind, &folder.files, theme)?
         }
-        Step::TorrentCreate => run_torrent_create_step(terminal, dir, theme)?,
-        Step::TorrentInfo => {
-            let (_, meta) = match find_torrent(dir) {
-                Ok(v) => v,
-                Err(refused) => return Ok(Some(refused)),
+        Step::TorrentCreate => {
+            let args = TorrentCreateArgs {
+                path: dir.to_path_buf(),
+                output: None,
+                trackers: Vec::new(),
+                piece_length: None,
+                private: false,
+                source: None,
+                comment: None,
+                include_all: false,
+                force: false,
             };
+            let CreateSetup {
+                source,
+                dst,
+                list,
+                keys,
+            } = prepare_torrent_create(&args)?;
+            match run_torrent_create_screen(terminal, &source, &dst, &args, &list, &keys, theme)? {
+                Ok(made) => Some(StepResult::Clean(format!("wrote {}", made.path.display()))),
+                Err(lh_core::Error::Cancelled) => None,
+                Err(e) => Some(StepResult::Unclean(format!("{e:#}"))),
+            }
+        }
+        Step::TorrentInfo => {
+            let (_, meta) = find_torrent(dir)?;
             run_torrent_info_screen(terminal, &meta, true, theme)?;
             None
         }
         Step::TorrentCheck => {
-            let (file, meta) = match find_torrent(dir) {
-                Ok(v) => v,
-                Err(refused) => return Ok(Some(refused)),
-            };
+            let (file, meta) = find_torrent(dir)?;
             match run_torrent_check_screen(terminal, meta, file, dir.to_path_buf(), false, theme)? {
                 Ok(report) => Some(StepResult::from_clean(
                     report.verdict() != Verdict::Incomplete,
@@ -408,46 +438,30 @@ fn run_step(
 fn run_check_step(
     terminal: &mut DefaultTerminal,
     dir: &Path,
-    theme_name: ThemeName,
-) -> io::Result<Option<StepResult>> {
-    let mut lists: Vec<(PathBuf, ChecksumKind)> = std::fs::read_dir(dir)?
+    theme: Theme,
+) -> Result<Option<StepResult>, Stop> {
+    let mut lists: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file())
-        .filter_map(|p| ChecksumKind::from_path(&p).map(|kind| (p, kind)))
+        .filter(|p| p.is_file() && ChecksumKind::from_path(p).is_some())
         .collect();
     if lists.is_empty() {
-        return Ok(Some(StepResult::Refused(
+        return Err(Stop::Refused(
             "no .ffp, .md5 or .st5 file in the folder".to_string(),
-        )));
+        ));
     }
-    lists.sort_by(|a, b| a.0.cmp(&b.0));
+    lists.sort();
 
     let mut clean = true;
-    for (path, kind) in &lists {
-        let list = match ChecksumFile::read(*kind, path) {
-            Ok(l) => l,
-            Err(e) => {
-                return Ok(Some(StepResult::Refused(format!(
-                    "reading {}: {e:#}",
-                    file_name(path)
-                ))));
-            }
-        };
+    for path in &lists {
+        let (kind, list, list_dir) = prepare_check(path)?;
         if list.entries.is_empty() {
             continue;
         }
         let label = path.display().to_string();
-        clean &= run_check_screen(
-            terminal,
-            *kind,
-            &label,
-            dir.to_path_buf(),
-            &list.entries,
-            Theme::new(theme_name),
-        )?;
+        clean &= run_check_screen(terminal, kind, &label, list_dir, &list.entries, theme)?;
         terminal.clear()?;
     }
-    let names: Vec<String> = lists.iter().map(|(p, _)| file_name(p)).collect();
+    let names: Vec<String> = lists.iter().map(|p| file_name(p)).collect();
     Ok(Some(if clean {
         StepResult::Clean(format!("{} ok", names.join(", ")))
     } else {
@@ -460,25 +474,17 @@ fn run_check_step(
 fn run_create_checksum_step(
     terminal: &mut DefaultTerminal,
     dir: &Path,
+    label: &str,
     kind: ChecksumKind,
-    files: &[lh_core::model::AudioFile],
+    files: &[AudioFile],
     theme: Theme,
-) -> io::Result<Option<StepResult>> {
-    let Some(name) = folder_name(dir) else {
-        return Ok(Some(StepResult::Refused(
-            "the folder has no name to call the checksum file by".to_string(),
-        )));
-    };
-    let out = dir.join(format!("{name}.{}", kind.extension()));
+) -> Result<Option<StepResult>, Stop> {
+    let out = dir.join(format!("{}.{}", file_name(dir), kind.extension()));
     if out.exists() {
-        return Ok(Some(StepResult::Refused(format!(
-            "{} already exists",
-            file_name(&out)
-        ))));
+        return Err(Stop::Refused(format!("{} already exists", file_name(&out))));
     }
 
-    let label = dir.display().to_string();
-    let (ok, entries) = run_checksum_screen(terminal, kind, &label, files, theme)?;
+    let (ok, entries) = run_checksum_screen(terminal, kind, label, files, theme)?;
     if !ok {
         return Ok(Some(StepResult::Unclean(format!(
             "not all files computed, {} not written",
@@ -493,98 +499,34 @@ fn run_create_checksum_step(
     }))
 }
 
-fn run_torrent_create_step(
-    terminal: &mut DefaultTerminal,
-    dir: &Path,
-    theme: Theme,
-) -> io::Result<Option<StepResult>> {
-    let source = dir.canonicalize()?;
-    let Some(dst) = default_output(&source) else {
-        return Ok(Some(StepResult::Refused(
-            "the folder has no parent directory to write a torrent beside".to_string(),
-        )));
-    };
-    let list = match TrackerList::load() {
-        Ok(l) => l,
-        Err(e) => {
-            return Ok(Some(StepResult::Refused(format!(
-                "reading the tracker list: {e:#}"
-            ))));
-        }
-    };
-    let keys = match Passkeys::load() {
-        Ok(k) => k,
-        Err(e) => {
-            return Ok(Some(StepResult::Refused(format!(
-                "reading the passkey list: {e:#}"
-            ))));
-        }
-    };
-    let args = TorrentCreateArgs {
-        path: source.clone(),
-        output: None,
-        trackers: Vec::new(),
-        piece_length: None,
-        private: false,
-        source: None,
-        comment: None,
-        include_all: false,
-        force: false,
-    };
-    Ok(
-        match run_torrent_create_screen(terminal, &source, &dst, &args, &list, &keys, theme)? {
-            Ok(made) => Some(StepResult::Clean(format!("wrote {}", made.path.display()))),
-            Err(lh_core::Error::Cancelled) => None,
-            Err(e) => Some(StepResult::Unclean(format!("{e:#}"))),
-        },
-    )
-}
-
 /// The torrent `create torrent` would have written — `<folder>.torrent` beside the folder —
 /// or else the one `.torrent` inside it.
-fn find_torrent(dir: &Path) -> Result<(PathBuf, Metainfo), StepResult> {
-    let beside = dir.canonicalize().ok().and_then(|d| default_output(&d));
-    let file = match beside.filter(|p| p.is_file()) {
+fn find_torrent(dir: &Path) -> Result<(PathBuf, Metainfo), Stop> {
+    let file = match default_output(dir).filter(|p| p.is_file()) {
         Some(p) => p,
         None => {
-            let inside: Vec<PathBuf> = std::fs::read_dir(dir)
-                .map_err(|e| StepResult::Refused(format!("reading the folder: {e}")))?
+            let inside: Vec<PathBuf> = std::fs::read_dir(dir)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "torrent"))
                 .collect();
             match <[PathBuf; 1]>::try_from(inside) {
                 Ok([one]) => one,
                 Err(inside) if inside.is_empty() => {
-                    return Err(StepResult::Refused(
+                    return Err(Stop::Refused(
                         "no <folder>.torrent beside the folder, nor a .torrent in it".to_string(),
                     ));
                 }
                 Err(_) => {
-                    return Err(StepResult::Refused(
+                    return Err(Stop::Refused(
                         "several .torrent files in the folder; use lh-tui torrent".to_string(),
                     ));
                 }
             }
         }
     };
-    match Metainfo::read(&file) {
-        Ok(meta) => Ok((file, meta)),
-        Err(e) => Err(StepResult::Refused(format!(
-            "reading {}: {e:#}",
-            file_name(&file)
-        ))),
-    }
-}
-
-fn folder_name(dir: &Path) -> Option<String> {
-    let dir = dir.canonicalize().ok()?;
-    Some(dir.file_name()?.to_string_lossy().into_owned())
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+    let meta = Metainfo::read(&file)
+        .map_err(|e| Stop::Refused(format!("reading {}: {e:#}", file_name(&file))))?;
+    Ok((file, meta))
 }
 
 /// What is in the folder right now, by format — `12 files: 12 WAV`, then `24 files: 12 WAV,
@@ -661,28 +603,26 @@ fn draw_workspace(
     // screen landed so the table scrolls to it on a short terminal.
     let mut rows = Vec::new();
     let mut selected_row = 0;
-    for (g, group) in Group::ALL.iter().enumerate() {
+    let mut index = 0;
+    for (g, (title, group)) in MENU.iter().enumerate() {
         if g > 0 {
             rows.push(Row::new(vec![Cell::from("")]));
         }
         rows.push(Row::new(vec![
             Cell::from(""),
-            Cell::from(group.title()).style(theme.header),
+            Cell::from(*title).style(theme.header),
         ]));
-        for (i, (step, result)) in Step::ALL.iter().zip(results).enumerate() {
-            if step.group() != *group {
-                continue;
-            }
-            let focused = i == selected;
+        for item in group.iter() {
+            let focused = index == selected;
             if focused {
                 selected_row = rows.len();
             }
             let marker = if focused { ">" } else { " " };
-            let (last, last_style) = match result {
-                StepResult::NotRun => (String::new(), theme.dim),
-                StepResult::Clean(what) => (what.clone(), theme.ok),
-                StepResult::Unclean(what) => (what.clone(), theme.error),
-                StepResult::Refused(why) => (why.clone(), theme.warn),
+            let (last, last_style) = match &results[index] {
+                StepResult::NotRun => ("", theme.dim),
+                StepResult::Clean(what) => (what.as_str(), theme.ok),
+                StepResult::Unclean(what) => (what.as_str(), theme.error),
+                StepResult::Refused(why) => (why.as_str(), theme.warn),
             };
             let name_style = if focused {
                 theme.accent.bold()
@@ -690,11 +630,12 @@ fn draw_workspace(
                 theme.accent
             };
             rows.push(Row::new(vec![
-                Cell::from(format!("{marker} {}", step.key())).style(theme.dim),
-                Cell::from(step.label()).style(name_style),
-                Cell::from(step.about()).style(theme.dim),
+                Cell::from(format!("{marker} {}", item.key)).style(theme.dim),
+                Cell::from(item.label).style(name_style),
+                Cell::from(item.about).style(theme.dim),
                 Cell::from(last).style(last_style),
             ]));
+            index += 1;
         }
     }
     let table = Table::new(

@@ -11,7 +11,6 @@ use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::repair::{
     BoundaryDirection, FixPlan, Fixed, RepairEncode, TailPolicy, execute_fix, plan_fix,
 };
-use lh_core::scan;
 use lh_core::tools::{Registry, Tool, ToolId};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -113,26 +112,10 @@ pub(crate) enum FixStage {
     Done(Box<lh_core::Result<Vec<Fixed>>>),
 }
 
-pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
-    if !args.dir.is_dir() {
-        eprintln!("lh-tui: {} is not a directory", args.dir.display());
-        return ExitCode::from(2);
-    }
-    let set = match scan::scan(&args.dir, false) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("lh-tui: scanning {}: {e:#}", args.dir.display());
-            return ExitCode::from(2);
-        }
-    };
-    for (skipped, why) in &set.skipped {
-        eprintln!("skipped {}: {why}", skipped.display());
-    }
-    if set.files.is_empty() {
-        eprintln!("no audio files found in {}", args.dir.display());
-        return ExitCode::from(1);
-    }
-
+/// The folder and the repair plan `args` asks for — all a dry run shows, and what an
+/// executing run then carries out.
+pub(crate) fn prepare_sbe_fix(args: &SbeFixArgs) -> Result<(Folder, FixPlan), Refusal> {
+    let folder = scan_folder(&args.dir)?;
     let direction = match args.direction {
         SbeFixDirection::Backward => BoundaryDirection::Backward,
         SbeFixDirection::Forward => BoundaryDirection::Forward,
@@ -143,13 +126,23 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
     } else {
         TailPolicy::Report
     };
-    let plan = match plan_fix(&set.files, direction, tail) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("lh-tui: planning a fix for {}: {e:#}", args.dir.display());
-            return ExitCode::from(2);
-        }
+    let plan = plan_fix(&folder.files, direction, tail).map_err(|e| {
+        Refusal::new(
+            2,
+            format!("lh-tui: planning a fix for {}: {e:#}", args.dir.display()),
+        )
+    })?;
+    Ok((folder, plan))
+}
+
+pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
+    let (set, plan) = match prepare_sbe_fix(&args) {
+        Ok(v) => v,
+        Err(refusal) => return refusal.exit(),
     };
+    for line in &set.skipped {
+        eprintln!("{line}");
+    }
 
     if args.dry_run {
         let result = {
@@ -482,11 +475,7 @@ pub(crate) fn fix_row_cells(
         FixStage::Done(result) => match result.as_ref() {
             Ok(fixed) => {
                 let f = &fixed[i];
-                let name = f
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| f.path.display().to_string());
+                let name = file_name(&f.path);
                 (
                     "FIXED".to_string(),
                     theme.ok,

@@ -20,6 +20,7 @@ pub(crate) enum ThemeName {
 /// terminal and clash on a light one, since ratatui's named colors map to the
 /// terminal's own ANSI palette rather than fixed RGB. Bold/underline read as
 /// "header" or "accent" regardless of the terminal's background.
+#[derive(Clone, Copy)]
 pub(crate) struct Theme {
     pub(crate) accent: Style,
     pub(crate) ok: Style,
