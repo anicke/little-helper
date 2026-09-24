@@ -18,4 +18,4 @@ pub(crate) use tools::*;
 pub(crate) use torrent::*;
 pub(crate) use verify::*;
 
-pub use sbe::{print_fixed, print_in_place, print_tail_note, tail_policy};
+pub use sbe::{print_fixed, print_in_place, print_tail_note, repair_extension, tail_policy};

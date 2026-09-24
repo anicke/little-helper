@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 mod commands;
 use commands::*;
-pub use commands::{print_fixed, print_in_place, print_tail_note, tail_policy};
+pub use commands::{print_fixed, print_in_place, print_tail_note, repair_extension, tail_policy};
 
 /// Run one job per file on a bounded worker pool if there is more than one file — a
 /// single file just runs directly, since spinning up a pool and a channel for one job is

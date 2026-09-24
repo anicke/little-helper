@@ -98,7 +98,7 @@ const MENU: [(&str, &[Item]); 4] = [
                 Step::SbeFix,
                 'x',
                 "sbe fix",
-                "repair SBEs, move replaced files to _original/",
+                "repair SBEs, move replaced files to _original/sbe-fix/",
             ),
         ],
     ),

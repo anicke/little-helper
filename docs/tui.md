@@ -129,8 +129,9 @@ given only the folder:
 * **sbe fix** is `sbe fix --in-place`: it opens on the plan (backward, no tail padding),
   `d` cycles the direction and `p` toggles tail padding, re-planning each time, and `a`
   applies it. Each file the plan changes is replaced under its own name and the file it
-  replaced moves into `_original/`, the same place convert → FLAC puts its WAVs; files the
-  plan leaves alone are not touched. Once applying starts it can't be left until it's done
+  replaced moves into `_original/sbe-fix/` — beside, not in, the `_original/` convert → FLAC
+  puts its WAVs in, so a WAV show can be fixed first and converted after; files the plan
+  leaves alone are not touched. A folder of WAVs is fixed as WAVs, with no encode. Once applying starts it can't be left until it's done
   (`fix_in_place` has no cancellation checkpoint).
 * **create torrent** is `torrent create <folder>` (picker and all), writing
   `<folder>.torrent` beside it; **torrent info/check** use that same file, or else the one

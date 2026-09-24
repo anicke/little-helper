@@ -814,7 +814,7 @@ fn rename_refuses_to_overwrite_a_file_outside_the_plan() {
 }
 
 /// `--in-place` replaces each changed file under its own name and moves the file it
-/// replaced into `_original/`, byte-for-byte itself.
+/// replaced into `_original/sbe-fix/`, byte-for-byte itself.
 #[test]
 fn sbe_fix_in_place_sets_the_originals_aside() {
     let dir = tempfile::tempdir().unwrap();
@@ -836,7 +836,7 @@ fn sbe_fix_in_place_sets_the_originals_aside() {
         .stdout(predicates::str::contains("FIXED     t02.flac"));
 
     assert_eq!(
-        std::fs::read(dir.path().join("_original/t01.flac")).unwrap(),
+        std::fs::read(dir.path().join("_original/sbe-fix/t01.flac")).unwrap(),
         before_a
     );
     lh().arg("sbe")
@@ -844,4 +844,115 @@ fn sbe_fix_in_place_sets_the_originals_aside() {
         .assert()
         .success()
         .stdout(predicates::str::contains("ALIGNED"));
+}
+
+/// R5: a folder of WAVs is fixed as WAVs — written under `-o` with their own names and
+/// extension, every file aligned with `--pad-tail`, the sources untouched.
+#[test]
+fn sbe_fix_executes_on_wav() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("t01.wav");
+    let b = dir.path().join("t02.wav");
+    std::fs::copy(fixtures().join("cdda-sbe.wav"), &a).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.wav"), &b).unwrap();
+    let before_a = std::fs::read(&a).unwrap();
+    let out = dir.path().join("out");
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .arg("-o")
+        .arg(&out)
+        .arg("--pad-tail")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("FIXED     t01.wav"))
+        .stdout(predicates::str::contains("FIXED     t02.wav"));
+
+    assert_eq!(std::fs::read(&a).unwrap(), before_a, "source untouched");
+    lh().arg("sbe")
+        .arg(out.join("t01.wav"))
+        .arg(out.join("t02.wav"))
+        .assert()
+        .success();
+}
+
+/// A folder mixing WAV and FLAC is refused before anything is written: convert first.
+#[test]
+fn sbe_fix_refuses_a_mixed_wav_flac_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-sbe.flac"),
+        dir.path().join("t01.flac"),
+    )
+    .unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.wav"),
+        dir.path().join("t02.wav"),
+    )
+    .unwrap();
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .arg("--in-place")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("convert first"));
+    assert!(!dir.path().join("_original").exists());
+}
+
+/// The workspace's order, rename → sbe fix → convert → FLAC: WAVs fixed in place, then
+/// converted with their sources set aside. The two steps set files aside in different
+/// folders, so neither refuses, and the FLACs come out aligned.
+#[test]
+fn sbe_fix_on_wav_then_convert_to_flac() {
+    use lh_core::tools::{Registry, ToolId};
+    if Registry::discover_one(ToolId::Flac)
+        .require(ToolId::Flac)
+        .is_err()
+    {
+        eprintln!("skipping: reference flac not found");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("t01.wav");
+    std::fs::copy(fixtures().join("cdda-sbe.wav"), &a).unwrap();
+    std::fs::copy(
+        fixtures().join("cdda-aligned.wav"),
+        dir.path().join("t02.wav"),
+    )
+    .unwrap();
+    let before_a = std::fs::read(&a).unwrap();
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .args(["--in-place", "--pad-tail"])
+        .assert()
+        .success();
+    lh().arg("convert")
+        .arg(dir.path())
+        .args(["--to", "flac", "--move-sources"])
+        .assert()
+        .success();
+
+    let originals = dir.path().join("_original");
+    assert_eq!(
+        std::fs::read(originals.join("sbe-fix/t01.wav")).unwrap(),
+        before_a
+    );
+    assert!(
+        originals.join("t01.wav").exists(),
+        "the fixed WAV, set aside by convert"
+    );
+    assert!(!a.exists());
+    lh().arg("sbe")
+        .arg(dir.path().join("t01.flac"))
+        .arg(dir.path().join("t02.flac"))
+        .assert()
+        .success()
+        .stdout(predicates::prelude::PredicateBooleanExt::not(
+            predicates::str::contains("SBE"),
+        ));
 }

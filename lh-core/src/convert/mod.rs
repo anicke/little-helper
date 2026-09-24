@@ -270,10 +270,20 @@ pub const ORIGINALS_DIR: &str = "_original";
 /// with [`Error::OutputExists`] rather than replace a file already there. Returns where
 /// the source now is.
 pub fn move_to_originals(src: &Path) -> Result<PathBuf> {
-    let no_file_name = || Error::malformed(src, "has no file name to work from");
-    let name = src.file_name().ok_or_else(no_file_name)?;
-    let dir = src.parent().ok_or_else(no_file_name)?.join(ORIGINALS_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
+    let dir = src
+        .parent()
+        .ok_or_else(|| Error::malformed(src, "has no file name to work from"))?
+        .join(ORIGINALS_DIR);
+    move_aside(src, &dir)
+}
+
+/// [`move_to_originals`] into any folder `dir`, created if need be: `src` keeps its name,
+/// and a file already there by that name is refused with [`Error::OutputExists`].
+pub fn move_aside(src: &Path, dir: &Path) -> Result<PathBuf> {
+    let name = src
+        .file_name()
+        .ok_or_else(|| Error::malformed(src, "has no file name to work from"))?;
+    std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
     let dst = dir.join(name);
     // `symlink_metadata` so a dangling symlink still counts as something in the way.
     if dst.symlink_metadata().is_ok() {

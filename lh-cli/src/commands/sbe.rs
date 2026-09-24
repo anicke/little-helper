@@ -4,7 +4,8 @@ use lh_core::analysis::{Sbe, sbe};
 use lh_core::convert::{EncodeOpts, destination};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::repair::{
-    FixPlan, FixStep, Fixed, InPlace, RepairEncode, TailPolicy, execute_fix, fix_in_place, plan_fix,
+    FixPlan, FixStep, Fixed, InPlace, RepairEncode, TailPolicy, execute_fix, fix_in_place,
+    plan_fix, set_format,
 };
 use lh_core::scan;
 use lh_core::tools::{Registry, ToolId};
@@ -34,7 +35,8 @@ pub(crate) fn cmd_sbe(p: &Paths) -> Result<bool> {
 
 /// Plan a sector-boundary repair for one directory's files, in filename order, and — unless
 /// `--dry-run` — execute it: every boundary shift chained left to right, and the tail
-/// padded with silence when `--pad-tail` is given (docs/sbe-repair.md R1–R3).
+/// padded with silence when `--pad-tail` is given (docs/sbe-repair.md R1–R3), on
+/// a set of FLACs or, with no encode at all, of WAVs (R5).
 pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
     if !args.dir.is_dir() {
         anyhow::bail!("{} is not a directory", args.dir.display());
@@ -66,23 +68,19 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
              originals (Principle 1)"
         );
     }
-    for f in &set.files {
-        if f.format != AudioFormat::Flac {
-            anyhow::bail!(
-                "sbe fix can only execute against FLAC ({} is {}); other formats have no \
-                 repair path yet",
-                f.file_name(),
-                f.format
-            );
-        }
-    }
-
-    let flac = Registry::discover_one(ToolId::Flac)
-        .require(ToolId::Flac)
-        .cloned()?;
+    // A set of WAVs is fixed without encoding anything, so only FLAC needs `flac`.
+    let format = set_format(&set.files)?;
+    let flac = match format {
+        AudioFormat::Flac => Some(
+            Registry::discover_one(ToolId::Flac)
+                .require(ToolId::Flac)
+                .cloned()?,
+        ),
+        _ => None,
+    };
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: flac.as_ref(),
         opts: &opts,
         overwrite: args.overwrite,
     };
@@ -106,7 +104,7 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         .files
         .iter()
         .map(|f| {
-            destination(&f.path, "flac", Some(out_dir))
+            destination(&f.path, repair_extension(format), Some(out_dir))
                 .map_err(|_| anyhow::anyhow!("{} has no file name", f.path.display()))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -119,6 +117,14 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
     print_tail_note(&set.files, &plan);
 
     Ok(plan.fully_fixed)
+}
+
+/// The extension a fixed file is written with: its set's own format's.
+pub fn repair_extension(format: AudioFormat) -> &'static str {
+    match format {
+        AudioFormat::Wav => "wav",
+        _ => "flac",
+    }
 }
 
 /// `--pad-tail`'s choice, for anything that holds it as a flag.

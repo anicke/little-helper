@@ -309,15 +309,20 @@ FIXED     03.flac -> /home/.../d1-fixed/03.flac   audio md5 283c0f1a...
 leaves a show folder holding its FLACs: `repair::fix_in_place` stages every replacement in
 a hidden `.lh-sbe-fix-<pid>/` inside the folder (each run of changed files is its own
 `execute_fix`, invariant and all; files the plan leaves alone are never decoded), then moves
-each changed original into `_original/` and renames its replacement in, swapping back any
-already done if one fails. It refuses before encoding anything if `_original/` already has a
-changed file's name. Output lines are `FIXED <file>   original moved to <path>` or
+each changed original into `_original/sbe-fix/` and renames its replacement in, swapping back
+any already done if one fails. It refuses before encoding anything if `_original/sbe-fix/`
+already has a changed file's name. The subfolder is its own so that WAVs fixed in place can
+then be converted to FLAC with `--move-sources`, which sets them aside in `_original/`: the
+pre-fix rip and the fixed WAVs never want the same name. Output lines are `FIXED <file>   original moved to <path>` or
 `UNCHANGED <file>`.
 
 Exit codes follow the existing contract (docs/torrent-creation.md §6): `0` fully fixed
 (or nothing needed fixing), `1` the set has something the tool won't override (an unpadded
-misaligned tail, a non-CD-audio member), `2` the command failed — including a missing `-o`
-or a non-FLAC member of the set.
+misaligned tail, a non-CD-audio member), `2` the command failed — including a missing `-o`,
+a member that is neither FLAC nor WAV, or a set mixing the two.
+
+A folder of WAVs (R5) runs the same command and prints the same lines; outputs keep the
+`.wav` extension, and no `flac` binary is needed.
 
 ---
 
@@ -360,7 +365,7 @@ this belongs once it exists.
 | ~~**R2**~~ | ~~Two-file execution~~ | **Done** — `analysis::sbe_fix::execute_single_boundary` (§4 steps 5–7), the one-boundary entry point now built on top of `execute_fix` (R3): decode both neighbours in full (`format::flac::decode_to_samples`), shift frames across the split, re-encode each through the reference `flac` binary (`convert::encode_flac_staged`, the staged-not-committed half of `to_flac`), restore original Vorbis comments via `metaflac`, verify the round-trip PCM MD5 invariant (§1, §5, `format::flac::concatenated_pcm_md5`) unconditionally, then commit both outputs atomically (`output::commit_all`, all-or-nothing with rollback). `-o` is mandatory to execute (open question 4 resolved this way: never an implicit default of overwriting the originals). |
 | ~~**R3**~~ | ~~Chained sets~~ | **Done** — `analysis::sbe_fix::execute_fix` generalizes R2 to any number of files: every boundary in `FixPlan.boundaries` applied left to right against a `Vec<Vec<i32>>` of decoded buffers (chaining falls out for free, since each boundary reads whatever the previous one already wrote into the shared buffer), `TailPolicy::Pad`'s silence appended to the last buffer and excluded from the invariant's "after" side, then every file encoded, tag-restored, checked and committed exactly as R2 did per pair. `lh sbe fix <DIR> -o <OUT> [--direction] [--pad-tail] [--overwrite]` (no `--dry-run`) now executes a directory of any size, per §6. 3 more tests in `lh-core/tests/sbe_fix.rs` (a real three-file chain verified end to end, tail padding executed and excluded from the invariant, atomic rollback across three staged outputs), 3 unit tests for `execute_fix`'s own shape checks, and 2 more CLI tests (`--pad-tail` fully aligning a set, a chained three-file directory). |
 | ~~**R4a**~~ | ~~In place, progress, speed~~ | **Done** — `fix_in_place` / `--in-place` and the workspace's `sbe fix` screen (§6, §7); per-file `FixStep` progress; `execute_fix` decodes, encodes and checks files in parallel on its own rayon pool (its own, so a `Queue::with_workers(1)` job still gets every core), takes each output's audio MD5 from the audio its check already decoded instead of reading the file a third time, and hashes PCM a chunk at a time. A real 16-track show (~430 MB of FLAC) went from 52 s to 18 s in a release build, peak memory 1.7 → 1.3 GB. |
-| **R5** | WAV | **Planned** — see §10. |
+| ~~**R5**~~ | ~~WAV~~ | **Done** — see §10. `execute_fix`/`fix_in_place` pick the path by `repair::set_format` (all FLAC or all WAV; a mix is refused, convert first). On WAV, each output's `data` is copied straight from byte ranges of the sources' `data` chunks (`data_ranges`), its other chunks kept verbatim (`format::wav::read_chunks`/`write_chunks`); the invariant's "before" is hashed from the sources independently of that arithmetic, the check re-reads every staged file. `RepairEncode.flac` is an `Option`, `None` for WAV. `fix_in_place` now sets originals aside in `_original/sbe-fix/` for both formats. The same 16-track show as WAV (770 MB): 3.6 s, 7.5 MB peak. 7 more tests in `lh-core/tests/sbe_fix.rs`, 3 CLI tests (WAV under `-o`, a mixed folder refused, fix-in-place-then-convert), and unit tests for `data_ranges`, `set_format` and the chunk reader/writer. |
 | ~~**R4**~~ | ~~TUI~~ | **Done** — `run_sbe_fix` (`lh-tui/src/main.rs`): §9 open question 3 resolved by routing around `Queue<T>` rather than growing it a chained-submission mode, since a fix's unit of work is the whole ordered set, not an independent file. `plan_fix` runs before the terminal opens (pure arithmetic, no decode) and is shown as a static per-file table for `--dry-run`; executing submits `execute_fix` as the one job on a `Queue::with_workers(1)`, the same "one job on a queue of one" shape `torrent create`/`check` use for a single sequential operation — quitting breaks the screen immediately rather than waiting for `Done`, since `execute_fix` has no cancellation checkpoint to honor, matching `run_torrent_check_screen`'s own acceptance of that gap. GUI screen remains open. |
 
 ---
@@ -386,12 +391,12 @@ this belongs once it exists.
 
 ---
 
-## 10. WAV (R5, planned)
+## 10. WAV (R5, done)
 
-Every executing path today refuses anything but FLAC (`lh sbe fix`'s "can only execute
-against FLAC", the TUI's `require_flac_set`), although `plan_fix` already plans a set of WAVs
-— it only needs `StreamInfo.total_frames`, which `format::probe` reads from a WAV header as
-well. The FLAC path stays as it is (R4a made it fast enough); R5 adds WAV beside it.
+Before R5 every executing path refused anything but FLAC, although `plan_fix` already planned
+a set of WAVs — it only needs `StreamInfo.total_frames`, which `format::probe` reads from a
+WAV header as well. The FLAC path stays as it is (R4a made it fast enough); R5 adds WAV
+beside it. What follows is the plan as written; §8's R5 row records how it landed.
 
 **Why it is worth having even with FLAC working.** On WAV, the fix is the operation it
 really is — moving raw PCM bytes across a split — with none of the FLAC path's machinery:

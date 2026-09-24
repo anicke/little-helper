@@ -7,14 +7,14 @@ use clap::ValueEnum;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
 use lh_cli::{
     Direction as SbeFixDirection, SbeFixArgs, print_fixed, print_in_place, print_tail_note,
-    tail_policy,
+    repair_extension, tail_policy,
 };
 use lh_core::convert::{EncodeOpts, destination};
 use lh_core::display::duration_precise;
 use lh_core::job::{Event, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::repair::{
-    FixPlan, FixStep, Fixed, InPlace, RepairEncode, execute_fix, fix_in_place, plan_fix,
+    FixPlan, FixStep, Fixed, InPlace, RepairEncode, execute_fix, fix_in_place, plan_fix, set_format,
 };
 use lh_core::tools::{Registry, Tool, ToolId};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -164,7 +164,7 @@ pub(crate) fn in_place_summary(done: &[InPlace], plan: &FixPlan) -> String {
         .count();
     let what = match replaced {
         0 => "nothing needed fixing".to_string(),
-        n => format!("{n} files fixed, originals in _original/"),
+        n => format!("{n} files fixed, originals in _original/sbe-fix/"),
     };
     if plan.fully_fixed {
         what
@@ -173,20 +173,17 @@ pub(crate) fn in_place_summary(done: &[InPlace], plan: &FixPlan) -> String {
     }
 }
 
-/// Every file is FLAC and the reference `flac` binary is there — what executing a fix needs
-/// beyond a plan — or why not.
-fn require_flac_set(files: &[AudioFile]) -> Result<Tool, String> {
-    if let Some(f) = files.iter().find(|f| f.format != AudioFormat::Flac) {
-        return Err(format!(
-            "sbe fix can only execute against FLAC ({} is {}); other formats have no repair \
-             path yet",
-            f.file_name(),
-            f.format
-        ));
+/// What executing a fix needs beyond a plan — a set of one format it can fix, and for FLAC
+/// the reference `flac` binary (a set of WAVs is never encoded) — or why it can't run.
+fn require_fixable_set(files: &[AudioFile]) -> Result<(AudioFormat, Option<Tool>), String> {
+    let format = set_format(files).map_err(|e| format!("{e:#}"))?;
+    if format != AudioFormat::Flac {
+        return Ok((format, None));
     }
     Registry::discover_one(ToolId::Flac)
         .require(ToolId::Flac)
         .cloned()
+        .map(|t| (format, Some(t)))
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -282,8 +279,8 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let flac = match require_flac_set(&set.files) {
-        Ok(t) => t,
+    let (format, flac) = match require_fixable_set(&set.files) {
+        Ok(v) => v,
         Err(why) => {
             eprintln!("lh-tui: {why}");
             return ExitCode::from(2);
@@ -291,7 +288,7 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
     };
     let mut dsts: Vec<PathBuf> = Vec::with_capacity(set.files.len());
     for f in &set.files {
-        match destination(&f.path, "flac", Some(&out_dir)) {
+        match destination(&f.path, repair_extension(format), Some(&out_dir)) {
             Ok(d) => dsts.push(d),
             Err(_) => {
                 eprintln!("lh-tui: {} has no file name", f.path.display());
@@ -387,7 +384,7 @@ pub(crate) fn run_sbe_fix_execute_screen(
     files: Vec<AudioFile>,
     plan: FixPlan,
     dsts: Vec<PathBuf>,
-    flac: Tool,
+    flac: Option<Tool>,
     overwrite: bool,
     theme: Theme,
 ) -> io::Result<lh_core::Result<Vec<Fixed>>> {
@@ -402,7 +399,7 @@ pub(crate) fn run_sbe_fix_execute_screen(
     queue.submit("sbe fix", move |_progress| {
         let opts = EncodeOpts::default();
         let encode = RepairEncode {
-            flac: &flac,
+            flac: flac.as_ref(),
             opts: &opts,
             overwrite,
         };
@@ -528,7 +525,7 @@ pub(crate) fn draw_sbe_fix(
 
     let footer = match (controls, stage) {
         (Some(_), FixStage::Planned) => {
-            " d direction   p pad tail   a apply in place (originals → _original/)   q/esc back "
+            " d direction   p pad tail   a apply in place (originals → _original/sbe-fix/)   q/esc back "
         }
         (Some(_), FixStage::Fixing(_)) => " fixing — can't be stopped part way ",
         _ => " q / esc quit ",
@@ -749,7 +746,7 @@ pub(crate) type InPlaceOutcome = Option<lh_core::Result<(Vec<InPlace>, FixPlan)>
 
 /// The fix, applied to the folder itself: the plan as a table, re-planned as `d` cycles the
 /// direction and `p` toggles tail padding, then `a` runs `fix_in_place` — each changed file
-/// replaced under its own name, the file it replaced moved into `_original/`, the way the
+/// replaced under its own name, the file it replaced moved into `_original/sbe-fix/`, the way the
 /// workspace's convert → FLAC leaves a folder holding its FLACs.
 ///
 /// `None` when left without applying. Once applying starts it can't be left until it is
@@ -868,7 +865,7 @@ type InPlaceQueue = Queue<lh_core::Result<Vec<InPlace>>>;
 
 /// Submits `fix_in_place` as the one job on a queue of one, or says why it can't run.
 fn start_in_place(files: &[AudioFile], plan: &FixPlan) -> Result<(InPlaceQueue, Fixing), String> {
-    let flac = require_flac_set(files)?;
+    let (_, flac) = require_fixable_set(files)?;
     let queue = Queue::with_workers(1);
     let steps = (0..files.len())
         .map(|i| {
@@ -885,7 +882,7 @@ fn start_in_place(files: &[AudioFile], plan: &FixPlan) -> Result<(InPlaceQueue, 
     queue.submit("sbe fix", move |_progress| {
         let opts = EncodeOpts::default();
         let encode = RepairEncode {
-            flac: &flac,
+            flac: flac.as_ref(),
             opts: &opts,
             overwrite: false,
         };

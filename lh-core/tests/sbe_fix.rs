@@ -128,7 +128,7 @@ fn single_boundary_shifts_exactly_the_planned_remainder() {
     let out_b = dir.path().join("out/t02.flac");
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -186,7 +186,7 @@ fn round_trip_pcm_is_unchanged_by_the_shift() {
     let out_b = dir.path().join("out/t02.flac");
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -221,7 +221,7 @@ fn tags_survive_the_repair() {
     let out_b = dir.path().join("out/t02.flac");
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -267,7 +267,7 @@ fn a_failed_second_output_leaves_neither_file_committed() {
 
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -289,7 +289,7 @@ fn non_cdda_pair_is_refused() {
     let out_b = dir.path().join("out/t02.flac");
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -333,7 +333,7 @@ fn chained_boundaries_execute_left_to_right() {
     ];
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -385,7 +385,7 @@ fn tail_padding_executes_and_is_excluded_from_the_invariant() {
     let dsts = vec![dir.path().join("out/t01.flac")];
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -439,7 +439,7 @@ fn a_failed_third_output_in_a_chain_leaves_nothing_committed() {
 
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -451,7 +451,7 @@ fn a_failed_third_output_in_a_chain_leaves_nothing_committed() {
 }
 
 /// In place: every file the plan changes is replaced under its own name with its original
-/// moved into `_original/`; a file the plan leaves alone stays byte-for-byte itself and is
+/// moved into `_original/sbe-fix/`; a file the plan leaves alone stays byte-for-byte itself and is
 /// not moved; the folder's audio, concatenated, is unchanged; no staging folder is left.
 #[test]
 fn in_place_replaces_changed_files_and_sets_their_originals_aside() {
@@ -474,7 +474,7 @@ fn in_place_replaces_changed_files_and_sets_their_originals_aside() {
 
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -506,7 +506,7 @@ fn in_place_replaces_changed_files_and_sets_their_originals_aside() {
         before[0],
         "t01 untouched"
     );
-    let originals = dir.path().join("_original");
+    let originals = dir.path().join("_original/sbe-fix");
     assert!(!originals.join("t01.flac").exists(), "t01 not moved");
     for i in 1..3 {
         let InPlace::Replaced { fixed, original } = &done[i] else {
@@ -535,7 +535,7 @@ fn in_place_replaces_changed_files_and_sets_their_originals_aside() {
     assert!(leftovers.is_empty(), "staging folder left behind");
 }
 
-/// A changed file whose name is already taken in `_original/` refuses the whole fix before
+/// A changed file whose name is already taken in `_original/sbe-fix/` refuses the whole fix before
 /// anything is encoded or moved.
 #[test]
 fn in_place_refuses_when_original_is_already_taken() {
@@ -546,14 +546,14 @@ fn in_place_refuses_when_original_is_already_taken() {
     let b = synth_flac(&flac, dir.path(), "t02", 588 * 20 + 585, 2);
     let files = [a.clone(), b.clone()];
     let before_a = std::fs::read(&a.path).unwrap();
-    let originals = dir.path().join("_original");
-    std::fs::create_dir(&originals).unwrap();
+    let originals = dir.path().join("_original/sbe-fix");
+    std::fs::create_dir_all(&originals).unwrap();
     std::fs::write(originals.join("t02.flac"), b"already here").unwrap();
 
     let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
     let opts = EncodeOpts::default();
     let encode = RepairEncode {
-        flac: &flac,
+        flac: Some(&flac),
         opts: &opts,
         overwrite: false,
     };
@@ -565,4 +565,223 @@ fn in_place_refuses_when_original_is_already_taken() {
         std::fs::read(originals.join("t02.flac")).unwrap(),
         b"already here"
     );
+}
+
+// --- R5: WAV -------------------------------------------------------------------------
+//
+// The same §5 list, on WAVs: no `flac` binary needed, so none of these skip.
+
+fn no_encode() -> RepairEncode<'static> {
+    static OPTS: std::sync::OnceLock<EncodeOpts> = std::sync::OnceLock::new();
+    RepairEncode {
+        flac: None,
+        opts: OPTS.get_or_init(EncodeOpts::default),
+        overwrite: false,
+    }
+}
+
+fn wav_set(dir: &Path, frames: &[u64]) -> Vec<AudioFile> {
+    frames
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| {
+            let path = dir.join(format!("t{:02}.wav", i + 1));
+            synth_wav(&path, n, 100 + i as u32);
+            probe(&path)
+        })
+        .collect()
+}
+
+/// Every `data` chunk laid end to end — WAV's whole-set invariant, read with nothing but
+/// the reader `probe` itself uses.
+fn wav_data(paths: &[PathBuf]) -> Vec<u8> {
+    paths
+        .iter()
+        .flat_map(|p| {
+            let bytes = std::fs::read(p).unwrap();
+            let at = bytes.windows(4).position(|w| w == b"data").unwrap();
+            let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            bytes[at + 8..at + 8 + len].to_vec()
+        })
+        .collect()
+}
+
+fn frames_of(path: &Path) -> u64 {
+    probe(path).stream_info.total_frames.unwrap()
+}
+
+/// A chain where boundary 1 hands frames on to boundary 2, both directions: every file but
+/// the tail ends up aligned, the concatenated audio is byte-for-byte what it was, and each
+/// reported audio MD5 is the MD5 of that file's `data`.
+#[test]
+fn wav_chain_round_trips_and_aligns() {
+    for direction in [BoundaryDirection::Backward, BoundaryDirection::Forward] {
+        let dir = tempfile::tempdir().unwrap();
+        let files = wav_set(dir.path(), &[588 * 10 + 3, 588 * 20, 588 * 5 + 100]);
+        let srcs: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+        let before = wav_data(&srcs);
+
+        let plan = plan_fix(&files, direction, TailPolicy::Report).unwrap();
+        let dsts: Vec<PathBuf> = (1..=3)
+            .map(|i| dir.path().join(format!("out/t{i:02}.wav")))
+            .collect();
+        let steps = std::sync::Mutex::new(Vec::new());
+        let fixed = execute_fix(&files, &plan, &dsts, &no_encode(), &|i, s| {
+            steps.lock().unwrap().push((i, s))
+        })
+        .unwrap();
+
+        assert_eq!(wav_data(&dsts), before, "{direction:?}");
+        for d in &dsts[..2] {
+            assert_eq!(frames_of(d) % 588, 0, "{direction:?}: {}", d.display());
+        }
+        for (f, d) in fixed.iter().zip(&dsts) {
+            assert_eq!(f.path, *d);
+            assert_eq!(f.audio_md5, format::audio_md5(d).unwrap());
+        }
+        for i in 0..3 {
+            let mine: Vec<FixStep> = steps
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| s.0 == i)
+                .map(|s| s.1)
+                .collect();
+            assert_eq!(
+                mine,
+                [
+                    FixStep::Decoding,
+                    FixStep::Encoding,
+                    FixStep::Checking,
+                    FixStep::Checked
+                ]
+            );
+        }
+    }
+}
+
+/// A file too short to keep what it is handed passes it on whole: t01's 500 left-over
+/// frames and all 10 of t02's end up at the head of t03, which then reads from all three.
+#[test]
+fn wav_fix_reaches_past_a_short_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = wav_set(dir.path(), &[588 * 3 + 500, 10, 588 * 2]);
+    let srcs: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+    let before = wav_data(&srcs);
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Pad).unwrap();
+    let dsts: Vec<PathBuf> = (1..=3)
+        .map(|i| dir.path().join(format!("out/t{i:02}.wav")))
+        .collect();
+    execute_fix(&files, &plan, &dsts, &no_encode(), &|_, _| {}).unwrap();
+
+    assert_eq!(frames_of(&dsts[0]), 588 * 3);
+    assert_eq!(frames_of(&dsts[1]), 0);
+    assert_eq!(frames_of(&dsts[2]), 588 * 3);
+    let after = wav_data(&dsts);
+    assert_eq!(after[..before.len()], before[..]);
+}
+
+/// Tail padding adds zeroed frames to the last file only, and the invariant leaves them out.
+#[test]
+fn wav_tail_padding_is_silence_and_excluded_from_the_invariant() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = wav_set(dir.path(), &[588 * 10 + 3, 588 * 5 + 100]);
+    let srcs: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+    let before = wav_data(&srcs);
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Pad).unwrap();
+    let pad = plan.tail_padding_frames.unwrap();
+    assert_eq!(pad, 588 - 103);
+
+    let dsts = vec![dir.path().join("o1.wav"), dir.path().join("o2.wav")];
+    execute_fix(&files, &plan, &dsts, &no_encode(), &|_, _| {}).unwrap();
+
+    for d in &dsts {
+        assert_eq!(frames_of(d) % 588, 0);
+    }
+    let after = wav_data(&dsts);
+    assert_eq!(after.len(), before.len() + pad as usize * 4);
+    assert_eq!(after[..before.len()], before[..]);
+    assert!(after[before.len()..].iter().all(|&b| b == 0));
+}
+
+/// A `LIST` chunk on either side of `data` survives byte-for-byte, and the file around it is
+/// still one `probe` reads.
+#[test]
+fn wav_list_chunk_is_kept_as_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = wav_set(dir.path(), &[588 * 10 + 3, 588 * 5]);
+    let list = b"LIST\x0e\0\0\0INFOINAM\x02\0\0\0t\0";
+    let mut bytes = std::fs::read(&files[0].path).unwrap();
+    bytes.splice(12..12, list.iter().copied()); // before fmt
+    bytes.extend_from_slice(list); // after data
+    let riff = (bytes.len() - 8) as u32;
+    bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+    std::fs::write(&files[0].path, &bytes).unwrap();
+    let files = vec![probe(&files[0].path), files[1].clone()];
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    let dsts = vec![dir.path().join("o1.wav"), dir.path().join("o2.wav")];
+    execute_fix(&files, &plan, &dsts, &no_encode(), &|_, _| {}).unwrap();
+
+    let out = std::fs::read(&dsts[0]).unwrap();
+    assert_eq!(&out[12..12 + list.len()], list);
+    assert_eq!(&out[out.len() - list.len()..], list);
+    assert_eq!(frames_of(&dsts[0]), 588 * 10);
+    assert_eq!(out.len(), bytes.len() - 3 * 4);
+}
+
+#[test]
+fn wav_failed_third_output_leaves_nothing_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = wav_set(dir.path(), &[588 * 10 + 3, 588 * 20, 588 * 5]);
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    let dsts: Vec<PathBuf> = ["o1", "o2", "o3"]
+        .iter()
+        .map(|n| dir.path().join(format!("{n}.wav")))
+        .collect();
+    std::fs::create_dir_all(&dsts[2]).unwrap(); // sabotage, as for FLAC
+    let err = execute_fix(&files, &plan, &dsts, &no_encode(), &|_, _| {}).unwrap_err();
+    eprintln!("expected failure: {err}");
+    assert!(!dsts[0].exists());
+    assert!(!dsts[1].exists());
+}
+
+#[test]
+fn a_mixed_wav_flac_set_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = wav_set(dir.path(), &[588 * 10 + 3]);
+    let b = dir.path().join("t02.flac");
+    std::fs::copy(fixture("cdda-aligned.flac"), &b).unwrap();
+    files.push(probe(&b));
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    let dsts = vec![dir.path().join("o1.wav"), dir.path().join("o2.flac")];
+    let err = execute_fix(&files, &plan, &dsts, &no_encode(), &|_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("convert first"), "{err}");
+    let err = fix_in_place(&files, &plan, &no_encode(), &|_, _| {}).unwrap_err();
+    assert!(err.to_string().contains("convert first"), "{err}");
+    assert!(!dsts[0].exists());
+}
+
+#[test]
+fn wav_in_place_replaces_changed_files_and_sets_their_originals_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = wav_set(dir.path(), &[588 * 4, 588 * 10 + 3, 588 * 20 + 585]);
+    let paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+    let before = wav_data(&paths);
+    let t01 = std::fs::read(&paths[0]).unwrap();
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    assert!(plan.fully_fixed);
+    let done = fix_in_place(&files, &plan, &no_encode(), &|_, _| {}).unwrap();
+
+    assert!(matches!(&done[0], InPlace::Unchanged { .. }));
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), t01);
+    for (i, d) in done.iter().enumerate().skip(1) {
+        let InPlace::Replaced { original, .. } = d else {
+            panic!("file {i} should be replaced");
+        };
+        assert!(original.starts_with(dir.path().join("_original/sbe-fix")));
+        assert_eq!(frames_of(&paths[i]) % 588, 0);
+    }
+    assert_eq!(wav_data(&paths), before);
 }

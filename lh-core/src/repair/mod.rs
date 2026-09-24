@@ -8,17 +8,26 @@
 //! the plan has), pad the tail when asked, re-encode, restore tags, and commit every file
 //! atomically. [`execute_single_boundary`] is the R2-shaped entry point for the common case
 //! of one boundary between two adjacent files, built on top of it.
+//!
+//! R5 is the same two entry points on a set of WAVs: the shift is bytes of each file's
+//! `data` chunk moved to its neighbour, with no decode, no encode and no tags to carry
+//! (docs/sbe-repair.md §10). [`execute_fix`] and [`fix_in_place`] pick the path by format.
 
 use crate::convert::{self, EncodeOpts};
 use crate::error::{Error, Result};
-use crate::format::{self, wav::WavWriter};
-use crate::model::{AudioFile, FRAMES_PER_SECTOR, StreamInfo};
-use crate::output;
+use crate::format::{
+    self,
+    wav::{self, WavWriter},
+};
+use crate::model::{AudioFile, AudioFormat, FRAMES_PER_SECTOR, StreamInfo};
+use crate::output::{self, TempOutput};
 use crate::tag;
-use crate::tools::{Provenance, Tool};
+use crate::tools::{Agent, Provenance, Tool};
+use md5::{Digest, Md5};
 use rayon::prelude::*;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Read};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 /// shntool's `-b`/`-f`/`-u`: which way a boundary's remainder frames move.
@@ -195,8 +204,10 @@ pub struct Fixed {
 
 /// What repair encodes with — the same knobs [`convert::to_flac`] takes, bundled once
 /// because every boundary in a fix shares one reference binary and one set of options.
+/// A set of WAVs is never encoded, so `flac` and `opts` only matter for FLAC, and `flac`
+/// may be `None` for WAV; `overwrite` applies to both.
 pub struct RepairEncode<'a> {
-    pub flac: &'a Tool,
+    pub flac: Option<&'a Tool>,
     pub opts: &'a EncodeOpts,
     pub overwrite: bool,
 }
@@ -206,11 +217,12 @@ pub struct RepairEncode<'a> {
 /// showing one row per file wants to move each row along as it goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixStep {
-    /// Its audio is being read into memory.
+    /// Its audio is being read into memory (FLAC), or its chunks read (WAV).
     Decoding,
-    /// Its shifted audio is being encoded by the reference `flac` binary.
+    /// Its shifted audio is being encoded by the reference `flac` binary (FLAC), or
+    /// written (WAV).
     Encoding,
-    /// Its encoded output is being decoded again for the round-trip check.
+    /// Its output is being decoded (FLAC) or read (WAV) again for the round-trip check.
     Checking,
     /// The round-trip check passed for it and every file it trades frames with; it waits
     /// only on the final commit.
@@ -229,6 +241,36 @@ impl FixStep {
     }
 }
 
+/// The one format a set of files can be fixed as: every file FLAC, or every file WAV. A set
+/// mixing the two is refused (convert first), and so is any other format — there is no
+/// repair path for it.
+pub fn set_format(files: &[AudioFile]) -> Result<AudioFormat> {
+    let first = files
+        .first()
+        .ok_or_else(|| Error::malformed("<set>", "no files to fix"))?;
+    if !matches!(first.format, AudioFormat::Flac | AudioFormat::Wav) {
+        return Err(Error::malformed(
+            &first.path,
+            format!(
+                "sbe fix can only execute against FLAC or WAV, and this is {}",
+                first.format
+            ),
+        ));
+    }
+    if let Some(f) = files.iter().find(|f| f.format != first.format) {
+        return Err(Error::malformed(
+            &f.path,
+            format!(
+                "is {} but {} is {}; sbe fix takes a set of one format — convert first",
+                f.format,
+                first.file_name(),
+                first.format
+            ),
+        ));
+    }
+    Ok(first.format)
+}
+
 /// Execute a whole [`FixPlan`] over an ordered set of files (R3): apply every boundary
 /// shift left to right, chaining as each one changes what the next file starts with, add
 /// the tail's silence when [`FixPlan::tail_padding_frames`] asks for it, re-encode every
@@ -243,6 +285,11 @@ impl FixStep {
 /// does (Principle 1). A set of exactly one file is legal — no boundaries, tail padding
 /// only. `on_step` hears each file's index into `files` as it reaches each [`FixStep`] —
 /// from several threads at once, since files are decoded, encoded and checked in parallel.
+///
+/// A set of WAVs (R5) takes the same steps with the decode and encode taken out: each
+/// output's `data` is copied straight out of the sources' `data` chunks, cut at the planned
+/// lengths, around the file's own other chunks kept verbatim; the invariant is the MD5 of
+/// every `data` chunk laid end to end. See [`set_format`] for what a set may hold.
 pub fn execute_fix(
     files: &[AudioFile],
     plan: &FixPlan,
@@ -276,16 +323,30 @@ pub fn execute_fix(
     // Its own pool rather than rayon's global one: a caller running this as a job on a
     // `Queue` of one worker would otherwise have every `par_iter` below run on that one
     // worker's pool, one file at a time.
+    let format = set_format(files)?;
+    let flac = match format {
+        AudioFormat::Flac => Some(encode.flac.ok_or_else(|| {
+            Error::malformed(
+                &files[0].path,
+                "fixing FLAC needs the reference flac binary",
+            )
+        })?),
+        _ => None,
+    };
     let pool = rayon::ThreadPoolBuilder::new()
         .build()
         .map_err(|e| Error::malformed("<set>", format!("starting worker threads: {e}")))?;
-    pool.install(|| execute_fix_on_pool(files, plan, dsts, encode, on_step))
+    pool.install(|| match flac {
+        Some(flac) => execute_flac_fix(files, plan, dsts, flac, encode, on_step),
+        None => execute_wav_fix(files, plan, dsts, encode.overwrite, on_step),
+    })
 }
 
-fn execute_fix_on_pool(
+fn execute_flac_fix(
     files: &[AudioFile],
     plan: &FixPlan,
     dsts: &[PathBuf],
+    flac: &Tool,
     encode: &RepairEncode,
     on_step: &(dyn Fn(usize, FixStep) + Sync),
 ) -> Result<Vec<Fixed>> {
@@ -361,7 +422,7 @@ fn execute_fix_on_pool(
             let (temp, prov, _, _) = convert::encode_flac_staged(
                 scratch.path(),
                 &dsts[i],
-                encode.flac,
+                flac,
                 encode.opts,
                 encode.overwrite,
                 &mut || true,
@@ -461,11 +522,16 @@ pub fn execute_single_boundary(
     Ok((fixed_a, fixed_b))
 }
 
+/// Where [`fix_in_place`] sets replaced files aside, inside [`convert::ORIGINALS_DIR`]: a
+/// folder of its own, so a WAV fixed in place can still be converted to FLAC with its
+/// sources moved to `_original/` afterwards, without the two steps wanting the same name.
+pub const SBE_FIX_ORIGINALS_DIR: &str = "sbe-fix";
+
 /// What [`fix_in_place`] did with one file of the set.
 #[derive(Debug, Clone)]
 pub enum InPlace {
     /// Rewritten under its own name; the file it replaced now sits at `original`, inside
-    /// [`convert::ORIGINALS_DIR`].
+    /// `_original/sbe-fix/` ([`SBE_FIX_ORIGINALS_DIR`]).
     Replaced {
         fixed: Box<Fixed>,
         original: PathBuf,
@@ -477,8 +543,8 @@ pub enum InPlace {
 
 /// [`execute_fix`] for a show folder that should end up holding the fixed files under their
 /// own names, the way `convert --move-sources` leaves a folder holding its FLACs: every file
-/// the plan changes is replaced, and the file it replaced moves into
-/// [`convert::ORIGINALS_DIR`] beside it (Principle 1: moved, never deleted). A file the plan
+/// the plan changes is replaced, and the file it replaced moves into `_original/sbe-fix/`
+/// beside it ([`SBE_FIX_ORIGINALS_DIR`]; Principle 1: moved, never deleted). A file the plan
 /// leaves alone is not touched at all.
 ///
 /// The fixes are encoded, tag-restored and checked against the round-trip invariant into a
@@ -486,7 +552,7 @@ pub enum InPlace {
 /// any destination, so nothing in the folder changes until every changed file has a checked
 /// replacement. Only then are the originals moved aside and the replacements renamed in —
 /// all of them, or, if one fails, none: the ones already swapped are swapped back. Refuses
-/// up front, before any encode, if `_original/` already holds a file by any of the changed
+/// up front, before any encode, if `_original/sbe-fix/` already holds a file by any of the changed
 /// files' names.
 ///
 /// Every file in `files` must sit in the same folder. `on_step` is [`execute_fix`]'s, with
@@ -506,6 +572,7 @@ pub fn fix_in_place(
             "this plan was not computed for this file set",
         ));
     }
+    set_format(files)?;
     let dir = files[0]
         .path
         .parent()
@@ -517,7 +584,7 @@ pub fn fix_in_place(
         ));
     }
 
-    let originals = dir.join(convert::ORIGINALS_DIR);
+    let originals = dir.join(convert::ORIGINALS_DIR).join(SBE_FIX_ORIGINALS_DIR);
     for f in (0..files.len())
         .filter(|&i| plan.touches(i))
         .map(|i| &files[i])
@@ -583,7 +650,7 @@ pub fn fix_in_place(
             });
             continue;
         };
-        let swapped = convert::move_to_originals(&f.path).and_then(|original| {
+        let swapped = convert::move_aside(&f.path, &originals).and_then(|original| {
             std::fs::rename(&fx.path, &f.path)
                 .map(|()| original.clone())
                 .map_err(|e| {
@@ -611,6 +678,191 @@ pub fn fix_in_place(
         }
     }
     Ok(done)
+}
+
+/// [`execute_fix`] on a set of WAVs. Nothing is decoded: a frame is `bytes_per_frame` bytes
+/// of a `data` chunk, so the fixed set's `data`, laid end to end, is the original set's cut
+/// at the new lengths — plus the tail's silence, which is zero bytes.
+fn execute_wav_fix(
+    files: &[AudioFile],
+    plan: &FixPlan,
+    dsts: &[PathBuf],
+    overwrite: bool,
+    on_step: &(dyn Fn(usize, FixStep) + Sync),
+) -> Result<Vec<Fixed>> {
+    let bytes_per_frame = u64::from(files[0].stream_info.bytes_per_frame());
+    let sources = files
+        .par_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            on_step(i, FixStep::Decoding);
+            let chunks = wav::read_chunks(&f.path)?;
+            if chunks.layout.data_len % bytes_per_frame != 0 {
+                return Err(Error::malformed(
+                    &f.path,
+                    format!(
+                        "its data chunk ({} bytes) is not a whole number of {bytes_per_frame}-byte \
+                         frames",
+                        chunks.layout.data_len
+                    ),
+                ));
+            }
+            Ok(chunks)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let src_lens: Vec<u64> = sources.iter().map(|c| c.layout.data_len).collect();
+    let mut new_lens = Vec::with_capacity(files.len());
+    for (i, f) in files.iter().enumerate() {
+        let frames =
+            (src_lens[i] / bytes_per_frame) as i64 + plan.shifted_in(i) - plan.shifted_out(i);
+        if frames < 0 {
+            return Err(Error::malformed(
+                &f.path,
+                "cannot shift more frames across its edges than its data chunk holds; its \
+                 header claims more audio than it has",
+            ));
+        }
+        new_lens.push(frames as u64 * bytes_per_frame);
+    }
+    let ranges = data_ranges(&src_lens, &new_lens);
+    let pad_len = plan.tail_padding_frames.unwrap_or(0) * bytes_per_frame;
+    let last = files.len() - 1;
+
+    // The invariant's "before", hashed straight from the source files and independently of
+    // `data_ranges` — the arithmetic the check is there to catch a mistake in — while the
+    // outputs are written beside it.
+    let (before_md5, staged) = rayon::join(
+        || -> Result<[u8; 16]> {
+            let mut hasher = Md5::new();
+            for (f, c) in files.iter().zip(&sources) {
+                wav::read_range(&f.path, c.layout.data_offset, c.layout.data_len, |b| {
+                    hasher.update(b);
+                    Ok(())
+                })?;
+            }
+            Ok(hasher.finalize().into())
+        },
+        || {
+            (0..files.len())
+                .into_par_iter()
+                .map(|i| {
+                    on_step(i, FixStep::Encoding);
+                    let temp = TempOutput::stage(&files[i].path, &dsts[i], overwrite)?;
+                    let pad = if i == last { pad_len } else { 0 };
+                    wav::write_chunks(temp.path(), &sources[i], new_lens[i] + pad, |w| {
+                        for (j, range) in &ranges[i] {
+                            let c = &sources[*j].layout;
+                            wav::read_range(
+                                &files[*j].path,
+                                c.data_offset + range.start,
+                                range.end - range.start,
+                                |b| w.write_all(b).map_err(|e| Error::io(temp.path(), e)),
+                            )?;
+                        }
+                        std::io::copy(&mut std::io::repeat(0).take(pad), w)
+                            .map_err(|e| Error::io(temp.path(), e))?;
+                        Ok(())
+                    })?;
+                    Ok(temp)
+                })
+                .collect::<Result<Vec<_>>>()
+        },
+    );
+    let (before_md5, temps) = (before_md5?, staged?);
+
+    // The check: read back what was staged — its chunks, and its `data` into both its own
+    // MD5 and the whole set's, the tail's silence left out of the latter.
+    let mut after = Md5::new();
+    let mut audio_md5s = Vec::with_capacity(files.len());
+    for (i, t) in temps.iter().enumerate() {
+        on_step(i, FixStep::Checking);
+        let staged = wav::read_chunks(t.path())?;
+        if !staged.same_chunks_besides_data(&sources[i]) {
+            return Err(Error::malformed(
+                &dsts[i],
+                "its chunks besides data differ from the original's after repair; nothing \
+                 was committed",
+            ));
+        }
+        let pad = if i == last { pad_len } else { 0 };
+        let keep = staged.layout.data_len.saturating_sub(pad);
+        let mut own = Md5::new();
+        let mut seen = 0u64;
+        wav::read_range(
+            t.path(),
+            staged.layout.data_offset,
+            staged.layout.data_len,
+            |b| {
+                own.update(b);
+                let into_set = (keep.saturating_sub(seen) as usize).min(b.len());
+                after.update(&b[..into_set]);
+                seen += b.len() as u64;
+                Ok(())
+            },
+        )?;
+        audio_md5s.push(<[u8; 16]>::from(own.finalize()));
+    }
+    let after_md5: [u8; 16] = after.finalize().into();
+    if after_md5 != before_md5 {
+        return Err(Error::malformed(
+            &dsts[0],
+            format!(
+                "round-trip audio MD5 mismatch after repair (before {}, after {}); \
+                 nothing was committed",
+                hex::encode(before_md5),
+                hex::encode(after_md5)
+            ),
+        ));
+    }
+    for i in 0..files.len() {
+        on_step(i, FixStep::Checked);
+    }
+
+    let committed = output::commit_all(temps)?;
+    Ok((0..files.len())
+        .map(|i| Fixed {
+            path: committed[i].clone(),
+            shifted_in: plan.shifted_in(i),
+            shifted_out: plan.shifted_out(i),
+            audio_md5: audio_md5s[i],
+            provenance: Provenance {
+                operation: "SBE fix (WAV)".into(),
+                agent: Agent::in_process(),
+                input: files[i].path.clone(),
+                output: committed[i].clone(),
+            },
+        })
+        .collect())
+}
+
+/// Where each output's `data` comes from: byte ranges of the sources' `data`, as
+/// `(source index, range)`, in order. Laid end to end, output after output, they are every
+/// source's `data` laid end to end — cut at `new_lens` instead of `src_lens`. Both must add
+/// up to the same total; a range may reach past the next source when a short file hands on
+/// frames it was itself handed.
+fn data_ranges(src_lens: &[u64], new_lens: &[u64]) -> Vec<Vec<(usize, Range<u64>)>> {
+    debug_assert_eq!(src_lens.iter().sum::<u64>(), new_lens.iter().sum::<u64>());
+    let (mut j, mut at) = (0usize, 0u64);
+    new_lens
+        .iter()
+        .map(|&len| {
+            let mut out = Vec::new();
+            let mut need = len;
+            while need > 0 {
+                let left = src_lens[j] - at;
+                if left == 0 {
+                    (j, at) = (j + 1, 0);
+                    continue;
+                }
+                let take = need.min(left);
+                out.push((j, at..at + take));
+                at += take;
+                need -= take;
+            }
+            out
+        })
+        .collect()
 }
 
 /// Move `shifted_frames` (see [`BoundaryFix`]'s sign convention) between two interleaved
@@ -683,6 +935,41 @@ mod tests {
             },
             encoder: None,
         }
+    }
+
+    #[test]
+    fn data_ranges_cut_the_concatenation_at_the_new_lengths() {
+        // 3 bytes handed forward out of the first file, 2 borrowed back from the third.
+        assert_eq!(
+            data_ranges(&[10, 5, 8], &[7, 10, 6]),
+            vec![
+                vec![(0, 0..7)],
+                vec![(0, 7..10), (1, 0..5), (2, 0..2)],
+                vec![(2, 2..8)],
+            ]
+        );
+        // A file handed on in full, and an empty one skipped over.
+        assert_eq!(
+            data_ranges(&[4, 0, 2, 6], &[0, 0, 8, 4]),
+            vec![
+                vec![],
+                vec![],
+                vec![(0, 0..4), (2, 0..2), (3, 0..2)],
+                vec![(3, 2..6)]
+            ]
+        );
+    }
+
+    #[test]
+    fn set_format_refuses_a_mixed_set() {
+        let mut wav = file("t02.wav", 588);
+        wav.format = AudioFormat::Wav;
+        assert_eq!(
+            set_format(std::slice::from_ref(&wav)).unwrap(),
+            AudioFormat::Wav
+        );
+        let err = set_format(&[file("t01.flac", 588), wav]).unwrap_err();
+        assert!(err.to_string().contains("convert first"), "{err}");
     }
 
     #[test]
@@ -831,7 +1118,7 @@ mod tests {
         let tool = dummy_tool();
         let opts = EncodeOpts::default();
         let encode = RepairEncode {
-            flac: &tool,
+            flac: Some(&tool),
             opts: &opts,
             overwrite: false,
         };
@@ -861,7 +1148,7 @@ mod tests {
         let tool = dummy_tool();
         let opts = EncodeOpts::default();
         let encode = RepairEncode {
-            flac: &tool,
+            flac: Some(&tool),
             opts: &opts,
             overwrite: false,
         };
@@ -883,7 +1170,7 @@ mod tests {
         let tool = dummy_tool();
         let opts = EncodeOpts::default();
         let encode = RepairEncode {
-            flac: &tool,
+            flac: Some(&tool),
             opts: &opts,
             overwrite: false,
         };

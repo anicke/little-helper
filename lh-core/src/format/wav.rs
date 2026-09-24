@@ -288,3 +288,273 @@ fn channel_mask(channels: u8) -> u32 {
         .copied()
         .unwrap_or(0)
 }
+
+/// A WAV's chunks in file order: every one but `data` held verbatim, `data` only by where its
+/// payload sits (in `layout`). What SBE repair on WAV keeps of a file while it replaces the
+/// audio — `LIST`/`INFO`, `id3 ` and taper chunks included, which [`probe`] skips.
+#[derive(Debug, Clone)]
+pub(crate) struct WavChunks {
+    pub layout: WavLayout,
+    chunks: Vec<Chunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Chunk {
+    Data,
+    Other { id: [u8; 4], body: Vec<u8> },
+}
+
+impl WavChunks {
+    /// True when both files carry the same chunks, in the same order, byte for byte, apart
+    /// from the `data` payload.
+    pub fn same_chunks_besides_data(&self, other: &WavChunks) -> bool {
+        self.chunks == other.chunks
+    }
+}
+
+/// Every chunk of the WAV at `path`, in order. Refuses a file with more than one `data`
+/// chunk, or a chunk that claims to run past the end of the file.
+pub(crate) fn read_chunks(path: &Path) -> Result<WavChunks> {
+    let layout = probe(path)?;
+    let file = File::open(path).map_err(|e| Error::io(path, e))?;
+    let file_len = file.metadata().map_err(|e| Error::io(path, e))?.len();
+    let mut r = BufReader::new(file);
+    r.seek(SeekFrom::Start(12))
+        .map_err(|e| Error::io(path, e))?;
+
+    let mut chunks = Vec::new();
+    let mut pos = 12u64;
+    // A trailer too short to be a chunk header is not a chunk; `probe` ignores it too.
+    while pos + 8 <= file_len {
+        let mut hdr = [0u8; 8];
+        r.read_exact(&mut hdr).map_err(|e| Error::io(path, e))?;
+        let id = [hdr[0], hdr[1], hdr[2], hdr[3]];
+        let size = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+        let body = pos + 8;
+        if body + size > file_len {
+            return Err(Error::malformed(
+                path,
+                format!(
+                    "the '{}' chunk runs past the end of the file",
+                    String::from_utf8_lossy(&id)
+                ),
+            ));
+        }
+        if &id == b"data" {
+            if chunks.contains(&Chunk::Data) {
+                return Err(Error::malformed(path, "more than one data chunk"));
+            }
+            chunks.push(Chunk::Data);
+        } else {
+            let mut bytes = vec![0u8; size as usize];
+            r.read_exact(&mut bytes).map_err(|e| Error::io(path, e))?;
+            chunks.push(Chunk::Other { id, body: bytes });
+        }
+        pos = body + size + (size & 1);
+        r.seek(SeekFrom::Start(pos))
+            .map_err(|e| Error::io(path, e))?;
+    }
+    Ok(WavChunks { layout, chunks })
+}
+
+/// Write a WAV to `path` with `like`'s chunks, in `like`'s order, around a `data` chunk of
+/// `data_len` bytes that `fill` writes. Fails if `fill` writes any other number of bytes.
+pub(crate) fn write_chunks(
+    path: &Path,
+    like: &WavChunks,
+    data_len: u64,
+    fill: impl FnOnce(&mut dyn Write) -> Result<()>,
+) -> Result<()> {
+    let body_len = |c: &Chunk| match c {
+        Chunk::Data => data_len,
+        Chunk::Other { body, .. } => body.len() as u64,
+    };
+    let riff_len: u64 = 4 + like
+        .chunks
+        .iter()
+        .map(|c| 8 + body_len(c) + (body_len(c) & 1))
+        .sum::<u64>();
+    if data_len > MAX_WAV_DATA || riff_len > MAX_WAV_DATA {
+        return Err(Error::malformed(
+            path,
+            "audio exceeds the 4 GiB a WAV file can address",
+        ));
+    }
+
+    let file = File::create(path).map_err(|e| Error::io(path, e))?;
+    let mut w = io::BufWriter::new(file);
+    let io_err = |e| Error::io(path, e);
+    w.write_all(b"RIFF").map_err(io_err)?;
+    w.write_all(&(riff_len as u32).to_le_bytes())
+        .map_err(io_err)?;
+    w.write_all(b"WAVE").map_err(io_err)?;
+    let mut fill = Some(fill);
+    for c in &like.chunks {
+        let len = body_len(c);
+        match c {
+            Chunk::Data => {
+                w.write_all(b"data").map_err(io_err)?;
+                w.write_all(&(len as u32).to_le_bytes()).map_err(io_err)?;
+                (fill.take().expect("one data chunk"))(&mut w)?;
+            }
+            Chunk::Other { id, body } => {
+                w.write_all(id).map_err(io_err)?;
+                w.write_all(&(len as u32).to_le_bytes()).map_err(io_err)?;
+                w.write_all(body).map_err(io_err)?;
+            }
+        }
+        if len & 1 == 1 {
+            w.write_all(&[0]).map_err(io_err)?;
+        }
+    }
+    let file = w
+        .into_inner()
+        .map_err(|e| Error::io(path, e.into_error()))?;
+    file.sync_all().map_err(io_err)?;
+    let written = file.metadata().map_err(io_err)?.len();
+    if written != 8 + riff_len {
+        return Err(Error::malformed(
+            path,
+            format!(
+                "wrote {written} bytes where the chunks add up to {}; the data chunk was not \
+                 {data_len} bytes",
+                8 + riff_len
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Feed `len` bytes of `path`'s file, starting `offset` bytes in, to `f` a block at a time.
+pub(crate) fn read_range(
+    path: &Path,
+    offset: u64,
+    len: u64,
+    mut f: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let mut file = File::open(path).map_err(|e| Error::io(path, e))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| Error::io(path, e))?;
+    let mut remaining = len;
+    let mut buf = vec![0u8; 256 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        file.read_exact(&mut buf[..want])
+            .map_err(|e| Error::io(path, e))?;
+        f(&buf[..want])?;
+        remaining -= want as u64;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        c.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    fn cdda_fmt() -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&1u16.to_le_bytes());
+        f.extend_from_slice(&2u16.to_le_bytes());
+        f.extend_from_slice(&44_100u32.to_le_bytes());
+        f.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+        f.extend_from_slice(&4u16.to_le_bytes());
+        f.extend_from_slice(&16u16.to_le_bytes());
+        f
+    }
+
+    fn riff(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body: Vec<u8> = chunks.concat();
+        let mut w = b"RIFF".to_vec();
+        w.extend_from_slice(&(4 + body.len() as u32).to_le_bytes());
+        w.extend_from_slice(b"WAVE");
+        w.extend_from_slice(&body);
+        w
+    }
+
+    /// Every chunk but `data` comes back out exactly as it went in, odd-sized ones and
+    /// their pad byte included, around whatever new `data` is written.
+    #[test]
+    fn chunks_round_trip_around_new_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.wav");
+        let list = chunk(b"LIST", b"INFOIART\x05\0\0\0band\0");
+        std::fs::write(
+            &src,
+            riff(&[
+                chunk(b"fmt ", &cdda_fmt()),
+                list.clone(),
+                chunk(b"data", &[1; 8]),
+                chunk(b"id3 ", b"xyz"),
+            ]),
+        )
+        .unwrap();
+
+        let chunks = read_chunks(&src).unwrap();
+        assert_eq!(chunks.layout.data_len, 8);
+        let dst = dir.path().join("b.wav");
+        write_chunks(&dst, &chunks, 12, |w| {
+            w.write_all(&[2; 12]).map_err(|e| Error::io(&dst, e))
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            riff(&[
+                chunk(b"fmt ", &cdda_fmt()),
+                list,
+                chunk(b"data", &[2; 12]),
+                chunk(b"id3 ", b"xyz")
+            ])
+        );
+        assert!(read_chunks(&dst).unwrap().same_chunks_besides_data(&chunks));
+    }
+
+    #[test]
+    fn a_short_fill_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.wav");
+        std::fs::write(
+            &src,
+            riff(&[chunk(b"fmt ", &cdda_fmt()), chunk(b"data", &[1; 8])]),
+        )
+        .unwrap();
+        let chunks = read_chunks(&src).unwrap();
+        let dst = dir.path().join("b.wav");
+        let err = write_chunks(&dst, &chunks, 12, |w| {
+            w.write_all(&[2; 8]).map_err(|e| Error::io(&dst, e))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("was not 12 bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_second_data_chunk_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.wav");
+        std::fs::write(
+            &src,
+            riff(&[
+                chunk(b"fmt ", &cdda_fmt()),
+                chunk(b"data", &[1; 4]),
+                chunk(b"data", &[1; 4]),
+            ]),
+        )
+        .unwrap();
+        assert!(
+            read_chunks(&src)
+                .unwrap_err()
+                .to_string()
+                .contains("more than one")
+        );
+    }
+}

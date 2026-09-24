@@ -17,7 +17,7 @@ for the live-music trading community: verify, checksum and convert lossless audi
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
-| M1 `lh-core` | **done** — every §8 item is in place, and it has grown past them: probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; SBE repair ([docs/sbe-repair.md](docs/sbe-repair.md), R1–R4a) done for FLAC, including the TUI screen and in-place fixing — fixing WAV directly (R5) is planned; etree naming, tagging and rename ([docs/tagging.md](docs/tagging.md), N1–N3) done |
+| M1 `lh-core` | **done** — every §8 item is in place, and it has grown past them: probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; SBE repair ([docs/sbe-repair.md](docs/sbe-repair.md), R1–R5) done for FLAC and WAV, including the TUI screen and in-place fixing; etree naming, tagging and rename ([docs/tagging.md](docs/tagging.md), N1–N3) done |
 | M2 `lh-cli` | **done** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers`, `tag`, `rename` all work |
 | M3 `lh-gui` | **done** for §8's contents (table, drag and drop, operation panel, job queue, log pane, Tools panel); open only for the tag, rename and sbe-fix screens — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell revamp is done: [docs/gui-shell.md](docs/gui-shell.md), S1–S4 all done (rail shell, selection, checksum areas, `iced::widget::table`). Tag/rename ([docs/tagging.md](docs/tagging.md)) has no GUI screen yet |
 | `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `check`, `convert`, `sbe fix`, `torrent create`/`check`/`info`, and `tag`/`rename` have real live screens, everything else runs headless like `lh` itself |
@@ -137,7 +137,7 @@ SBE *repair* (as opposed to the detection already in v0.1) is planned in
 [docs/sbe-repair.md](docs/sbe-repair.md). It shifts samples across track boundaries so splits
 land on sector boundaries — a whole-set operation, unlike every other v0.1 command — and pulls
 in tag preservation as a hard dependency rather than deferring it further. It executes on FLAC
-today; fixing WAV directly, before encoding and with no decode/encode at all, is planned as R5
+and, since R5, directly on WAV, before encoding and with no decode/encode at all
 (docs/sbe-repair.md §10).
 
 Torrent verification — checking a local fileset against a `.torrent` — is planned separately
