@@ -4,8 +4,8 @@
 //! same as `lh convert --to flac .`.
 //!
 //! Given a folder instead of a command, `lh-tui <folder>` opens the workspace: a menu of
-//! the screens a show goes through (rename, convert, tag, ...) on that one folder, each
-//! returning to the menu when quit (`screens/workspace.rs`, `docs/tui.md` §1).
+//! every screen, grouped by what it is for, each opening on that one folder and returning
+//! to the menu when quit (`screens/workspace.rs`, `docs/tui.md` §1).
 //!
 //! Most commands have an actual screen by now (`docs/tui.md` tracks which); a command with
 //! none yet runs exactly as `lh` would — printing to the terminal rather than drawing one —
@@ -51,9 +51,9 @@ struct Args {
     /// Color theme for the verify/checksum/torrent screens.
     #[arg(long, value_enum, default_value = "default")]
     theme: ThemeName,
-    /// A show folder to open the workspace on: rename, convert and tag it from one
-    /// session, without restarting for each screen. Defaults to the current directory
-    /// when no command is given either.
+    /// A show folder to open the workspace on: a menu of every screen, each run on that
+    /// folder, without restarting for each one. Defaults to the current directory when no
+    /// command is given either.
     dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,

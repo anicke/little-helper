@@ -128,7 +128,7 @@ pub(crate) fn run_checksum(kind: ChecksumKind, args: ChecksumArgs, theme: ThemeN
 /// written `.ffp` does not reorder itself between runs just because the queue's worker
 /// pool finished files in a different sequence this time (`docs/tui.md` §3, matching
 /// `lh-gui`'s S3 checksum-create area).
-fn run_checksum_screen(
+pub(crate) fn run_checksum_screen(
     terminal: &mut DefaultTerminal,
     kind: ChecksumKind,
     root: &str,

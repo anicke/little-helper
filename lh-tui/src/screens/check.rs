@@ -127,7 +127,7 @@ pub(crate) fn run_check(file: PathBuf, theme: ThemeName) -> ExitCode {
 
 /// Returns whether every entry checked out clean — the same notion of "ok" `lh check`'s
 /// exit code uses: no missing file, no mismatch, no read failure.
-fn run_check_screen(
+pub(crate) fn run_check_screen(
     terminal: &mut DefaultTerminal,
     kind: ChecksumKind,
     label: &str,

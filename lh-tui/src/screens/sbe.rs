@@ -116,7 +116,7 @@ pub(crate) fn run_sbe(paths: Paths, theme: ThemeName) -> ExitCode {
 /// Returns whether every file came back clean — no misalignment, no failure — the same
 /// notion `lh sbe`'s own exit code uses. `NotApplicable` doesn't count against it, the same
 /// way `cmd_sbe` never sets `ok = false` for a file that simply isn't CD audio.
-fn run_sbe_screen(
+pub(crate) fn run_sbe_screen(
     terminal: &mut DefaultTerminal,
     root: &str,
     files: &[AudioFile],
