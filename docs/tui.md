@@ -118,7 +118,7 @@ stays put and its row reads `KEPT`, which counts against a clean run. Standalone
 **Revisited 2026-09-24: every screen, not a workflow.** The menu listed only the five
 steps of the usual sequence, so screens like checksum creation or the torrent ones were
 unreachable from it. It now lists every screen, grouped — Prepare (rename, convert → FLAC,
-convert → WAV, tag), Inspect (verify, sbe, sbe fix preview), Checksums (check, create
+convert → WAV, tag), Inspect (verify, sbe, sbe fix), Checksums (check, create
 ffp/md5/st5), Torrent (create, info, check) — each with a one-line description, and no
 longer advances the cursor after a clean step as if walking a sequence. What each opens on,
 given only the folder:
@@ -126,8 +126,12 @@ given only the folder:
 * **check checksums** runs every `.ffp`/`.md5`/`.st5` in the folder, one screen after another.
 * **create ffp/md5/st5** writes `<folder>.<ext>` inside the folder, only if every file
   computed (a partial list is never left looking complete) and never over an existing file.
-* **sbe fix preview** is `sbe fix --dry-run` with default direction; executing needs an
-  output folder, which stays the subcommand's to ask for.
+* **sbe fix** is `sbe fix --in-place`: it opens on the plan (backward, no tail padding),
+  `d` cycles the direction and `p` toggles tail padding, re-planning each time, and `a`
+  applies it. Each file the plan changes is replaced under its own name and the file it
+  replaced moves into `_original/`, the same place convert → FLAC puts its WAVs; files the
+  plan leaves alone are not touched. Once applying starts it can't be left until it's done
+  (`fix_in_place` has no cancellation checkpoint).
 * **create torrent** is `torrent create <folder>` (picker and all), writing
   `<folder>.torrent` beside it; **torrent info/check** use that same file, or else the one
   `.torrent` inside the folder.

@@ -812,3 +812,36 @@ fn rename_refuses_to_overwrite_a_file_outside_the_plan() {
         b"not really a flac file"
     );
 }
+
+/// `--in-place` replaces each changed file under its own name and moves the file it
+/// replaced into `_original/`, byte-for-byte itself.
+#[test]
+fn sbe_fix_in_place_sets_the_originals_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("t01.flac");
+    let b = dir.path().join("t02.flac");
+    std::fs::copy(fixtures().join("cdda-sbe.flac"), &a).unwrap();
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), &b).unwrap();
+    let before_a = std::fs::read(&a).unwrap();
+
+    lh().arg("sbe")
+        .arg("fix")
+        .arg(dir.path())
+        .arg("--in-place")
+        .assert()
+        .code(1) // t02 inherits t01's remainder and there is no --pad-tail
+        .stdout(predicates::str::contains(
+            "FIXED     t01.flac   original moved to",
+        ))
+        .stdout(predicates::str::contains("FIXED     t02.flac"));
+
+    assert_eq!(
+        std::fs::read(dir.path().join("_original/t01.flac")).unwrap(),
+        before_a
+    );
+    lh().arg("sbe")
+        .arg(&a)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ALIGNED"));
+}

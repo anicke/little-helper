@@ -305,6 +305,15 @@ FIXED     02.flac -> /home/.../d1-fixed/02.flac   audio md5 ab8c522d...
 FIXED     03.flac -> /home/.../d1-fixed/03.flac   audio md5 283c0f1a...
 ```
 
+`--in-place` (instead of `-o`) fixes the folder itself, the way `convert --move-sources`
+leaves a show folder holding its FLACs: `repair::fix_in_place` stages every replacement in
+a hidden `.lh-sbe-fix-<pid>/` inside the folder (each run of changed files is its own
+`execute_fix`, invariant and all; files the plan leaves alone are never decoded), then moves
+each changed original into `_original/` and renames its replacement in, swapping back any
+already done if one fails. It refuses before encoding anything if `_original/` already has a
+changed file's name. Output lines are `FIXED <file>   original moved to <path>` or
+`UNCHANGED <file>`.
+
 Exit codes follow the existing contract (docs/torrent-creation.md §6): `0` fully fixed
 (or nothing needed fixing), `1` the set has something the tool won't override (an unpadded
 misaligned tail, a non-CD-audio member), `2` the command failed — including a missing `-o`
@@ -327,6 +336,10 @@ same "one job on a queue of one" shape `torrent create`/`check` already use for 
 sequential operation over a whole set. Every row updates together when the one `Finished`
 event lands, because the underlying operation is atomic — there is no meaningful per-file
 "running" state to show in between.
+
+**TUI workspace: in place.** The workspace's `sbe fix` item (and `lh-tui sbe fix
+--in-place`) is `run_sbe_fix_in_place_screen`: the plan with direction/tail padding as keys,
+then `fix_in_place` as the one job on a queue of one (docs/tui.md).
 
 **GUI: still open.** The GUI's own "Tools" menu (below) is unclaimed territory.
 

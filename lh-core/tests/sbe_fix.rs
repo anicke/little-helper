@@ -9,7 +9,8 @@ use lh_core::convert::{EncodeOpts, to_flac};
 use lh_core::format;
 use lh_core::model::AudioFile;
 use lh_core::repair::{
-    BoundaryDirection, RepairEncode, TailPolicy, execute_fix, execute_single_boundary, plan_fix,
+    BoundaryDirection, InPlace, RepairEncode, TailPolicy, execute_fix, execute_single_boundary,
+    fix_in_place, plan_fix,
 };
 use lh_core::tools::{Registry, Tool, ToolId};
 use std::path::{Path, PathBuf};
@@ -447,4 +448,101 @@ fn a_failed_third_output_in_a_chain_leaves_nothing_committed() {
 
     assert!(!out_a.exists(), "the first output must not survive alone");
     assert!(!out_b.exists(), "the second output must not survive alone");
+}
+
+/// In place: every file the plan changes is replaced under its own name with its original
+/// moved into `_original/`; a file the plan leaves alone stays byte-for-byte itself and is
+/// not moved; the folder's audio, concatenated, is unchanged; no staging folder is left.
+#[test]
+fn in_place_replaces_changed_files_and_sets_their_originals_aside() {
+    let Some(flac) = reference_flac() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    let a = synth_flac(&flac, dir.path(), "t01", 588 * 4, 1);
+    let b = synth_flac(&flac, dir.path(), "t02", 588 * 10 + 3, 2);
+    let c = synth_flac(&flac, dir.path(), "t03", 588 * 20 + 585, 3);
+    let files = [a.clone(), b.clone(), c.clone()];
+    let paths = [a.path.clone(), b.path.clone(), c.path.clone()];
+    let before_md5 = concatenated_md5_of(&paths);
+    let before = paths.each_ref().map(|p| std::fs::read(p).unwrap());
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    assert!(
+        plan.fully_fixed,
+        "t02 hands its +3 to t03, which lands on a sector"
+    );
+
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: false,
+    };
+    let done = fix_in_place(&files, &plan, &encode).unwrap();
+
+    assert!(matches!(&done[0], InPlace::Unchanged { path } if *path == paths[0]));
+    assert_eq!(
+        std::fs::read(&paths[0]).unwrap(),
+        before[0],
+        "t01 untouched"
+    );
+    let originals = dir.path().join("_original");
+    assert!(!originals.join("t01.flac").exists(), "t01 not moved");
+    for i in 1..3 {
+        let InPlace::Replaced { fixed, original } = &done[i] else {
+            panic!("file {i} should be replaced");
+        };
+        assert_eq!(fixed.path, paths[i]);
+        assert_eq!(*original, originals.join(paths[i].file_name().unwrap()));
+        assert_eq!(
+            std::fs::read(original).unwrap(),
+            before[i],
+            "original kept as is"
+        );
+        assert_eq!(probe(&paths[i]).stream_info.total_frames.unwrap() % 588, 0);
+    }
+    let InPlace::Replaced { fixed, .. } = &done[1] else {
+        unreachable!()
+    };
+    assert_eq!((fixed.shifted_in, fixed.shifted_out), (0, 3));
+
+    assert_eq!(concatenated_md5_of(&paths), before_md5);
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".lh-sbe-fix"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging folder left behind");
+}
+
+/// A changed file whose name is already taken in `_original/` refuses the whole fix before
+/// anything is encoded or moved.
+#[test]
+fn in_place_refuses_when_original_is_already_taken() {
+    let Some(flac) = reference_flac() else { return };
+    let dir = tempfile::tempdir().unwrap();
+
+    let a = synth_flac(&flac, dir.path(), "t01", 588 * 10 + 3, 1);
+    let b = synth_flac(&flac, dir.path(), "t02", 588 * 20 + 585, 2);
+    let files = [a.clone(), b.clone()];
+    let before_a = std::fs::read(&a.path).unwrap();
+    let originals = dir.path().join("_original");
+    std::fs::create_dir(&originals).unwrap();
+    std::fs::write(originals.join("t02.flac"), b"already here").unwrap();
+
+    let plan = plan_fix(&files, BoundaryDirection::Backward, TailPolicy::Report).unwrap();
+    let opts = EncodeOpts::default();
+    let encode = RepairEncode {
+        flac: &flac,
+        opts: &opts,
+        overwrite: false,
+    };
+    let err = fix_in_place(&files, &plan, &encode).unwrap_err();
+    assert!(matches!(err, lh_core::Error::OutputExists { .. }), "{err}");
+    assert_eq!(std::fs::read(&a.path).unwrap(), before_a);
+    assert!(!originals.join("t01.flac").exists());
+    assert_eq!(
+        std::fs::read(originals.join("t02.flac")).unwrap(),
+        b"already here"
+    );
 }

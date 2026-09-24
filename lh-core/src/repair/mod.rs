@@ -66,6 +66,27 @@ pub struct FixPlan {
     pub fully_fixed: bool,
 }
 
+impl FixPlan {
+    /// Frames file `i` gains from (positive) or lends to (negative) the file before it.
+    pub fn shifted_in(&self, i: usize) -> i64 {
+        i.checked_sub(1)
+            .map_or(0, |prev| self.boundaries[prev].shifted_frames)
+    }
+
+    /// Frames file `i` hands to (positive) or borrows from (negative) the file after it.
+    pub fn shifted_out(&self, i: usize) -> i64 {
+        self.boundaries.get(i).map_or(0, |b| b.shifted_frames)
+    }
+
+    /// Whether applying the plan changes file `i` at all: frames cross one of its edges,
+    /// or it is the tail and gets padded.
+    pub fn touches(&self, i: usize) -> bool {
+        self.shifted_in(i) != 0
+            || self.shifted_out(i) != 0
+            || (i == self.boundaries.len() && self.tail_padding_frames.is_some())
+    }
+}
+
 /// Compute a [`FixPlan`] for `files`, taken in the order given — filename order, the same
 /// order [`crate::scan::scan`] already returns.
 ///
@@ -336,16 +357,8 @@ pub fn execute_fix(
     Ok((0..files.len())
         .map(|i| Fixed {
             path: committed[i].clone(),
-            shifted_in: if i == 0 {
-                0
-            } else {
-                plan.boundaries[i - 1].shifted_frames
-            },
-            shifted_out: plan
-                .boundaries
-                .get(i)
-                .map(|b| b.shifted_frames)
-                .unwrap_or(0),
+            shifted_in: plan.shifted_in(i),
+            shifted_out: plan.shifted_out(i),
             audio_md5: audio_md5s[i],
             provenance: provenance[i].clone(),
         })
@@ -381,6 +394,154 @@ pub fn execute_single_boundary(
     let fixed_b = fixed.pop().expect("execute_fix returns one Fixed per file");
     let fixed_a = fixed.pop().expect("execute_fix returns one Fixed per file");
     Ok((fixed_a, fixed_b))
+}
+
+/// What [`fix_in_place`] did with one file of the set.
+#[derive(Debug, Clone)]
+pub enum InPlace {
+    /// Rewritten under its own name; the file it replaced now sits at `original`, inside
+    /// [`convert::ORIGINALS_DIR`].
+    Replaced {
+        fixed: Box<Fixed>,
+        original: PathBuf,
+    },
+    /// The plan moves nothing across either of its edges and pads nothing, so it was left
+    /// exactly as it was — not re-encoded, not moved.
+    Unchanged { path: PathBuf },
+}
+
+/// [`execute_fix`] for a show folder that should end up holding the fixed files under their
+/// own names, the way `convert --move-sources` leaves a folder holding its FLACs: every file
+/// the plan changes is replaced, and the file it replaced moves into
+/// [`convert::ORIGINALS_DIR`] beside it (Principle 1: moved, never deleted). A file the plan
+/// leaves alone is not touched at all.
+///
+/// The fixes are encoded, tag-restored and checked against the round-trip invariant into a
+/// hidden staging folder inside the show folder first, exactly as [`execute_fix`] does for
+/// any destination, so nothing in the folder changes until every changed file has a checked
+/// replacement. Only then are the originals moved aside and the replacements renamed in —
+/// all of them, or, if one fails, none: the ones already swapped are swapped back. Refuses
+/// up front, before any encode, if `_original/` already holds a file by any of the changed
+/// files' names.
+///
+/// Every file in `files` must sit in the same folder.
+pub fn fix_in_place(
+    files: &[AudioFile],
+    plan: &FixPlan,
+    encode: &RepairEncode,
+) -> Result<Vec<InPlace>> {
+    if files.is_empty() {
+        return Err(Error::malformed("<set>", "no files to fix"));
+    }
+    if plan.boundaries.len() != files.len() - 1 {
+        return Err(Error::malformed(
+            "<set>",
+            "this plan was not computed for this file set",
+        ));
+    }
+    let dir = files[0]
+        .path
+        .parent()
+        .ok_or_else(|| Error::malformed(&files[0].path, "has no folder"))?;
+    if let Some(f) = files.iter().find(|f| f.path.parent() != Some(dir)) {
+        return Err(Error::malformed(
+            &f.path,
+            "not in the same folder as the rest of the set",
+        ));
+    }
+
+    let originals = dir.join(convert::ORIGINALS_DIR);
+    for f in (0..files.len())
+        .filter(|&i| plan.touches(i))
+        .map(|i| &files[i])
+    {
+        let aside = originals.join(f.path.file_name().unwrap_or_default());
+        if aside.symlink_metadata().is_ok() {
+            return Err(Error::OutputExists { path: aside });
+        }
+    }
+
+    // Split the set at every boundary that moves nothing: no frames cross it, so the files
+    // on either side are independent. Each piece the plan touches is its own `execute_fix`,
+    // and a file the plan leaves alone is never decoded or re-encoded. A touched piece of
+    // one file is only ever the padded tail.
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for (i, b) in plan.boundaries.iter().enumerate() {
+        if b.shifted_frames == 0 {
+            pieces.push(start..=i);
+            start = i + 1;
+        }
+    }
+    pieces.push(start..=files.len() - 1);
+
+    let staging = tempfile::Builder::new()
+        .prefix(".lh-sbe-fix-")
+        .tempdir_in(dir)
+        .map_err(|e| Error::io(dir, e))?;
+    let mut fixed: Vec<Option<Fixed>> = vec![None; files.len()];
+    for piece in pieces.into_iter().filter(|p| plan.touches(*p.start())) {
+        let (start, end) = (*piece.start(), *piece.end());
+        let sub = FixPlan {
+            boundaries: plan.boundaries[start..end]
+                .iter()
+                .map(|b| BoundaryFix {
+                    index: b.index - start,
+                    shifted_frames: b.shifted_frames,
+                })
+                .collect(),
+            tail_padding_frames: plan.tail_padding_frames.filter(|_| end == files.len() - 1),
+            fully_fixed: plan.fully_fixed,
+        };
+        let dsts: Vec<PathBuf> = files[piece.clone()]
+            .iter()
+            .map(|f| staging.path().join(f.path.file_name().unwrap_or_default()))
+            .collect();
+        // The piece's own edges are zero-shift boundaries, so what `execute_fix` reports
+        // for each file is already what the whole plan says.
+        let run = execute_fix(&files[piece.clone()], &sub, &dsts, encode)?;
+        for (slot, f) in fixed[piece].iter_mut().zip(run) {
+            *slot = Some(f);
+        }
+    }
+
+    // Swap every checked replacement in, or none.
+    let mut done: Vec<InPlace> = Vec::with_capacity(files.len());
+    for (f, fx) in files.iter().zip(fixed) {
+        let Some(mut fx) = fx else {
+            done.push(InPlace::Unchanged {
+                path: f.path.clone(),
+            });
+            continue;
+        };
+        let swapped = convert::move_to_originals(&f.path).and_then(|original| {
+            std::fs::rename(&fx.path, &f.path)
+                .map(|()| original.clone())
+                .map_err(|e| {
+                    let _ = std::fs::rename(&original, &f.path);
+                    Error::io(&f.path, e)
+                })
+        });
+        match swapped {
+            Ok(original) => {
+                fx.path = f.path.clone();
+                done.push(InPlace::Replaced {
+                    fixed: Box::new(fx),
+                    original,
+                });
+            }
+            Err(e) => {
+                for d in done.into_iter().rev() {
+                    if let InPlace::Replaced { fixed, original } = d {
+                        let _ = std::fs::remove_file(&fixed.path);
+                        let _ = std::fs::rename(&original, &fixed.path);
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(done)
 }
 
 /// Move `shifted_frames` (see [`BoundaryFix`]'s sign convention) between two interleaved

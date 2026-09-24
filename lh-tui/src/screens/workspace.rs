@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lh_cli::{
-    ConvertArgs, Direction as SbeFixDirection, Paths, RenameArgs, SbeFixArgs, TagArgs, Target,
+    ConvertArgs, Direction as SbeFixDirection, Paths, RenameArgs, TagArgs, Target,
     TorrentCreateArgs,
 };
 use lh_core::checksum::{ChecksumFile, ChecksumKind};
@@ -97,8 +97,8 @@ const MENU: [(&str, &[Item]); 4] = [
             item(
                 Step::SbeFix,
                 'x',
-                "sbe fix preview",
-                "plan a sector-boundary repair (writes nothing)",
+                "sbe fix",
+                "repair SBEs, move replaced files to _original/",
             ),
         ],
     ),
@@ -368,22 +368,23 @@ fn open_step(
             Some(StepResult::from_clean(ok))
         }
         Step::SbeFix => {
-            // `lh sbe fix --dry-run`. Executing needs an output folder, which is the
-            // subcommand's to ask for, not this menu's.
-            let args = SbeFixArgs {
-                dir: dir.to_path_buf(),
-                direction: SbeFixDirection::Backward,
-                pad_tail: false,
-                dry_run: true,
-                output: None,
-                overwrite: false,
-            };
-            let (folder, plan) = prepare_sbe_fix(&args)?;
-            run_sbe_fix_plan_screen(terminal, dir, &folder.files, &plan, theme)?;
-            Some(if plan.fully_fixed {
-                StepResult::Clean("fix would align every file".to_string())
-            } else {
-                StepResult::Unclean("last file stays misaligned without --pad-tail".to_string())
+            // `lh sbe fix --in-place`: the plan first, with direction and tail padding to
+            // change, and nothing written until it is applied.
+            let folder = scan_folder(dir)?;
+            let screen = run_sbe_fix_in_place_screen(
+                terminal,
+                dir,
+                &folder.files,
+                SbeFixDirection::Backward,
+                false,
+                theme,
+            )?;
+            screen.map(|outcome| match outcome {
+                Ok((done, plan)) if plan.fully_fixed => {
+                    StepResult::Clean(in_place_summary(&done, &plan))
+                }
+                Ok((done, plan)) => StepResult::Unclean(in_place_summary(&done, &plan)),
+                Err(e) => StepResult::Unclean(format!("{e:#}")),
             })
         }
         Step::Check => run_check_step(terminal, dir, theme)?,

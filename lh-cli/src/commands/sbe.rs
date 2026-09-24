@@ -4,7 +4,7 @@ use lh_core::analysis::{Sbe, sbe};
 use lh_core::convert::{EncodeOpts, destination};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::repair::{
-    BoundaryDirection, FixPlan, RepairEncode, TailPolicy, execute_fix, plan_fix,
+    FixPlan, Fixed, InPlace, RepairEncode, TailPolicy, execute_fix, fix_in_place, plan_fix,
 };
 use lh_core::scan;
 use lh_core::tools::{Registry, ToolId};
@@ -48,31 +48,24 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         anyhow::bail!("no audio files found in {}", args.dir.display());
     }
 
-    let direction = match args.direction {
-        Direction::Backward => BoundaryDirection::Backward,
-        Direction::Forward => BoundaryDirection::Forward,
-        Direction::Nearest => BoundaryDirection::Nearest,
-    };
-    let tail = if args.pad_tail {
-        TailPolicy::Pad
-    } else {
-        TailPolicy::Report
-    };
-
-    let plan = plan_fix(&set.files, direction, tail)
-        .with_context(|| format!("planning a fix for {}", args.dir.display()))?;
+    let plan = plan_fix(
+        &set.files,
+        args.direction.into(),
+        tail_policy(args.pad_tail),
+    )
+    .with_context(|| format!("planning a fix for {}", args.dir.display()))?;
 
     if args.dry_run {
         print_fix_plan(&args.dir, &set.files, &plan, args.pad_tail);
         return Ok(plan.fully_fixed);
     }
 
-    let out_dir = args.output.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "sbe fix needs -o/--output to execute — it never writes over the originals \
-             (Principle 1)"
-        )
-    })?;
+    if args.output.is_none() && !args.in_place {
+        anyhow::bail!(
+            "sbe fix needs -o/--output or --in-place to execute — it never writes over the \
+             originals (Principle 1)"
+        );
+    }
     for f in &set.files {
         if f.format != AudioFormat::Flac {
             anyhow::bail!(
@@ -94,6 +87,15 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         overwrite: args.overwrite,
     };
 
+    if args.in_place {
+        let done = fix_in_place(&set.files, &plan, &encode)
+            .with_context(|| format!("repairing {}", args.dir.display()))?;
+        print_in_place(&set.files, &done);
+        print_tail_note(&set.files, &plan);
+        return Ok(plan.fully_fixed);
+    }
+
+    let out_dir = args.output.as_deref().expect("checked above");
     let dsts = set
         .files
         .iter()
@@ -106,7 +108,24 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
     let fixed = execute_fix(&set.files, &plan, &dsts, &encode)
         .with_context(|| format!("repairing {}", args.dir.display()))?;
 
-    for (f, fixed) in set.files.iter().zip(&fixed) {
+    print_fixed(&set.files, &fixed);
+    print_tail_note(&set.files, &plan);
+
+    Ok(plan.fully_fixed)
+}
+
+/// `--pad-tail`'s choice, for anything that holds it as a flag.
+pub fn tail_policy(pad_tail: bool) -> TailPolicy {
+    if pad_tail {
+        TailPolicy::Pad
+    } else {
+        TailPolicy::Report
+    }
+}
+
+/// One line per file [`execute_fix`] wrote under `-o`.
+pub fn print_fixed(files: &[AudioFile], fixed: &[Fixed]) {
+    for (f, fixed) in files.iter().zip(fixed) {
         println!(
             "FIXED     {} -> {}   audio md5 {}",
             f.file_name(),
@@ -114,17 +133,30 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
             hex::encode(fixed.audio_md5)
         );
     }
+}
+
+/// One line per file of an `--in-place` fix, in the order [`fix_in_place`] returns them.
+pub fn print_in_place(files: &[AudioFile], done: &[InPlace]) {
+    for (f, d) in files.iter().zip(done) {
+        match d {
+            InPlace::Replaced { fixed, original } => println!(
+                "FIXED     {}   original moved to {}   audio md5 {}",
+                f.file_name(),
+                original.display(),
+                hex::encode(fixed.audio_md5)
+            ),
+            InPlace::Unchanged { .. } => println!("UNCHANGED {}", f.file_name()),
+        }
+    }
+}
+
+pub fn print_tail_note(files: &[AudioFile], plan: &FixPlan) {
     if !plan.fully_fixed {
         println!(
             "{}   still misaligned — rerun with --pad-tail to close it with silence",
-            set.files
-                .last()
-                .expect("checked non-empty above")
-                .file_name()
+            files.last().expect("checked non-empty above").file_name()
         );
     }
-
-    Ok(plan.fully_fixed)
 }
 
 fn print_fix_plan(dir: &Path, files: &[AudioFile], plan: &FixPlan, pad_tail: bool) {

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::*;
-use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event as CtEvent, KeyEventKind};
 use lh_core::display;
 use lh_core::torrent::Metainfo;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -56,9 +56,7 @@ pub(crate) fn run_torrent_info_screen(
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    let quit = is_quit(&key);
                     if quit {
                         break;
                     }

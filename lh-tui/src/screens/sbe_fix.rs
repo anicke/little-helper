@@ -3,14 +3,16 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use crate::*;
-use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
-use lh_cli::{Direction as SbeFixDirection, SbeFixArgs};
+use clap::ValueEnum;
+use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
+use lh_cli::{
+    Direction as SbeFixDirection, SbeFixArgs, print_fixed, print_in_place, print_tail_note,
+    tail_policy,
+};
 use lh_core::convert::{EncodeOpts, destination};
 use lh_core::job::{Event, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
-use lh_core::repair::{
-    BoundaryDirection, FixPlan, Fixed, RepairEncode, TailPolicy, execute_fix, plan_fix,
-};
+use lh_core::repair::{FixPlan, Fixed, InPlace, RepairEncode, execute_fix, fix_in_place, plan_fix};
 use lh_core::tools::{Registry, Tool, ToolId};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -55,16 +57,8 @@ pub(crate) fn fix_rows(files: &[AudioFile], plan: &FixPlan) -> Vec<FixRow> {
     (0..files.len())
         .map(|i| FixRow {
             name: files[i].file_name(),
-            shifted_in: if i == 0 {
-                0
-            } else {
-                plan.boundaries[i - 1].shifted_frames
-            },
-            shifted_out: plan
-                .boundaries
-                .get(i)
-                .map(|b| b.shifted_frames)
-                .unwrap_or(0),
+            shifted_in: plan.shifted_in(i),
+            shifted_out: plan.shifted_out(i),
             is_tail: i == last,
         })
         .collect()
@@ -99,7 +93,7 @@ pub(crate) fn fix_row_note(row: &FixRow, plan: &FixPlan) -> String {
     match plan.tail_padding_frames {
         Some(pad) if shift == "aligned" => format!("+{pad} frames padded (silence)"),
         Some(pad) => format!("{shift}, +{pad} frames padded (silence)"),
-        None if !plan.fully_fixed => format!("{shift}, still misaligned (needs --pad-tail)"),
+        None if !plan.fully_fixed => format!("{shift}, still misaligned (needs tail padding)"),
         None => shift,
     }
 }
@@ -110,23 +104,63 @@ pub(crate) enum FixStage {
     /// `execute_fix` is running; no progress or cancellation checkpoint to show.
     Fixing,
     Done(Box<lh_core::Result<Vec<Fixed>>>),
+    /// `fix_in_place` finished: one entry per file, replaced or left alone.
+    Replaced(Box<lh_core::Result<Vec<InPlace>>>),
+}
+
+/// What the in-place screen lets the person change before applying, shown in its header.
+pub(crate) struct FixControls {
+    direction: SbeFixDirection,
+    pad_tail: bool,
+    /// Why the last key did nothing — a direction the set can't take, or why applying is
+    /// refused — shown in the gauge until the next key.
+    note: Option<String>,
+}
+
+/// How an `--in-place` fix went, in one line: for the gauge, and beside the workspace item.
+pub(crate) fn in_place_summary(done: &[InPlace], plan: &FixPlan) -> String {
+    let replaced = done
+        .iter()
+        .filter(|d| matches!(d, InPlace::Replaced { .. }))
+        .count();
+    let what = match replaced {
+        0 => "nothing needed fixing".to_string(),
+        n => format!("{n} files fixed, originals in _original/"),
+    };
+    if plan.fully_fixed {
+        what
+    } else {
+        format!("{what}, tail still misaligned")
+    }
+}
+
+/// Every file is FLAC and the reference `flac` binary is there — what executing a fix needs
+/// beyond a plan — or why not.
+fn require_flac_set(files: &[AudioFile]) -> Result<Tool, String> {
+    if let Some(f) = files.iter().find(|f| f.format != AudioFormat::Flac) {
+        return Err(format!(
+            "sbe fix can only execute against FLAC ({} is {}); other formats have no repair \
+             path yet",
+            f.file_name(),
+            f.format
+        ));
+    }
+    Registry::discover_one(ToolId::Flac)
+        .require(ToolId::Flac)
+        .cloned()
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// The folder and the repair plan `args` asks for — all a dry run shows, and what an
 /// executing run then carries out.
 pub(crate) fn prepare_sbe_fix(args: &SbeFixArgs) -> Result<(Folder, FixPlan), Refusal> {
     let folder = scan_folder(&args.dir)?;
-    let direction = match args.direction {
-        SbeFixDirection::Backward => BoundaryDirection::Backward,
-        SbeFixDirection::Forward => BoundaryDirection::Forward,
-        SbeFixDirection::Nearest => BoundaryDirection::Nearest,
-    };
-    let tail = if args.pad_tail {
-        TailPolicy::Pad
-    } else {
-        TailPolicy::Report
-    };
-    let plan = plan_fix(&folder.files, direction, tail).map_err(|e| {
+    let plan = plan_fix(
+        &folder.files,
+        args.direction.into(),
+        tail_policy(args.pad_tail),
+    )
+    .map_err(|e| {
         Refusal::new(
             2,
             format!("lh-tui: planning a fix for {}: {e:#}", args.dir.display()),
@@ -142,6 +176,40 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
     };
     for line in &set.skipped {
         eprintln!("{line}");
+    }
+
+    if args.in_place {
+        let result = {
+            let mut terminal = TerminalGuard::new();
+            run_sbe_fix_in_place_screen(
+                &mut terminal,
+                &args.dir,
+                &set.files,
+                args.direction,
+                args.pad_tail,
+                Theme::new(theme),
+            )
+        };
+        return match result {
+            Ok(None) => ExitCode::from(1),
+            Ok(Some(Ok((done, plan)))) => {
+                print_in_place(&set.files, &done);
+                print_tail_note(&set.files, &plan);
+                if plan.fully_fixed {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            }
+            Ok(Some(Err(e))) => {
+                eprintln!("lh-tui: repairing {}: {e:#}", args.dir.display());
+                ExitCode::from(2)
+            }
+            Err(e) => {
+                eprintln!("lh-tui: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
 
     if args.dry_run {
@@ -169,27 +237,16 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
         Some(o) => o.clone(),
         None => {
             eprintln!(
-                "lh-tui: sbe fix needs -o/--output to execute — it never writes over the \
-                 originals (Principle 1)"
+                "lh-tui: sbe fix needs -o/--output or --in-place to execute — it never writes \
+                 over the originals (Principle 1)"
             );
             return ExitCode::from(2);
         }
     };
-    for f in &set.files {
-        if f.format != AudioFormat::Flac {
-            eprintln!(
-                "lh-tui: sbe fix can only execute against FLAC ({} is {}); other formats have \
-                 no repair path yet",
-                f.file_name(),
-                f.format
-            );
-            return ExitCode::from(2);
-        }
-    }
-    let flac = match Registry::discover_one(ToolId::Flac).require(ToolId::Flac) {
-        Ok(t) => t.clone(),
-        Err(e) => {
-            eprintln!("lh-tui: {e:#}");
+    let flac = match require_flac_set(&set.files) {
+        Ok(t) => t,
+        Err(why) => {
+            eprintln!("lh-tui: {why}");
             return ExitCode::from(2);
         }
     };
@@ -220,23 +277,8 @@ pub(crate) fn run_sbe_fix(args: SbeFixArgs, theme: ThemeName) -> ExitCode {
 
     match result {
         Ok(Ok(fixed)) => {
-            for (f, fx) in set.files.iter().zip(&fixed) {
-                println!(
-                    "FIXED     {} -> {}   audio md5 {}",
-                    f.file_name(),
-                    fx.path.display(),
-                    hex::encode(fx.audio_md5)
-                );
-            }
-            if !plan.fully_fixed {
-                println!(
-                    "{}   still misaligned — rerun with --pad-tail to close it with silence",
-                    set.files
-                        .last()
-                        .expect("checked non-empty above")
-                        .file_name()
-                );
-            }
+            print_fixed(&set.files, &fixed);
+            print_tail_note(&set.files, &plan);
             if plan.fully_fixed {
                 ExitCode::SUCCESS
             } else {
@@ -275,6 +317,7 @@ pub(crate) fn run_sbe_fix_plan_screen(
                 &rows,
                 plan,
                 &FixStage::Planned,
+                None,
                 start,
                 0,
                 &theme,
@@ -283,9 +326,7 @@ pub(crate) fn run_sbe_fix_plan_screen(
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    let quit = is_quit(&key);
                     if quit {
                         break;
                     }
@@ -344,15 +385,14 @@ pub(crate) fn run_sbe_fix_execute_screen(
             }
         }
 
-        terminal
-            .draw(|frame| draw_sbe_fix(frame, dir, &rows, &plan, &stage, start, tick, &theme))?;
+        terminal.draw(|frame| {
+            draw_sbe_fix(frame, dir, &rows, &plan, &stage, None, start, tick, &theme)
+        })?;
 
         if event::poll(Duration::from_millis(80))? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    let quit = is_quit(&key);
                     if quit {
                         cancel.cancel();
                         break;
@@ -379,6 +419,7 @@ pub(crate) fn draw_sbe_fix(
     rows: &[FixRow],
     plan: &FixPlan,
     stage: &FixStage,
+    controls: Option<&FixControls>,
     start: Instant,
     tick: usize,
     theme: &Theme,
@@ -394,17 +435,34 @@ pub(crate) fn draw_sbe_fix(
         ])
         .split(area);
 
-    let elapsed = start.elapsed().as_secs_f32();
-    let mode = match stage {
-        FixStage::Planned => "sbe fix --dry-run",
-        _ => "sbe fix",
-    };
-    let header = Line::from(vec![
-        Span::styled(" lh-tui ", theme.accent.bold()),
-        Span::raw(format!(" {mode}  ")),
-        Span::styled(dir.display().to_string(), theme.dim),
-        Span::raw(format!("   {elapsed:.1}s")),
-    ]);
+    let folder = Span::styled(dir.display().to_string(), theme.dim);
+    let header = Line::from(match controls {
+        // The settings go before the folder, which is the part a narrow terminal can lose.
+        Some(c) => vec![
+            Span::styled(" lh-tui ", theme.accent.bold()),
+            Span::raw(format!(
+                " sbe fix --in-place   direction {}   pad tail {}   ",
+                c.direction
+                    .to_possible_value()
+                    .expect("no Direction is hidden")
+                    .get_name(),
+                if c.pad_tail { "on" } else { "off" }
+            )),
+            folder,
+        ],
+        None => {
+            let mode = match stage {
+                FixStage::Planned => "sbe fix --dry-run",
+                _ => "sbe fix",
+            };
+            vec![
+                Span::styled(" lh-tui ", theme.accent.bold()),
+                Span::raw(format!(" {mode}  ")),
+                folder,
+                Span::raw(format!("   {:.1}s", start.elapsed().as_secs_f32())),
+            ]
+        }
+    });
     frame.render_widget(
         Paragraph::new(header).block(
             Block::default()
@@ -415,8 +473,24 @@ pub(crate) fn draw_sbe_fix(
     );
 
     draw_fix_table(frame, chunks[1], rows, plan, stage, tick, theme);
-    draw_fix_gauge(frame, chunks[2], plan, stage, tick, theme);
-    draw_footer(frame, chunks[3], theme);
+    let planned = matches!(stage, FixStage::Planned);
+    let warning = controls.and_then(|c| {
+        c.note.as_deref().or((planned && !plan.fully_fixed)
+            .then_some("tail stays misaligned — p pads it with silence"))
+    });
+    match warning {
+        Some(w) => draw_gauge(frame, chunks[2], 1.0, theme.warn, w.to_string(), theme),
+        None => draw_fix_gauge(frame, chunks[2], plan, stage, tick, theme),
+    }
+
+    let footer = match (controls, stage) {
+        (Some(_), FixStage::Planned) => {
+            " d direction   p pad tail   a apply in place (originals → _original/)   q/esc back "
+        }
+        (Some(_), FixStage::Fixing) => " fixing — can't be stopped part way ",
+        _ => " q / esc quit ",
+    };
+    frame.render_widget(Paragraph::new(Line::styled(footer, theme.dim)), chunks[3]);
 }
 
 pub(crate) fn draw_fix_table(
@@ -492,6 +566,27 @@ pub(crate) fn fix_row_cells(
                 "nothing written — see the error below".to_string(),
             ),
         },
+        FixStage::Replaced(result) => match result.as_ref() {
+            Ok(done) => match &done[i] {
+                InPlace::Replaced { fixed, .. } => (
+                    "FIXED".to_string(),
+                    theme.ok,
+                    format!(
+                        "{}  original in _original/  md5 {}",
+                        fix_row_note(row, plan),
+                        hex::encode(fixed.audio_md5)
+                    ),
+                ),
+                InPlace::Unchanged { .. } => {
+                    ("UNCHANGED".to_string(), theme.dim, fix_row_note(row, plan))
+                }
+            },
+            Err(_) => (
+                "FAILED".to_string(),
+                theme.error,
+                "nothing changed — see the error below".to_string(),
+            ),
+        },
     }
 }
 
@@ -535,6 +630,156 @@ pub(crate) fn draw_fix_gauge(
             }
             Err(e) => (1.0, theme.error, format!("failed: {e:#}")),
         },
+        FixStage::Replaced(result) => match result.as_ref() {
+            Ok(done) => {
+                let style = if plan.fully_fixed {
+                    theme.ok
+                } else {
+                    theme.warn
+                };
+                (1.0, style, in_place_summary(done, plan))
+            }
+            Err(e) => (1.0, theme.error, format!("failed, nothing changed: {e:#}")),
+        },
     };
     draw_gauge(frame, area, ratio, style, label, theme);
+}
+
+/// What [`run_sbe_fix_in_place_screen`] ends with: `None` when left without applying,
+/// else every file's outcome and the plan that was applied.
+pub(crate) type InPlaceOutcome = Option<lh_core::Result<(Vec<InPlace>, FixPlan)>>;
+
+/// The fix, applied to the folder itself: the plan as a table, re-planned as `d` cycles the
+/// direction and `p` toggles tail padding, then `a` runs `fix_in_place` — each changed file
+/// replaced under its own name, the file it replaced moved into `_original/`, the way the
+/// workspace's convert → FLAC leaves a folder holding its FLACs.
+///
+/// `None` when left without applying. Once applying starts it can't be left until it is
+/// done: `fix_in_place` has no cancellation checkpoint, and leaving would only hide a job
+/// still about to move files around in the folder.
+pub(crate) fn run_sbe_fix_in_place_screen(
+    terminal: &mut DefaultTerminal,
+    dir: &Path,
+    files: &[AudioFile],
+    direction: SbeFixDirection,
+    pad_tail: bool,
+    theme: Theme,
+) -> io::Result<InPlaceOutcome> {
+    let mut controls = FixControls {
+        direction,
+        pad_tail,
+        note: None,
+    };
+    let mut plan = match plan_fix(files, direction.into(), tail_policy(pad_tail)) {
+        Ok(p) => p,
+        Err(e) => return Ok(Some(Err(e))),
+    };
+    let mut rows = fix_rows(files, &plan);
+    let mut stage = FixStage::Planned;
+    let mut queue: Option<Queue<lh_core::Result<Vec<InPlace>>>> = None;
+    let start = Instant::now();
+    let mut tick = 0usize;
+
+    loop {
+        if let Some(q) = &queue {
+            while let Ok(event) = q.events().try_recv() {
+                match event {
+                    Event::Started { .. } | Event::Progress { .. } => {}
+                    Event::Finished { output, .. } => {
+                        stage = FixStage::Replaced(Box::new(output));
+                    }
+                    Event::Cancelled { .. } => {
+                        stage = FixStage::Replaced(Box::new(Err(lh_core::Error::Cancelled)));
+                    }
+                }
+            }
+        }
+
+        terminal.draw(|frame| {
+            draw_sbe_fix(
+                frame,
+                dir,
+                &rows,
+                &plan,
+                &stage,
+                Some(&controls),
+                start,
+                tick,
+                &theme,
+            )
+        })?;
+        tick = tick.wrapping_add(1);
+
+        if !event::poll(Duration::from_millis(80))? {
+            continue;
+        }
+        let CtEvent::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        let quit = is_quit(&key);
+        match stage {
+            FixStage::Replaced(result) if quit => {
+                return Ok(Some(result.map(|done| (done, plan))));
+            }
+            FixStage::Planned if quit => return Ok(None),
+            FixStage::Planned if key.code == KeyCode::Char('a') => {
+                controls.note = None;
+                match start_in_place(files, &plan) {
+                    Ok(q) => {
+                        queue = Some(q);
+                        stage = FixStage::Fixing;
+                    }
+                    Err(why) => controls.note = Some(why),
+                }
+            }
+            FixStage::Planned => {
+                controls.note = None;
+                let (mut direction, mut pad_tail) = (controls.direction, controls.pad_tail);
+                match key.code {
+                    KeyCode::Char('d') => {
+                        let all = SbeFixDirection::value_variants();
+                        let at = all.iter().position(|d| *d == direction).unwrap_or(0);
+                        direction = all[(at + 1) % all.len()];
+                    }
+                    KeyCode::Char('p') => pad_tail = !pad_tail,
+                    _ => continue,
+                }
+                match plan_fix(files, direction.into(), tail_policy(pad_tail)) {
+                    Ok(p) => {
+                        plan = p;
+                        rows = fix_rows(files, &plan);
+                        controls.direction = direction;
+                        controls.pad_tail = pad_tail;
+                    }
+                    Err(e) => controls.note = Some(format!("{e:#}")),
+                }
+            }
+            // Applying can't be stopped part way (see above).
+            _ => {}
+        }
+    }
+}
+
+/// Submits `fix_in_place` as the one job on a queue of one, or says why it can't run.
+fn start_in_place(
+    files: &[AudioFile],
+    plan: &FixPlan,
+) -> Result<Queue<lh_core::Result<Vec<InPlace>>>, String> {
+    let flac = require_flac_set(files)?;
+    let queue = Queue::with_workers(1);
+    let job_files = files.to_vec();
+    let job_plan = plan.clone();
+    queue.submit("sbe fix", move |_progress| {
+        let opts = EncodeOpts::default();
+        let encode = RepairEncode {
+            flac: &flac,
+            opts: &opts,
+            overwrite: false,
+        };
+        fix_in_place(&job_files, &job_plan, &encode)
+    });
+    Ok(queue)
 }

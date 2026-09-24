@@ -7,6 +7,13 @@ use lh_core::model::AudioFile;
 use lh_core::scan;
 use std::path::Path;
 
+/// `q`, `Esc` or `Ctrl-C`: the keys every screen leaves on.
+pub(crate) fn is_quit(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 pub(crate) const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
 
 /// The elapsed time a header shows: keeps advancing every frame while `done` is false, then

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 mod commands;
 use commands::*;
+pub use commands::{print_fixed, print_in_place, print_tail_note, tail_policy};
 
 /// Run one job per file on a bounded worker pool if there is more than one file — a
 /// single file just runs directly, since spinning up a pool and a channel for one job is
@@ -224,6 +225,16 @@ pub enum Direction {
     Nearest,
 }
 
+impl From<Direction> for lh_core::repair::BoundaryDirection {
+    fn from(d: Direction) -> Self {
+        match d {
+            Direction::Backward => Self::Backward,
+            Direction::Forward => Self::Forward,
+            Direction::Nearest => Self::Nearest,
+        }
+    }
+}
+
 #[derive(clap::Args)]
 pub struct SbeFixArgs {
     /// The directory whose files are one ordered set, in filename order.
@@ -237,10 +248,14 @@ pub struct SbeFixArgs {
     /// Print the plan and write nothing.
     #[arg(long)]
     pub dry_run: bool,
-    /// Write repaired files here. Required to execute (never the source directory's own
-    /// files — Principle 1, repair never overwrites originals).
+    /// Write repaired files here. To execute, give this or `--in-place` (never the source
+    /// directory's own files — Principle 1, repair never overwrites originals).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+    /// Replace each file the fix changes under its own name, moving the file it replaces
+    /// into `_original/` inside the folder. Files the fix leaves alone are not touched.
+    #[arg(long, conflicts_with_all = ["output", "overwrite", "dry_run"])]
+    pub in_place: bool,
     /// Overwrite outputs that already exist at the destination. Sources are never touched
     /// either way.
     #[arg(long)]
