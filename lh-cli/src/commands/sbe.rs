@@ -4,7 +4,7 @@ use lh_core::analysis::{Sbe, sbe};
 use lh_core::convert::{EncodeOpts, destination};
 use lh_core::model::{AudioFile, AudioFormat};
 use lh_core::repair::{
-    FixPlan, Fixed, InPlace, RepairEncode, TailPolicy, execute_fix, fix_in_place, plan_fix,
+    FixPlan, FixStep, Fixed, InPlace, RepairEncode, TailPolicy, execute_fix, fix_in_place, plan_fix,
 };
 use lh_core::scan;
 use lh_core::tools::{Registry, ToolId};
@@ -87,9 +87,15 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         overwrite: args.overwrite,
     };
 
+    // Minutes of work on a real show; one line on stderr, rewritten as each file moves on.
+    let on_step = |i: usize, step: FixStep| {
+        eprint!("\r  {:<8}  {:<60}", step.label(), set.files[i].file_name());
+    };
+
     if args.in_place {
-        let done = fix_in_place(&set.files, &plan, &encode)
-            .with_context(|| format!("repairing {}", args.dir.display()))?;
+        let done = fix_in_place(&set.files, &plan, &encode, &on_step);
+        eprintln!();
+        let done = done.with_context(|| format!("repairing {}", args.dir.display()))?;
         print_in_place(&set.files, &done);
         print_tail_note(&set.files, &plan);
         return Ok(plan.fully_fixed);
@@ -105,8 +111,9 @@ pub(crate) fn cmd_sbe_fix(args: &SbeFixArgs) -> Result<bool> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let fixed = execute_fix(&set.files, &plan, &dsts, &encode)
-        .with_context(|| format!("repairing {}", args.dir.display()))?;
+    let fixed = execute_fix(&set.files, &plan, &dsts, &encode, &on_step);
+    eprintln!();
+    let fixed = fixed.with_context(|| format!("repairing {}", args.dir.display()))?;
 
     print_fixed(&set.files, &fixed);
     print_tail_note(&set.files, &plan);

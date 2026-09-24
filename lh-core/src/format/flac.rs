@@ -107,9 +107,15 @@ pub fn decode_to_samples(path: &Path) -> Result<(StreamInfo, Vec<i32>)> {
 pub fn concatenated_pcm_md5(buffers: &[&[i32]], bits_per_sample: u8) -> [u8; 16] {
     let bytes_per_sample = (bits_per_sample as usize).div_ceil(8);
     let mut hasher = Md5::new();
+    // Packed a chunk at a time: one `update` per 2-byte sample costs more than the hashing.
+    let mut bytes = Vec::with_capacity(64 * 1024 * bytes_per_sample);
     for buf in buffers {
-        for &sample in *buf {
-            hasher.update(&sample.to_le_bytes()[..bytes_per_sample]);
+        for chunk in buf.chunks(64 * 1024) {
+            bytes.clear();
+            for &sample in chunk {
+                bytes.extend_from_slice(&sample.to_le_bytes()[..bytes_per_sample]);
+            }
+            hasher.update(&bytes);
         }
     }
     hasher.finalize().into()

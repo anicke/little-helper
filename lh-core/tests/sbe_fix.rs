@@ -9,8 +9,8 @@ use lh_core::convert::{EncodeOpts, to_flac};
 use lh_core::format;
 use lh_core::model::AudioFile;
 use lh_core::repair::{
-    BoundaryDirection, InPlace, RepairEncode, TailPolicy, execute_fix, execute_single_boundary,
-    fix_in_place, plan_fix,
+    BoundaryDirection, FixStep, InPlace, RepairEncode, TailPolicy, execute_fix,
+    execute_single_boundary, fix_in_place, plan_fix,
 };
 use lh_core::tools::{Registry, Tool, ToolId};
 use std::path::{Path, PathBuf};
@@ -338,7 +338,7 @@ fn chained_boundaries_execute_left_to_right() {
         overwrite: false,
     };
 
-    let fixed = execute_fix(&files, &plan, &dsts, &encode).unwrap();
+    let fixed = execute_fix(&files, &plan, &dsts, &encode, &|_, _| {}).unwrap();
     assert_eq!(fixed.len(), 3);
     assert_eq!(fixed[0].shifted_in, 0);
     assert_eq!(fixed[0].shifted_out, 3);
@@ -389,7 +389,7 @@ fn tail_padding_executes_and_is_excluded_from_the_invariant() {
         opts: &opts,
         overwrite: false,
     };
-    let fixed = execute_fix(&files, &plan, &dsts, &encode).unwrap();
+    let fixed = execute_fix(&files, &plan, &dsts, &encode, &|_, _| {}).unwrap();
     assert_eq!(fixed.len(), 1);
 
     let probed = probe(&dsts[0]);
@@ -443,7 +443,7 @@ fn a_failed_third_output_in_a_chain_leaves_nothing_committed() {
         opts: &opts,
         overwrite: false,
     };
-    let err = execute_fix(&files, &plan, &dsts, &encode).unwrap_err();
+    let err = execute_fix(&files, &plan, &dsts, &encode, &|_, _| {}).unwrap_err();
     eprintln!("expected failure: {err}");
 
     assert!(!out_a.exists(), "the first output must not survive alone");
@@ -478,7 +478,27 @@ fn in_place_replaces_changed_files_and_sets_their_originals_aside() {
         opts: &opts,
         overwrite: false,
     };
-    let done = fix_in_place(&files, &plan, &encode).unwrap();
+    let steps = std::sync::Mutex::new(Vec::new());
+    let done = fix_in_place(&files, &plan, &encode, &|i, step| {
+        steps.lock().unwrap().push((i, step))
+    })
+    .unwrap();
+    let steps = steps.into_inner().unwrap();
+
+    // Indices are the whole set's, and a file the plan leaves alone never reaches a step.
+    for i in 1..3 {
+        let mine: Vec<FixStep> = steps.iter().filter(|s| s.0 == i).map(|s| s.1).collect();
+        assert_eq!(
+            mine,
+            [
+                FixStep::Decoding,
+                FixStep::Encoding,
+                FixStep::Checking,
+                FixStep::Checked
+            ]
+        );
+    }
+    assert!(steps.iter().all(|s| s.0 != 0), "t01 is untouched");
 
     assert!(matches!(&done[0], InPlace::Unchanged { path } if *path == paths[0]));
     assert_eq!(
@@ -537,7 +557,7 @@ fn in_place_refuses_when_original_is_already_taken() {
         opts: &opts,
         overwrite: false,
     };
-    let err = fix_in_place(&files, &plan, &encode).unwrap_err();
+    let err = fix_in_place(&files, &plan, &encode, &|_, _| {}).unwrap_err();
     assert!(matches!(err, lh_core::Error::OutputExists { .. }), "{err}");
     assert_eq!(std::fs::read(&a.path).unwrap(), before_a);
     assert!(!originals.join("t01.flac").exists());

@@ -16,6 +16,7 @@ use crate::model::{AudioFile, FRAMES_PER_SECTOR, StreamInfo};
 use crate::output;
 use crate::tag;
 use crate::tools::{Provenance, Tool};
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -200,6 +201,34 @@ pub struct RepairEncode<'a> {
     pub overwrite: bool,
 }
 
+/// Where one file of a fix has got to, reported to [`execute_fix`]'s and [`fix_in_place`]'s
+/// `on_step` as each starts — the whole run takes minutes on a real show, and a caller
+/// showing one row per file wants to move each row along as it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixStep {
+    /// Its audio is being read into memory.
+    Decoding,
+    /// Its shifted audio is being encoded by the reference `flac` binary.
+    Encoding,
+    /// Its encoded output is being decoded again for the round-trip check.
+    Checking,
+    /// The round-trip check passed for it and every file it trades frames with; it waits
+    /// only on the final commit.
+    Checked,
+}
+
+impl FixStep {
+    /// Lowercase, for a status line or a table cell.
+    pub fn label(self) -> &'static str {
+        match self {
+            FixStep::Decoding => "decoding",
+            FixStep::Encoding => "encoding",
+            FixStep::Checking => "checking",
+            FixStep::Checked => "checked",
+        }
+    }
+}
+
 /// Execute a whole [`FixPlan`] over an ordered set of files (R3): apply every boundary
 /// shift left to right, chaining as each one changes what the next file starts with, add
 /// the tail's silence when [`FixPlan::tail_padding_frames`] asks for it, re-encode every
@@ -212,12 +241,14 @@ pub struct RepairEncode<'a> {
 /// [`plan_fix`] — this does not re-derive the plan, it only executes the one given. `dsts`
 /// are never any `files[i].path` itself: repair produces new files the same way `convert`
 /// does (Principle 1). A set of exactly one file is legal — no boundaries, tail padding
-/// only.
+/// only. `on_step` hears each file's index into `files` as it reaches each [`FixStep`] —
+/// from several threads at once, since files are decoded, encoded and checked in parallel.
 pub fn execute_fix(
     files: &[AudioFile],
     plan: &FixPlan,
     dsts: &[PathBuf],
     encode: &RepairEncode,
+    on_step: &(dyn Fn(usize, FixStep) + Sync),
 ) -> Result<Vec<Fixed>> {
     if files.is_empty() {
         return Err(Error::malformed("<set>", "no files to fix"));
@@ -242,6 +273,22 @@ pub fn execute_fix(
             ));
         }
     }
+    // Its own pool rather than rayon's global one: a caller running this as a job on a
+    // `Queue` of one worker would otherwise have every `par_iter` below run on that one
+    // worker's pool, one file at a time.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .build()
+        .map_err(|e| Error::malformed("<set>", format!("starting worker threads: {e}")))?;
+    pool.install(|| execute_fix_on_pool(files, plan, dsts, encode, on_step))
+}
+
+fn execute_fix_on_pool(
+    files: &[AudioFile],
+    plan: &FixPlan,
+    dsts: &[PathBuf],
+    encode: &RepairEncode,
+    on_step: &(dyn Fn(usize, FixStep) + Sync),
+) -> Result<Vec<Fixed>> {
     let channels = files[0].stream_info.channels as usize;
     let bits_per_sample = files[0].stream_info.bits_per_sample;
 
@@ -253,8 +300,12 @@ pub fn execute_fix(
 
     // §4 step 5a.
     let mut buffers = files
-        .iter()
-        .map(|f| Ok(format::flac::decode_to_samples(&f.path)?.1))
+        .par_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            on_step(i, FixStep::Decoding);
+            Ok(format::flac::decode_to_samples(&f.path)?.1)
+        })
         .collect::<Result<Vec<Vec<i32>>>>()?;
 
     // The whole-set invariant's "before": every file's audio, concatenated, as it is now —
@@ -301,31 +352,46 @@ pub fn execute_fix(
 
     // §4 step 5d: re-encode every buffer through the reference binary. Staged, not yet
     // committed.
-    let mut temps = Vec::with_capacity(files.len());
-    let mut provenance = Vec::with_capacity(files.len());
-    for i in 0..files.len() {
-        let scratch = write_scratch_wav(&dsts[i], &buffers[i], &files[i].stream_info)?;
-        let (temp, prov, _, _) = convert::encode_flac_staged(
-            scratch.path(),
-            &dsts[i],
-            encode.flac,
-            encode.opts,
-            encode.overwrite,
-            &mut || true,
-        )?;
-        // §4 step 5e: restore tags on the staged file, still before commit.
-        tag::restore_comment_block(temp.path(), &tags[i])?;
-        temps.push(temp);
-        provenance.push(prov);
-    }
+    // Each file is its own `flac` process, so they run side by side.
+    let staged = (0..files.len())
+        .into_par_iter()
+        .map(|i| {
+            on_step(i, FixStep::Encoding);
+            let scratch = write_scratch_wav(&dsts[i], &buffers[i], &files[i].stream_info)?;
+            let (temp, prov, _, _) = convert::encode_flac_staged(
+                scratch.path(),
+                &dsts[i],
+                encode.flac,
+                encode.opts,
+                encode.overwrite,
+                &mut || true,
+            )?;
+            // §4 step 5e: restore tags on the staged file, still before commit.
+            tag::restore_comment_block(temp.path(), &tags[i])?;
+            Ok((temp, prov))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // The shifted audio is all on disk now; don't hold it through the check as well.
+    drop(buffers);
+    let (temps, provenance): (Vec<_>, Vec<_>) = staged.into_iter().unzip();
 
     // §4 step 6 / §5: decode what was actually staged and compare against the "before" —
     // this is the whole correctness argument, and it catches an encode-side mistake that
     // aligning-per-`sbe()` alone would not: wrong output that happens to land on a sector.
     let mut checked = temps
-        .iter()
-        .map(|t| Ok(format::flac::decode_to_samples(t.path())?.1))
+        .par_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            on_step(i, FixStep::Checking);
+            Ok(format::flac::decode_to_samples(t.path())?.1)
+        })
         .collect::<Result<Vec<Vec<i32>>>>()?;
+    // Each output's own audio MD5, from the audio just decoded out of it — padding and all,
+    // so before the tail's silence is cut off for the invariant below.
+    let audio_md5s: Vec<[u8; 16]> = checked
+        .par_iter()
+        .map(|c| format::flac::concatenated_pcm_md5(&[c], bits_per_sample))
+        .collect();
     if let Some(pad) = plan.tail_padding_frames {
         let last = checked.last_mut().expect("checked non-empty above");
         let cut = pad as usize * channels;
@@ -346,10 +412,9 @@ pub fn execute_fix(
             ),
         ));
     }
-    let audio_md5s = temps
-        .iter()
-        .map(|t| format::flac::audio_md5(t.path()))
-        .collect::<Result<Vec<_>>>()?;
+    for i in 0..files.len() {
+        on_step(i, FixStep::Checked);
+    }
 
     // §4 step 7: all or nothing.
     let committed = output::commit_all(temps)?;
@@ -390,7 +455,7 @@ pub fn execute_single_boundary(
     };
     let files = [a.clone(), b.clone()];
     let dsts = [dst_a.to_path_buf(), dst_b.to_path_buf()];
-    let mut fixed = execute_fix(&files, &plan, &dsts, encode)?;
+    let mut fixed = execute_fix(&files, &plan, &dsts, encode, &|_, _| {})?;
     let fixed_b = fixed.pop().expect("execute_fix returns one Fixed per file");
     let fixed_a = fixed.pop().expect("execute_fix returns one Fixed per file");
     Ok((fixed_a, fixed_b))
@@ -424,11 +489,13 @@ pub enum InPlace {
 /// up front, before any encode, if `_original/` already holds a file by any of the changed
 /// files' names.
 ///
-/// Every file in `files` must sit in the same folder.
+/// Every file in `files` must sit in the same folder. `on_step` is [`execute_fix`]'s, with
+/// indices into the whole of `files`; a file the plan leaves alone never reaches a step.
 pub fn fix_in_place(
     files: &[AudioFile],
     plan: &FixPlan,
     encode: &RepairEncode,
+    on_step: &(dyn Fn(usize, FixStep) + Sync),
 ) -> Result<Vec<InPlace>> {
     if files.is_empty() {
         return Err(Error::malformed("<set>", "no files to fix"));
@@ -499,7 +566,9 @@ pub fn fix_in_place(
             .collect();
         // The piece's own edges are zero-shift boundaries, so what `execute_fix` reports
         // for each file is already what the whole plan says.
-        let run = execute_fix(&files[piece.clone()], &sub, &dsts, encode)?;
+        let run = execute_fix(&files[piece.clone()], &sub, &dsts, encode, &|k, step| {
+            on_step(start + k, step)
+        })?;
         for (slot, f) in fixed[piece].iter_mut().zip(run) {
             *slot = Some(f);
         }
@@ -767,7 +836,7 @@ mod tests {
             overwrite: false,
         };
         let dsts = [PathBuf::from("out/t01.flac")]; // one destination, two files
-        let err = execute_fix(&files, &plan, &dsts, &encode).unwrap_err();
+        let err = execute_fix(&files, &plan, &dsts, &encode, &|_, _| {}).unwrap_err();
         assert!(err.to_string().contains("same length"), "{err}");
     }
 
@@ -797,7 +866,7 @@ mod tests {
             overwrite: false,
         };
         let dsts = [PathBuf::from("out/t01.flac"), PathBuf::from("out/t02.flac")];
-        let err = execute_fix(&files, &plan, &dsts, &encode).unwrap_err();
+        let err = execute_fix(&files, &plan, &dsts, &encode, &|_, _| {}).unwrap_err();
         assert!(
             err.to_string().contains("not computed for this file set"),
             "{err}"
@@ -818,6 +887,6 @@ mod tests {
             opts: &opts,
             overwrite: false,
         };
-        assert!(execute_fix(&[], &plan, &[], &encode).is_err());
+        assert!(execute_fix(&[], &plan, &[], &encode, &|_, _| {}).is_err());
     }
 }

@@ -333,9 +333,12 @@ else needs, the fix screen routes around it: `plan_fix` runs before the terminal
 (pure arithmetic, no decode) and renders as a static per-file table for `--dry-run`;
 executing submits `execute_fix` itself as the single job on a `Queue::with_workers(1)`, the
 same "one job on a queue of one" shape `torrent create`/`check` already use for a single
-sequential operation over a whole set. Every row updates together when the one `Finished`
-event lands, because the underlying operation is atomic — there is no meaningful per-file
-"running" state to show in between.
+sequential operation over a whole set. The result still lands for every file at once, in
+the one `Finished` event, because the commit is atomic; but while it runs each row follows
+its own file through `repair::FixStep` (decoding → encoding → checking → checked), reported
+by `execute_fix`/`fix_in_place`'s `on_step` over a channel the screen owns, since the
+queue's `Progress` only carries one done/total pair for the whole job. `lh sbe fix` prints
+the same steps as one rewritten status line on stderr.
 
 **TUI workspace: in place.** The workspace's `sbe fix` item (and `lh-tui sbe fix
 --in-place`) is `run_sbe_fix_in_place_screen`: the plan with direction/tail padding as keys,
@@ -356,6 +359,8 @@ this belongs once it exists.
 | ~~**R1**~~ | ~~Plan, no execution~~ | **Done** — `analysis::sbe_fix::plan_fix` (§3, §4 steps 1–4): left-to-right arithmetic over `StreamInfo.total_frames`, no decode, refuses a non-CD-audio member. `lh sbe fix <DIR> --dry-run [--direction] [--pad-tail]`; bare `lh sbe <paths>` is unchanged. 10 tests (aligned/misaligned/chained boundaries, all three directions, tail report vs. pad). |
 | ~~**R2**~~ | ~~Two-file execution~~ | **Done** — `analysis::sbe_fix::execute_single_boundary` (§4 steps 5–7), the one-boundary entry point now built on top of `execute_fix` (R3): decode both neighbours in full (`format::flac::decode_to_samples`), shift frames across the split, re-encode each through the reference `flac` binary (`convert::encode_flac_staged`, the staged-not-committed half of `to_flac`), restore original Vorbis comments via `metaflac`, verify the round-trip PCM MD5 invariant (§1, §5, `format::flac::concatenated_pcm_md5`) unconditionally, then commit both outputs atomically (`output::commit_all`, all-or-nothing with rollback). `-o` is mandatory to execute (open question 4 resolved this way: never an implicit default of overwriting the originals). |
 | ~~**R3**~~ | ~~Chained sets~~ | **Done** — `analysis::sbe_fix::execute_fix` generalizes R2 to any number of files: every boundary in `FixPlan.boundaries` applied left to right against a `Vec<Vec<i32>>` of decoded buffers (chaining falls out for free, since each boundary reads whatever the previous one already wrote into the shared buffer), `TailPolicy::Pad`'s silence appended to the last buffer and excluded from the invariant's "after" side, then every file encoded, tag-restored, checked and committed exactly as R2 did per pair. `lh sbe fix <DIR> -o <OUT> [--direction] [--pad-tail] [--overwrite]` (no `--dry-run`) now executes a directory of any size, per §6. 3 more tests in `lh-core/tests/sbe_fix.rs` (a real three-file chain verified end to end, tail padding executed and excluded from the invariant, atomic rollback across three staged outputs), 3 unit tests for `execute_fix`'s own shape checks, and 2 more CLI tests (`--pad-tail` fully aligning a set, a chained three-file directory). |
+| ~~**R4a**~~ | ~~In place, progress, speed~~ | **Done** — `fix_in_place` / `--in-place` and the workspace's `sbe fix` screen (§6, §7); per-file `FixStep` progress; `execute_fix` decodes, encodes and checks files in parallel on its own rayon pool (its own, so a `Queue::with_workers(1)` job still gets every core), takes each output's audio MD5 from the audio its check already decoded instead of reading the file a third time, and hashes PCM a chunk at a time. A real 16-track show (~430 MB of FLAC) went from 52 s to 18 s in a release build, peak memory 1.7 → 1.3 GB. |
+| **R5** | WAV | **Planned** — see §10. |
 | ~~**R4**~~ | ~~TUI~~ | **Done** — `run_sbe_fix` (`lh-tui/src/main.rs`): §9 open question 3 resolved by routing around `Queue<T>` rather than growing it a chained-submission mode, since a fix's unit of work is the whole ordered set, not an independent file. `plan_fix` runs before the terminal opens (pure arithmetic, no decode) and is shown as a static per-file table for `--dry-run`; executing submits `execute_fix` as the one job on a `Queue::with_workers(1)`, the same "one job on a queue of one" shape `torrent create`/`check` use for a single sequential operation — quitting breaks the screen immediately rather than waiting for `Done`, since `execute_fix` has no cancellation checkpoint to honor, matching `run_torrent_check_screen`'s own acceptance of that gap. GUI screen remains open. |
 
 ---
@@ -378,3 +383,51 @@ this belongs once it exists.
    actively refuses `src == dst`. A "fix" conceptually replaces the same track in place, which
    is exactly the shape Principle 1 is most wary of — this may want a mandatory `-o` (never an
    implicit default of overwriting the originals) even where `convert` allows one.
+
+---
+
+## 10. WAV (R5, planned)
+
+Every executing path today refuses anything but FLAC (`lh sbe fix`'s "can only execute
+against FLAC", the TUI's `require_flac_set`), although `plan_fix` already plans a set of WAVs
+— it only needs `StreamInfo.total_frames`, which `format::probe` reads from a WAV header as
+well. The FLAC path stays as it is (R4a made it fast enough); R5 adds WAV beside it.
+
+**Why it is worth having even with FLAC working.** On WAV, the fix is the operation it
+really is — moving raw PCM bytes across a split — with none of the FLAC path's machinery:
+
+* **No decode, no encode.** A frame is `bytes_per_frame` bytes of the `data` chunk (4 for
+  CD audio), so a boundary shift is slicing bytes off one file's `data` and splicing them onto
+  the next. No `claxon`, no reference `flac` binary, no scratch WAVs, no second decode.
+* **No tags to carry.** The etree workflow tags after converting to FLAC, so there is no
+  `metaflac` round trip. Any `LIST`/`INFO` chunk a WAV carries should still be kept as is,
+  not dropped — which is new: `format::wav`'s reader skips those chunks today rather than
+  handing them back.
+* **The invariant is a byte comparison.** MD5 of every `data` chunk concatenated, before and
+  after (minus a padded tail's added silence), exactly §1's invariant with the decode taken
+  out.
+* **I/O-bound.** A show is read once and written once: seconds, not the 18 s the FLAC path
+  now takes.
+
+It also puts the fix where it belongs in the workspace's own order: rename → **sbe fix** →
+convert → FLAC → tag. Fixing WAVs before they are ever encoded is how `shntool fix` is used,
+and it means the FLACs that get traded are made from already-aligned audio once, rather than
+encoded, fixed and encoded again.
+
+**Shape.** A `format::wav` reader that hands back a file's `data` bytes, its layout
+(`WavLayout`, already there) and its other chunks verbatim, and a writer that writes a WAV
+with those same chunks around new `data` — through `TempOutput`, so staging, `commit_all` and
+`fix_in_place`'s set-aside-and-swap work unchanged. `execute_fix` and `fix_in_place` pick
+the path by format; a set mixing WAV and FLAC is refused (convert first). Everything
+downstream of the plan — `FixPlan`, `FixStep`, `InPlace`, the TUI's rows and the CLI's
+output — is format-independent already and stays as it is. The `Checking` step still runs,
+just as a re-read of the staged `data` rather than a decode.
+
+**Tests.** The §5 list again for WAV: round-trip identity on the concatenated `data`, every
+non-tail file `Sbe::Aligned` afterwards, a chained three-file set, both tail policies, the
+atomic-failure case, plus: a WAV with a `LIST` chunk keeps it byte-for-byte; a mixed WAV/FLAC
+set is refused; the workspace fixes a WAV show before convert → FLAC.
+
+**Still open with R5, not part of it:** a cancellation checkpoint in `execute_fix` (each
+file's encode already runs through `run_cancellable`; nothing is committed until the end, so
+stopping between files is safe), which would let both screens stop a fix part way.

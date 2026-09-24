@@ -10,9 +10,12 @@ use lh_cli::{
     tail_policy,
 };
 use lh_core::convert::{EncodeOpts, destination};
+use lh_core::display::duration_precise;
 use lh_core::job::{Event, Queue};
 use lh_core::model::{AudioFile, AudioFormat};
-use lh_core::repair::{FixPlan, Fixed, InPlace, RepairEncode, execute_fix, fix_in_place, plan_fix};
+use lh_core::repair::{
+    FixPlan, FixStep, Fixed, InPlace, RepairEncode, execute_fix, fix_in_place, plan_fix,
+};
 use lh_core::tools::{Registry, Tool, ToolId};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -20,6 +23,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 
 // --- SBE fix (TUI R4) -----------------------------------------------------------------
 //
@@ -35,21 +39,29 @@ use std::path::{Path, PathBuf};
 //
 // The plan itself is pure arithmetic over headers `scan` already read — no decode — so it's
 // computed up front and shown as a table before any job runs (`--dry-run` never opens a
-// job at all). `execute_fix` has no per-boundary progress to report and no cancellation
-// checkpoint (out of scope for docs/architecture-cleanup.md A3; see docs/sbe-repair.md), so
-// once it starts, the row for every file just spins until the one `Finished` event lands
-// with every file's result at once, and `q`/`Esc`/`Ctrl-C` cannot stop it early the way
-// `run_torrent_check_screen` now can for `check`.
+// job at all). While it runs, each row follows its own file through `FixStep`s, reported
+// by the job's `on_step` over a channel of the screen's own (`Fixing`); the result still
+// lands for every file at once, in the one `Finished` event. There is no cancellation
+// checkpoint (see docs/sbe-repair.md §8, R5 notes), so `q`/`Esc`/`Ctrl-C` cannot stop it
+// early the way `run_torrent_check_screen` now can for `check`.
 
-/// One row per file in the set (not per boundary): `shifted_in`/`shifted_out` are computed
-/// straight from the plan using the same formula `execute_fix` uses to fill in `Fixed`'s own
-/// fields, so a row's numbers never change between the pre-execution plan and the
-/// post-execution result.
+/// One row per file in the set (not per boundary), as numbers rather than a sentence: its
+/// length, what it gains (+) or loses (−) at each edge and in tail padding, all in samples,
+/// and its length after. Computed straight from the plan with the same `FixPlan` methods
+/// `execute_fix` fills `Fixed` from, so a row never changes between plan and result.
 pub(crate) struct FixRow {
     name: String,
-    shifted_in: i64,
-    shifted_out: i64,
-    is_tail: bool,
+    frames: u64,
+    sample_rate: u32,
+    prev: i64,
+    next: i64,
+    pad: u64,
+}
+
+impl FixRow {
+    fn frames_after(&self) -> u64 {
+        (self.frames as i64 + self.prev + self.next) as u64 + self.pad
+    }
 }
 
 pub(crate) fn fix_rows(files: &[AudioFile], plan: &FixPlan) -> Vec<FixRow> {
@@ -57,52 +69,79 @@ pub(crate) fn fix_rows(files: &[AudioFile], plan: &FixPlan) -> Vec<FixRow> {
     (0..files.len())
         .map(|i| FixRow {
             name: files[i].file_name(),
-            shifted_in: plan.shifted_in(i),
-            shifted_out: plan.shifted_out(i),
-            is_tail: i == last,
+            // `plan_fix` refuses a file whose header doesn't state its length.
+            frames: files[i].stream_info.total_frames.unwrap_or(0),
+            sample_rate: files[i].stream_info.sample_rate,
+            prev: plan.shifted_in(i),
+            next: -plan.shifted_out(i),
+            pad: plan.tail_padding_frames.filter(|_| i == last).unwrap_or(0),
         })
         .collect()
 }
 
-/// What a boundary moved, in the direction it moved it — the file-centric view of
-/// `BoundaryFix`'s sign convention (`lh-core/src/analysis/sbe_fix.rs`).
-pub(crate) fn fix_shift_note(shifted_in: i64, shifted_out: i64) -> String {
-    let mut parts = Vec::new();
-    match shifted_in.cmp(&0) {
-        std::cmp::Ordering::Greater => parts.push(format!("+{shifted_in} from prev")),
-        std::cmp::Ordering::Less => parts.push(format!("{shifted_in} lent to prev")),
-        std::cmp::Ordering::Equal => {}
-    }
-    match shifted_out.cmp(&0) {
-        std::cmp::Ordering::Greater => parts.push(format!("-{shifted_out} to next")),
-        std::cmp::Ordering::Less => parts.push(format!("+{} from next", -shifted_out)),
-        std::cmp::Ordering::Equal => {}
-    }
-    if parts.is_empty() {
-        "aligned".to_string()
-    } else {
-        parts.join("  ")
+/// A signed sample count, or a dot for nothing — so the moves stand out in the column.
+fn samples(n: i64) -> String {
+    match n {
+        0 => "·".to_string(),
+        n if n > 0 => format!("+{n}"),
+        n => n.to_string(),
     }
 }
 
-pub(crate) fn fix_row_note(row: &FixRow, plan: &FixPlan) -> String {
-    let shift = fix_shift_note(row.shifted_in, row.shifted_out);
-    if !row.is_tail {
-        return shift;
+fn length(frames: u64, sample_rate: u32) -> String {
+    duration_precise(frames as f64 / sample_rate as f64)
+}
+
+/// Where one row has got to while the fix runs.
+#[derive(Clone, Copy)]
+pub(crate) enum RowStep {
+    /// Will be worked on, hasn't been reached yet.
+    Waiting,
+    /// In place, a file the plan leaves alone: never decoded, never touched.
+    Skipped,
+    At(FixStep),
+}
+
+/// A running fix: each row's step, fed by the job's own `on_step` over a channel of its
+/// own (the queue's `Progress` only carries one done/total pair for the whole job).
+pub(crate) struct Fixing {
+    steps: Vec<RowStep>,
+    /// The step reported last — what the gauge says is happening right now.
+    current: Option<(usize, FixStep)>,
+    rx: Receiver<(usize, FixStep)>,
+}
+
+impl Fixing {
+    fn drain(&mut self) {
+        while let Ok((i, step)) = self.rx.try_recv() {
+            self.steps[i] = RowStep::At(step);
+            self.current = Some((i, step));
+        }
     }
-    match plan.tail_padding_frames {
-        Some(pad) if shift == "aligned" => format!("+{pad} frames padded (silence)"),
-        Some(pad) => format!("{shift}, +{pad} frames padded (silence)"),
-        None if !plan.fully_fixed => format!("{shift}, still misaligned (needs tail padding)"),
-        None => shift,
-    }
+}
+
+/// The `on_step` a job reports through, and the [`Fixing`] that hears it.
+fn fixing_channel(steps: Vec<RowStep>) -> (impl Fn(usize, FixStep) + Send + Sync, Fixing) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let fixing = Fixing {
+        steps,
+        current: None,
+        rx,
+    };
+    // A send fails only once the screen has gone; the job just carries on.
+    (
+        move |i, step| {
+            let _ = tx.send((i, step));
+        },
+        fixing,
+    )
 }
 
 pub(crate) enum FixStage {
     /// `--dry-run`: the plan is all there is, nothing runs.
     Planned,
-    /// `execute_fix` is running; no progress or cancellation checkpoint to show.
-    Fixing,
+    /// The job is running; no cancellation checkpoint.
+    Fixing(Fixing),
     Done(Box<lh_core::Result<Vec<Fixed>>>),
     /// `fix_in_place` finished: one entry per file, replaced or left alone.
     Replaced(Box<lh_core::Result<Vec<InPlace>>>),
@@ -359,6 +398,7 @@ pub(crate) fn run_sbe_fix_execute_screen(
     let job_files = files;
     let job_plan = plan.clone();
     let job_dsts = dsts;
+    let (on_step, fixing) = fixing_channel(vec![RowStep::Waiting; rows.len()]);
     queue.submit("sbe fix", move |_progress| {
         let opts = EncodeOpts::default();
         let encode = RepairEncode {
@@ -366,15 +406,18 @@ pub(crate) fn run_sbe_fix_execute_screen(
             opts: &opts,
             overwrite,
         };
-        execute_fix(&job_files, &job_plan, &job_dsts, &encode)
+        execute_fix(&job_files, &job_plan, &job_dsts, &encode, &on_step)
     });
     let events = queue.events();
 
-    let mut stage = FixStage::Fixing;
+    let mut stage = FixStage::Fixing(fixing);
     let start = Instant::now();
     let mut tick = 0usize;
 
     loop {
+        if let FixStage::Fixing(fixing) = &mut stage {
+            fixing.drain();
+        }
         while let Ok(event) = events.try_recv() {
             match event {
                 Event::Started { .. } | Event::Progress { .. } => {}
@@ -480,14 +523,14 @@ pub(crate) fn draw_sbe_fix(
     });
     match warning {
         Some(w) => draw_gauge(frame, chunks[2], 1.0, theme.warn, w.to_string(), theme),
-        None => draw_fix_gauge(frame, chunks[2], plan, stage, tick, theme),
+        None => draw_fix_gauge(frame, chunks[2], rows, plan, stage, tick, theme),
     }
 
     let footer = match (controls, stage) {
         (Some(_), FixStage::Planned) => {
             " d direction   p pad tail   a apply in place (originals → _original/)   q/esc back "
         }
-        (Some(_), FixStage::Fixing) => " fixing — can't be stopped part way ",
+        (Some(_), FixStage::Fixing(_)) => " fixing — can't be stopped part way ",
         _ => " q / esc quit ",
     };
     frame.render_widget(Paragraph::new(Line::styled(footer, theme.dim)), chunks[3]);
@@ -503,63 +546,103 @@ pub(crate) fn draw_fix_table(
     theme: &Theme,
 ) {
     let spin = SPINNER[tick / 2 % SPINNER.len()];
+    let last = rows.len() - 1;
     let table_rows = rows.iter().enumerate().map(|(i, row)| {
-        let (label, style, detail) = fix_row_cells(i, row, plan, stage, spin, theme);
+        let (label, style, detail) = fix_row_cells(i, plan, stage, spin, theme);
+        // The tail's remainder is the one thing a plan can leave misaligned; say so where
+        // its number is.
+        let detail = if i == last && !plan.fully_fixed && detail.is_empty() {
+            "still misaligned".to_string()
+        } else {
+            detail
+        };
+        let number = |n: i64| {
+            let style = if n == 0 { theme.dim } else { Style::default() };
+            Cell::from(Line::from(samples(n)).right_aligned()).style(style)
+        };
         Row::new(vec![
             Cell::from(label).style(style),
             Cell::from(row.name.clone()),
+            Cell::from(Line::from(length(row.frames, row.sample_rate)).right_aligned()),
+            number(row.prev),
+            number(row.next),
+            number(row.pad as i64),
+            Cell::from(Line::from(length(row.frames_after(), row.sample_rate)).right_aligned()),
             Cell::from(detail).style(theme.dim),
         ])
     });
 
+    let header = [
+        "status", "file", "length", "prev", "next", "pad", "after", "",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(c, h)| {
+        // Numeric columns' headers sit over their right-aligned numbers.
+        if (2..=6).contains(&c) {
+            Cell::from(Line::from(h).right_aligned())
+        } else {
+            Cell::from(h)
+        }
+    });
     let table = Table::new(
         table_rows,
         [
             Constraint::Length(10),
-            Constraint::Percentage(30),
-            Constraint::Percentage(60),
+            Constraint::Fill(3),
+            Constraint::Length(10),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            // What's left goes mostly to the file name; the md5 is cut first.
+            Constraint::Fill(2),
         ],
     )
-    .header(Row::new(vec!["status", "file", "detail"]).style(theme.header))
+    .column_spacing(2)
+    .header(Row::new(header).style(theme.header))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" files ")
+            .title(" files — prev/next/pad in samples gained (+) or given up (−) ")
             .border_style(theme.dim),
     );
 
     frame.render_widget(table, area);
 }
 
+/// Status and the free-text column, which after a run holds each file's new audio MD5.
 pub(crate) fn fix_row_cells(
     i: usize,
-    row: &FixRow,
     plan: &FixPlan,
     stage: &FixStage,
     spin: char,
     theme: &Theme,
 ) -> (String, Style, String) {
+    let md5 = |m: &[u8; 16]| format!("md5 {}", hex::encode(m));
     match stage {
-        FixStage::Planned => ("PLAN".to_string(), theme.dim, fix_row_note(row, plan)),
-        FixStage::Fixing => (
-            format!("{spin} fixing"),
-            theme.accent,
-            fix_row_note(row, plan),
-        ),
+        FixStage::Planned if plan.touches(i) => ("PLAN".to_string(), theme.accent, String::new()),
+        FixStage::Planned => ("·".to_string(), theme.dim, String::new()),
+        FixStage::Fixing(fixing) => match fixing.steps[i] {
+            RowStep::Waiting => ("waiting".to_string(), theme.dim, String::new()),
+            RowStep::Skipped => ("·".to_string(), theme.dim, String::new()),
+            RowStep::At(FixStep::Checked) => ("checked".to_string(), theme.ok, String::new()),
+            RowStep::At(step) => (
+                format!("{spin} {}", step.label()),
+                theme.accent,
+                String::new(),
+            ),
+        },
         FixStage::Done(result) => match result.as_ref() {
-            Ok(fixed) => {
-                let f = &fixed[i];
-                let name = file_name(&f.path);
-                (
-                    "FIXED".to_string(),
-                    theme.ok,
-                    format!(
-                        "{}  -> {name}  md5 {}",
-                        fix_row_note(row, plan),
-                        hex::encode(f.audio_md5)
-                    ),
-                )
-            }
+            Ok(fixed) => (
+                "FIXED".to_string(),
+                theme.ok,
+                format!(
+                    "-> {}  {}",
+                    file_name(&fixed[i].path),
+                    md5(&fixed[i].audio_md5)
+                ),
+            ),
             Err(_) => (
                 "FAILED".to_string(),
                 theme.error,
@@ -568,18 +651,10 @@ pub(crate) fn fix_row_cells(
         },
         FixStage::Replaced(result) => match result.as_ref() {
             Ok(done) => match &done[i] {
-                InPlace::Replaced { fixed, .. } => (
-                    "FIXED".to_string(),
-                    theme.ok,
-                    format!(
-                        "{}  original in _original/  md5 {}",
-                        fix_row_note(row, plan),
-                        hex::encode(fixed.audio_md5)
-                    ),
-                ),
-                InPlace::Unchanged { .. } => {
-                    ("UNCHANGED".to_string(), theme.dim, fix_row_note(row, plan))
+                InPlace::Replaced { fixed, .. } => {
+                    ("FIXED".to_string(), theme.ok, md5(&fixed.audio_md5))
                 }
+                InPlace::Unchanged { .. } => ("UNCHANGED".to_string(), theme.dim, String::new()),
             },
             Err(_) => (
                 "FAILED".to_string(),
@@ -593,6 +668,7 @@ pub(crate) fn fix_row_cells(
 pub(crate) fn draw_fix_gauge(
     frame: &mut Frame,
     area: Rect,
+    rows: &[FixRow],
     plan: &FixPlan,
     stage: &FixStage,
     tick: usize,
@@ -613,7 +689,29 @@ pub(crate) fn draw_fix_gauge(
             };
             (1.0, style, label)
         }
-        FixStage::Fixing => (0.0, theme.accent, format!("{spin} fixing…")),
+        FixStage::Fixing(fixing) => {
+            let working = fixing
+                .steps
+                .iter()
+                .filter(|s| !matches!(s, RowStep::Skipped))
+                .count();
+            let checked = fixing
+                .steps
+                .iter()
+                .filter(|s| matches!(s, RowStep::At(FixStep::Checked)))
+                .count();
+            let now = match fixing.current {
+                Some((i, step)) if step != FixStep::Checked => {
+                    format!("{spin} {} {}", step.label(), rows[i].name)
+                }
+                _ => format!("{spin} fixing"),
+            };
+            (
+                checked as f64 / working.max(1) as f64,
+                theme.accent,
+                format!("{now} — {checked} of {working} checked"),
+            )
+        }
         FixStage::Done(result) => match result.as_ref() {
             Ok(fixed) => {
                 let style = if plan.fully_fixed {
@@ -676,11 +774,14 @@ pub(crate) fn run_sbe_fix_in_place_screen(
     };
     let mut rows = fix_rows(files, &plan);
     let mut stage = FixStage::Planned;
-    let mut queue: Option<Queue<lh_core::Result<Vec<InPlace>>>> = None;
+    let mut queue: Option<InPlaceQueue> = None;
     let start = Instant::now();
     let mut tick = 0usize;
 
     loop {
+        if let FixStage::Fixing(fixing) = &mut stage {
+            fixing.drain();
+        }
         if let Some(q) = &queue {
             while let Ok(event) = q.events().try_recv() {
                 match event {
@@ -728,9 +829,9 @@ pub(crate) fn run_sbe_fix_in_place_screen(
             FixStage::Planned if key.code == KeyCode::Char('a') => {
                 controls.note = None;
                 match start_in_place(files, &plan) {
-                    Ok(q) => {
+                    Ok((q, fixing)) => {
                         queue = Some(q);
-                        stage = FixStage::Fixing;
+                        stage = FixStage::Fixing(fixing);
                     }
                     Err(why) => controls.note = Some(why),
                 }
@@ -763,13 +864,22 @@ pub(crate) fn run_sbe_fix_in_place_screen(
     }
 }
 
+type InPlaceQueue = Queue<lh_core::Result<Vec<InPlace>>>;
+
 /// Submits `fix_in_place` as the one job on a queue of one, or says why it can't run.
-fn start_in_place(
-    files: &[AudioFile],
-    plan: &FixPlan,
-) -> Result<Queue<lh_core::Result<Vec<InPlace>>>, String> {
+fn start_in_place(files: &[AudioFile], plan: &FixPlan) -> Result<(InPlaceQueue, Fixing), String> {
     let flac = require_flac_set(files)?;
     let queue = Queue::with_workers(1);
+    let steps = (0..files.len())
+        .map(|i| {
+            if plan.touches(i) {
+                RowStep::Waiting
+            } else {
+                RowStep::Skipped
+            }
+        })
+        .collect();
+    let (on_step, fixing) = fixing_channel(steps);
     let job_files = files.to_vec();
     let job_plan = plan.clone();
     queue.submit("sbe fix", move |_progress| {
@@ -779,7 +889,7 @@ fn start_in_place(
             opts: &opts,
             overwrite: false,
         };
-        fix_in_place(&job_files, &job_plan, &encode)
+        fix_in_place(&job_files, &job_plan, &encode, &on_step)
     });
-    Ok(queue)
+    Ok((queue, fixing))
 }
