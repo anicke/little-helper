@@ -647,6 +647,26 @@ on the left and a `files: 3 (500 B)` panel on the right listing `d1t01.flac` (10
 `d1t02.flac` (250 B) and `d1t03.flac` (150 B); `q` quit cleanly from the picker with the panel
 on screen.
 
+## 10a. Sample screen — done
+
+`lh-tui sample <folder|file>`, and `p` in the workspace. The design lives in
+`docs/sample.md` §4, next to `lh sample` itself. What is particular to it as a screen:
+
+* **An editor that also runs a job.** Like tag/rename, the fields take typed input, so `q`
+  only quits from the track list. Like convert, the encode runs on a `Queue` (one job,
+  `with_workers(1)`) so the draw loop keeps going. It shows a gauge while the FLAC is cut
+  and the spinner while the encoder runs (`(0, 0)` progress, as with `to_flac`), and `q`
+  cancels it.
+* **The estimate is redrawn from the fields every frame**, so a clip that will not fit
+  shows red before it is asked for. `lh_core::sample::encode` still does the refusing.
+  The screen does not duplicate the rule.
+* **Checked by driving it in tmux** (2026-09-25): opening from the workspace and from a
+  file, 320 kbps over the limit (refused, reason shown), editing the length and encoding,
+  the output-exists → `F` replace flow, and `q` during the cut (nothing left behind, not
+  even a `.part`).
+
+---
+
 ## 11. Screens not yet planned
 
 Named so the gap is visible, not to commit to an order:

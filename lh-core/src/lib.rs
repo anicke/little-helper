@@ -24,6 +24,7 @@ pub mod model;
 pub(crate) mod output;
 pub mod rename;
 pub mod repair;
+pub mod sample;
 pub mod scan;
 pub mod tag;
 pub mod tools;

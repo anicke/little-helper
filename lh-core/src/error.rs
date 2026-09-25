@@ -108,6 +108,11 @@ pub enum Error {
         detail: String,
     },
 
+    /// A sample clip that would not fit, or did not fit, the size it was meant to stay
+    /// under (docs/sample.md §1). `detail` says which, and what would fit.
+    #[error("{path}: {detail}")]
+    SampleTooLarge { path: PathBuf, detail: String },
+
     #[error("{path}:{line}: malformed {kind} entry: {detail}")]
     ChecksumSyntax {
         path: PathBuf,

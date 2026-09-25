@@ -130,6 +130,8 @@ pub enum Command {
     /// Write the show's info .txt: header, setlist and track times, from the tags
     /// (docs/info-file.md).
     Setlist(SetlistArgs),
+    /// Cut a short MP3 sample from one track, under a size limit (docs/sample.md).
+    Sample(SampleArgs),
 }
 
 #[derive(Subcommand)]
@@ -366,6 +368,52 @@ pub struct SetlistArgs {
     pub force: bool,
 }
 
+#[derive(clap::Args)]
+pub struct SampleArgs {
+    /// The track to take the sample from. `lh-tui` also takes the show's folder, and
+    /// lets you pick the track.
+    pub path: PathBuf,
+    /// Where in the track it starts: `90`, `1:30` or `1:02:03`. Defaults to centring the
+    /// clip in the track.
+    #[arg(long, value_parser = parse_time)]
+    pub start: Option<f64>,
+    /// How long it is, in the same form as `--start`. Defaults to the longest clip that
+    /// fits `--max-size`, up to 30 seconds.
+    #[arg(long, value_parser = parse_time)]
+    pub length: Option<f64>,
+    /// 320, 256, 192, 160 or 128 for CBR; v0 or v2 for VBR, whose size is only known
+    /// once it is encoded.
+    #[arg(long, default_value = "256", value_parser = parse_mode)]
+    pub mode: lh_core::sample::Mode,
+    /// The largest the sample may be: `1M`, `900K`, `1MiB` or bytes. `K` and `M` are
+    /// decimal.
+    #[arg(long, default_value = "1M", value_parser = parse_size)]
+    pub max_size: u64,
+    /// Where to write it. Defaults to `<track>.sample.mp3` beside the show folder, so it
+    /// does not end up in the folder's checksums or torrent.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+    /// Replace an existing sample.
+    #[arg(long)]
+    pub force: bool,
+    /// Print the full provenance record for the sample.
+    #[arg(long)]
+    pub provenance: bool,
+}
+
+fn parse_time(s: &str) -> std::result::Result<f64, String> {
+    lh_core::sample::parse_time(s).ok_or_else(|| format!("{s:?} is not a time like 90 or 1:30"))
+}
+
+fn parse_mode(s: &str) -> std::result::Result<lh_core::sample::Mode, String> {
+    lh_core::sample::Mode::parse(s)
+        .ok_or_else(|| format!("{s:?} is not a mode; try 320, 256, 192, 160, 128, v0 or v2"))
+}
+
+fn parse_size(s: &str) -> std::result::Result<u64, String> {
+    lh_core::sample::parse_size(s).ok_or_else(|| format!("{s:?} is not a size like 1M or 900K"))
+}
+
 /// Returns whether every file passed.
 pub fn run(cli: Cli) -> Result<bool> {
     match cli.command {
@@ -384,6 +432,7 @@ pub fn run(cli: Cli) -> Result<bool> {
         Command::Tag(a) => cmd_tag(&a),
         Command::Rename(a) => cmd_rename(&a),
         Command::Setlist(a) => cmd_setlist(&a),
+        Command::Sample(a) => cmd_sample(&a),
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
             TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),

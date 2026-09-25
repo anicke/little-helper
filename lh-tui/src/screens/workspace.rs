@@ -31,6 +31,7 @@ enum Step {
     ConvertWav,
     Tag,
     Setlist,
+    Sample,
     Verify,
     Sbe,
     SbeFix,
@@ -88,6 +89,12 @@ const MENU: [(&str, &[Item]); 4] = [
                 'l',
                 "setlist",
                 "write the info .txt: setlist and times",
+            ),
+            item(
+                Step::Sample,
+                'p',
+                "sample",
+                "cut a short MP3 clip, beside the folder",
             ),
         ],
     ),
@@ -344,6 +351,16 @@ fn open_step(
                 Ok(path) => StepResult::Clean(format!("wrote {}", file_name(&path))),
                 Err(e) => StepResult::Unclean(format!("{e:#}")),
             })
+        }
+        Step::Sample => {
+            let folder = scan_folder(dir)?;
+            let setup = SampleSetup::new(&folder.files, find_sample_encoder()?);
+            let outcome = sample_screen(terminal, &label, setup, theme)?;
+            match (outcome.written.last(), outcome.failed) {
+                (_, Some(e)) => Some(StepResult::Unclean(e)),
+                (Some(last), None) => Some(StepResult::Clean(format!("wrote {}", file_name(last)))),
+                (None, None) => None,
+            }
         }
         Step::ConvertFlac | Step::ConvertWav => {
             let folder = scan_folder(dir)?;

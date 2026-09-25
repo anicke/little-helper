@@ -28,17 +28,29 @@ pub enum ToolId {
     Flac,
     Metaflac,
     Shntool,
+    /// The reference MP3 encoder, for sample clips (docs/sample.md §3).
+    Lame,
+    /// The fallback for sample clips when `lame` is absent: it links the same libmp3lame.
+    Ffmpeg,
 }
 
 impl ToolId {
     /// Discovery order everywhere: the required tool first.
-    pub const ALL: [ToolId; 3] = [Self::Flac, Self::Metaflac, Self::Shntool];
+    pub const ALL: [ToolId; 5] = [
+        Self::Flac,
+        Self::Metaflac,
+        Self::Shntool,
+        Self::Lame,
+        Self::Ffmpeg,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Flac => "flac",
             Self::Metaflac => "metaflac",
             Self::Shntool => "shntool",
+            Self::Lame => "lame",
+            Self::Ffmpeg => "ffmpeg",
         }
     }
 
@@ -49,6 +61,8 @@ impl ToolId {
             Self::Flac => "encoding WAV to FLAC",
             Self::Metaflac => "tag editing",
             Self::Shntool => "SHN support",
+            Self::Lame => "encoding MP3 sample clips",
+            Self::Ffmpeg => "encoding MP3 sample clips when lame is absent",
         }
     }
 
@@ -64,13 +78,16 @@ impl ToolId {
             Self::Flac => "LH_FLAC",
             Self::Metaflac => "LH_METAFLAC",
             Self::Shntool => "LH_SHNTOOL",
+            Self::Lame => "LH_LAME",
+            Self::Ffmpeg => "LH_FFMPEG",
         }
     }
 
-    /// Not everything spells it `--version`; shntool wants `-v`.
+    /// Not everything spells it `--version`; shntool wants `-v`, ffmpeg `-version`.
     fn version_args(self) -> &'static [&'static str] {
         match self {
             Self::Shntool => &["-v"],
+            Self::Ffmpeg => &["-version"],
             _ => &["--version"],
         }
     }
