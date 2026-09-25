@@ -956,3 +956,54 @@ fn sbe_fix_on_wav_then_convert_to_flac() {
             predicates::str::contains("SBE"),
         ));
 }
+
+/// docs/info-file.md: the preview writes nothing, `--yes` writes `bbyyyy-mm-dd.txt`, and a
+/// second `--yes` refuses to replace it (exit 1, as `convert` does) until `--force`.
+#[test]
+fn setlist_previews_writes_and_refuses_to_overwrite() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("gd1977-05-08.sbd.test.flac16");
+    std::fs::create_dir(&dir).unwrap();
+    let track = dir.join("gd1977-05-08t01.flac");
+    std::fs::copy(fixtures().join("cdda-aligned.flac"), &track).unwrap();
+    let edit = lh_core::tag::Tags {
+        title: Some("Minglewood Blues".into()),
+        ..Default::default()
+    };
+    lh_core::tag::apply(&track, &edit).unwrap();
+    let txt = dir.join("gd1977-05-08.txt");
+
+    lh().arg("setlist")
+        .arg(&dir)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("t01  Minglewood Blues"))
+        .stdout(predicates::str::contains("plan only, nothing written"));
+    assert!(!txt.exists());
+
+    lh().arg("setlist")
+        .arg(&dir)
+        .arg("--yes")
+        .assert()
+        .success();
+    assert!(txt.exists());
+
+    std::fs::write(&txt, "hand-written").unwrap();
+    lh().arg("setlist")
+        .arg(&dir)
+        .arg("--yes")
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("already exists"));
+    assert_eq!(std::fs::read_to_string(&txt).unwrap(), "hand-written");
+
+    lh().args(["setlist", "--yes", "--force"])
+        .arg(&dir)
+        .assert()
+        .success();
+    assert!(
+        std::fs::read_to_string(&txt)
+            .unwrap()
+            .contains("Minglewood Blues")
+    );
+}

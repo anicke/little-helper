@@ -30,6 +30,7 @@ enum Step {
     ConvertFlac,
     ConvertWav,
     Tag,
+    Setlist,
     Verify,
     Sbe,
     SbeFix,
@@ -82,6 +83,12 @@ const MENU: [(&str, &[Item]); 4] = [
                 "decode FLACs back to WAV",
             ),
             item(Step::Tag, 't', "tag", "edit show fields and track titles"),
+            item(
+                Step::Setlist,
+                'l',
+                "setlist",
+                "write the info .txt: setlist and times",
+            ),
         ],
     ),
     (
@@ -329,6 +336,14 @@ fn open_step(
             };
             let setup = prepare_tag(&args, folder.files)?;
             tag_screen(terminal, dir, setup, theme)?.map(StepResult::from_clean)
+        }
+        Step::Setlist => {
+            let folder = scan_folder(dir)?;
+            let plan = plan_setlist(dir, &folder.files)?;
+            setlist_screen(terminal, &plan, theme)?.map(|outcome| match outcome {
+                Ok(path) => StepResult::Clean(format!("wrote {}", file_name(&path))),
+                Err(e) => StepResult::Unclean(format!("{e:#}")),
+            })
         }
         Step::ConvertFlac | Step::ConvertWav => {
             let folder = scan_folder(dir)?;

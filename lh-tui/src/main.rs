@@ -86,6 +86,7 @@ fn main() -> ExitCode {
         Command::Convert(args) => run_convert(args, theme),
         Command::Tag(args) => run_tag(args, theme),
         Command::Rename(args) => run_rename(args, theme),
+        Command::Setlist(args) => run_setlist(args, theme),
         Command::Torrent {
             command: TorrentCommand::Info { file, no_files },
         } => run_torrent_info(file, !no_files, theme),

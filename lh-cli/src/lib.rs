@@ -127,6 +127,9 @@ pub enum Command {
     Tag(TagArgs),
     /// Rename one show's files to the etree track-name standard (docs/tagging.md §5).
     Rename(RenameArgs),
+    /// Write the show's info .txt: header, setlist and track times, from the tags
+    /// (docs/info-file.md).
+    Setlist(SetlistArgs),
 }
 
 #[derive(Subcommand)]
@@ -350,6 +353,19 @@ pub struct RenameArgs {
     pub yes: bool,
 }
 
+#[derive(clap::Args)]
+pub struct SetlistArgs {
+    /// The show's folder. The file is written inside it, named `bbyyyy-mm-dd.txt`.
+    pub dir: PathBuf,
+    /// Write the file. Without it, the text is printed and nothing is touched.
+    #[arg(long)]
+    pub yes: bool,
+    /// Replace an existing file of the same name. It is usually hand-written, so this is
+    /// never the default.
+    #[arg(long)]
+    pub force: bool,
+}
+
 /// Returns whether every file passed.
 pub fn run(cli: Cli) -> Result<bool> {
     match cli.command {
@@ -367,6 +383,7 @@ pub fn run(cli: Cli) -> Result<bool> {
         Command::Tools => cmd_tools(),
         Command::Tag(a) => cmd_tag(&a),
         Command::Rename(a) => cmd_rename(&a),
+        Command::Setlist(a) => cmd_setlist(&a),
         Command::Torrent { command } => match command {
             TorrentCommand::Info { file, no_files } => cmd_torrent_info(&file, !no_files),
             TorrentCommand::Check { file, path, quick } => cmd_torrent_check(&file, &path, quick),

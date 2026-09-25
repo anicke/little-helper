@@ -18,6 +18,7 @@ pub mod display;
 pub mod error;
 pub mod etree;
 pub mod format;
+pub mod infofile;
 pub mod job;
 pub mod model;
 pub(crate) mod output;
