@@ -1,6 +1,6 @@
 [package]
 name = "lh-cli"
-description = "Little Helper command line: verify, checksum and inspect lossless audio."
+description = "Lossless Little Helper command line: verify, checksum and inspect lossless audio."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

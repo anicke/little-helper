@@ -1,4 +1,4 @@
-//! Core engine for Little Helper.
+//! Core engine for Lossless Little Helper.
 //!
 //! No UI and no CLI live here (Principle 4): everything the GUI can do, the CLI can do,
 //! because both drive this crate.

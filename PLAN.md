@@ -1,7 +1,8 @@
-# Little Helper — Application Plan
+# Lossless Little Helper — Application Plan
 
 A cross-platform, open-source successor to *Traders' Little Helper* (Windows freeware),
 for the live-music trading community: verify, checksum and convert lossless audio.
+Independent project, not affiliated with the author of Traders' Little Helper.
 
 - **Repo:** `little-helper`
 - **Binary:** `lh`

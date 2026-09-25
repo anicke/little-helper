@@ -1,4 +1,4 @@
-//! `lh` — the headless half of Little Helper. The actual commands live in `lib.rs`, so
+//! `lh` — the headless half of Lossless Little Helper. The actual commands live in `lib.rs`, so
 //! that `lh-tui` can parse and run the exact same ones (`lh-tui/src/main.rs`).
 //!
 //! Exit codes: 0 everything passed, 1 at least one file failed, 2 the command itself failed.

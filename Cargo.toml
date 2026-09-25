@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anicke/little-helper"
-authors = ["Little Helper contributors"]
+authors = ["Lossless Little Helper contributors"]
 
 [workspace.dependencies]
 lh-core = { path = "lh-core", version = "0.1.0" }

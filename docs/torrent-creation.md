@@ -434,7 +434,7 @@ pub struct CreateOpts<'a> {
     pub source: Option<String>,
     pub comment: Option<String>,
     pub include_all: bool,
-    pub created_by: &'a str,          // "Little Helper 0.1.0"
+    pub created_by: &'a str,          // "Lossless Little Helper 0.1.0"
 }
 
 /// What was made, and what was left out of it.
@@ -535,7 +535,7 @@ Before writing, by default:
 
 A show that fails gets a torrent only when asked (`--no-check`). The default is to stop,
 because the single thing this community most wants prevented is a broken show being seeded.
-That is the feature, and it is why creation belongs in Little Helper.
+That is the feature, and it is why creation belongs in Lossless Little Helper.
 
 `--write-ffp` closes the loop from the other side (open question 3 of the verification doc):
 emit the `.ffp` for the fileset so a torrent and its fingerprint file come out of one read.

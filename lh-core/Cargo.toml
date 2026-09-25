@@ -1,6 +1,6 @@
 [package]
 name = "lh-core"
-description = "Core engine for Little Helper: lossless audio verification, checksums and conversion."
+description = "Core engine for Lossless Little Helper: lossless audio verification, checksums and conversion."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

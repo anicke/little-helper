@@ -1,6 +1,6 @@
 [package]
 name = "lh-tui"
-description = "Little Helper terminal UI: verify, checksum and inspect lossless audio."
+description = "Lossless Little Helper terminal UI: verify, checksum and inspect lossless audio."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -53,7 +53,7 @@ impl Default for CreateOpts {
             comment: None,
             include_all: false,
             overwrite: false,
-            created_by: format!("Little Helper {}", env!("CARGO_PKG_VERSION")),
+            created_by: format!("Lossless Little Helper {}", env!("CARGO_PKG_VERSION")),
         }
     }
 }

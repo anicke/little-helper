@@ -1,4 +1,4 @@
-//! Little Helper desktop application — milestone M3, see `docs/gui.md`.
+//! Lossless Little Helper desktop application — milestone M3, see `docs/gui.md`.
 //!
 //! G2 wired in the job queue: one long-lived `job::Queue<JobOutcome>` (`docs/gui.md`
 //! §1/§2) lives for the app's whole life; the operation panel submits jobs against every
@@ -576,7 +576,7 @@ fn main() -> iced::Result {
         .default_font(style::INTER)
         .theme(|app: &App| style::theme_for(app.theme_mode))
         .subscription(subscription)
-        .title("Little Helper")
+        .title("Lossless Little Helper")
         .window(iced::window::Settings {
             min_size: Some(iced::Size::new(900.0, 600.0)),
             ..Default::default()

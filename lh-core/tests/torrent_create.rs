@@ -223,7 +223,7 @@ fn a_created_torrent_verifies_against_its_own_payload() {
 
     let meta = Metainfo::read(&torrent).unwrap();
     assert_eq!(meta.info_hash, made.info_hash);
-    assert_eq!(meta.created_by.as_deref(), Some("Little Helper 0.1.0"));
+    assert_eq!(meta.created_by.as_deref(), Some("Lossless Little Helper 0.1.0"));
 
     let report = check(&meta, &torrent, &show, &mut |_, _| true).unwrap();
     assert_eq!(report.verdict(), Verdict::Complete, "{:?}", report.files);

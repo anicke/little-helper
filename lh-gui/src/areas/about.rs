@@ -5,7 +5,7 @@ use lh_core::tools::{Discovery, Registry, ToolId};
 
 pub(crate) fn about_panel() -> Element<'static, Message> {
     column![
-        text("Little Helper"),
+        text("Lossless Little Helper"),
         text(format!("v{}", env!("CARGO_PKG_VERSION"))),
     ]
     .spacing(4)

@@ -1,6 +1,6 @@
 [package]
 name = "lh-gui"
-description = "Little Helper desktop application."
+description = "Lossless Little Helper desktop application."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

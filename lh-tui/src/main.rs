@@ -1,4 +1,4 @@
-//! `lh-tui` — a terminal UI for Little Helper. It parses the exact same subcommands as
+//! `lh-tui` — a terminal UI for Lossless Little Helper. It parses the exact same subcommands as
 //! `lh` (`lh-cli/src/lib.rs`, shared as a library so both binaries stay in lockstep), so
 //! every command `lh` knows is callable here too — `lh-tui convert --to flac .` works the
 //! same as `lh convert --to flac .`.
@@ -45,7 +45,7 @@ use theme::*;
 #[command(
     name = "lh-tui",
     version,
-    about = "Little Helper — lossless audio for traders, from a terminal UI"
+    about = "Lossless Little Helper — verify, checksum and convert audio for traders, from a terminal UI"
 )]
 struct Args {
     /// Color theme for the verify/checksum/torrent screens.

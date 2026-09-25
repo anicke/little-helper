@@ -1,4 +1,4 @@
-//! Conversion is the first thing Little Helper does that *produces* a file someone will
+//! Conversion is the first thing Lossless Little Helper does that *produces* a file someone will
 //! trade, so the reference tools are the oracle here in the strongest sense available:
 //! our FLAC → WAV output is compared byte-for-byte against `flac -d`, and our WAV → FLAC
 //! output is the reference encoder's own.

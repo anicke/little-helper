@@ -1,4 +1,4 @@
-//! Where Little Helper keeps the few things a user configures.
+//! Where Lossless Little Helper keeps the few things a user configures.
 //!
 //! This is not the config module PLAN.md §3 describes — there is no serde and no `toml`
 //! here yet, because the only thing that needs configuring so far is the tracker list, and

@@ -156,7 +156,7 @@ a comment so nobody later "upgrades" it.
 ## 2. The hard part: pieces straddle files
 
 This is the thing that makes torrent verification different from every other check in
-Little Helper, and the source of every subtlety below.
+Lossless Little Helper, and the source of every subtlety below.
 
 All files are concatenated, in listed order, into one logical byte stream. That stream is cut
 into fixed-size pieces of `piece length`, and `pieces` holds one SHA-1 per piece. **Piece

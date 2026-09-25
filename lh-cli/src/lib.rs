@@ -1,4 +1,4 @@
-//! `lh` — the headless half of Little Helper, as a library.
+//! `lh` — the headless half of Lossless Little Helper, as a library.
 //!
 //! Split out of what used to be `main.rs` so `lh-tui` can parse the exact same subcommands
 //! and run them exactly the same way: every command lh-cli knows is callable from lh-tui
@@ -88,7 +88,7 @@ pub(crate) fn run_batch<T: Send + 'static>(
 #[command(
     name = "lh",
     version,
-    about = "Little Helper — lossless audio for traders"
+    about = "Lossless Little Helper — verify, checksum and convert audio for traders"
 )]
 pub struct Cli {
     #[command(subcommand)]
