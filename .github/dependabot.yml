@@ -1,7 +1,21 @@
 version: 2
+# The cooldown holds a new release back for a week before proposing it, so a malicious
+# version is usually caught and yanked first. Security updates are not held back.
 updates:
   # Actions are pinned to commit SHAs; this keeps the SHAs and their version comments current.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+  # Crate updates as PRs, so CI and cargo-deny check them before they land.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]

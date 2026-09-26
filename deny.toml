@@ -1,0 +1,39 @@
+# cargo-deny: run in CI (`cargo deny check`) against every crate in Cargo.lock.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every vulnerability advisory fails the check, anywhere in the tree. "Unmaintained" notices
+# only fail for our direct dependencies: deeper ones (today ttf-parser and paste, both via
+# iced) can only be fixed upstream.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Licences compatible with shipping under MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    # File-level copyleft; fine to ship unmodified (option-ext, via directories).
+    "MPL-2.0",
+]
+
+[bans]
+# Duplicate versions are common in a GUI dependency tree; not a security issue.
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+# Only crates.io: no git dependencies or other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
