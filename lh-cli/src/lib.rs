@@ -101,7 +101,7 @@ pub enum Command {
     Info(Paths),
     /// Decode each file and check it against the MD5 it carries.
     Verify(Paths),
-    /// Report sector boundary errors, or plan a repair (`sbe fix`).
+    /// Report sector boundary errors, or repair them (`sbe fix`).
     Sbe(SbeArgs),
     /// Write or print FFP checksums (audio MD5 from the FLAC header).
     Ffp(ChecksumArgs),
@@ -218,8 +218,8 @@ pub struct SbeArgs {
 
 #[derive(Subcommand)]
 pub enum SbeSub {
-    /// Plan (but do not yet perform) a sector-boundary repair for one directory's files,
-    /// taken in filename order (docs/sbe-repair.md).
+    /// Repair sector boundary errors across one directory's files, taken in filename order
+    /// (docs/sbe-repair.md). Use `--dry-run` to only print the plan.
     Fix(SbeFixArgs),
 }
 
