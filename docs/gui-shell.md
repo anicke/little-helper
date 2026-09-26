@@ -417,12 +417,10 @@ signature has been read.
 * ~~**Icons.**~~ Since evaluated and added: `iced_fonts` 0.3 (MIT, targets iced 0.14) with
   only its `lucide` feature, so one icon set is compiled in rather than all of them. The
   same change bundles Inter (SIL OFL 1.1) as the default font; its licence,
-  `lh-gui/fonts/Inter-OFL.txt`, has to ship with the binary — an M4 packaging item, next to
-  the GPL sidecar notice below. See `lh-gui/src/style.rs`.
+  `lh-gui/fonts/Inter-OFL.txt`, has to ship with the binary — an M4 packaging item. See `lh-gui/src/style.rs`.
 * **Persisting the working set, the selection, or the current area across restarts.**
 * **`.cfp` and `.sfv`** (§0), `Test wav files for MPEG`, `Strip audio file header`.
-* **M4 packaging**, including whether About is where the GPL sidecar notice actually
-  belongs.
+* **M4 packaging.**
 
 ---
 
