@@ -50,7 +50,10 @@ fn reference_metaflac() -> Option<Tool> {
 /// `Provenance`-shaped `Agent` and deliberately discards stdout — here the stdout *is* the
 /// answer.
 fn metaflac_tags(tool: &Tool, path: &Path) -> BTreeMap<String, String> {
+    // FLAC tags are UTF-8 on disk. Without --no-utf8-convert, metaflac re-encodes them to
+    // the local charset on output, which on Windows is a codepage like CP1252.
     let out = Command::new(&tool.path)
+        .arg("--no-utf8-convert")
         .arg("--export-tags-to=-")
         .arg(path)
         .output()
