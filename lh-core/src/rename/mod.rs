@@ -166,8 +166,15 @@ pub fn execute_rename(plan: &RenamePlan) -> Result<Vec<PathBuf>> {
         .filter(|e| e.status == RenameStatus::Changed)
         .collect();
 
+    // Compared as files, not spellings: on a case-insensitive filesystem a case-only
+    // rename's target "exists" because it is the very file being renamed.
     for e in &changed {
-        if e.to.exists() && !plan.entries.iter().any(|other| other.from == e.to) {
+        if e.to.exists()
+            && !plan
+                .entries
+                .iter()
+                .any(|other| same_file::is_same_file(&other.from, &e.to).unwrap_or(false))
+        {
             return Err(Error::malformed(
                 &e.to,
                 "already exists and is not part of this rename; refusing to overwrite it",

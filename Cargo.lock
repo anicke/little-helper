@@ -2172,6 +2172,7 @@ dependencies = [
  "md-5",
  "metaflac",
  "rayon",
+ "same-file",
  "sha1",
  "sha2 0.11.0",
  "tempfile",
