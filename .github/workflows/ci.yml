@@ -18,9 +18,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # lh-gui needs system deps on Linux; core and cli do not.
       #
       # `flac` and `mktorrent` are the oracles the conversion and torrent-creation tests
@@ -37,17 +39,21 @@ jobs:
       - name: Install the reference flac
         if: runner.os == 'macOS'
         run: brew install flac
+      - name: Install the reference flac
+        if: runner.os == 'Windows'
+        run: choco install flac -y --no-progress
       - run: cargo test --workspace --all-features
 
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
