@@ -15,6 +15,18 @@ fn lh() -> Command {
     Command::cargo_bin("lh").expect("lh binary")
 }
 
+/// Tests that encode to FLAC need the reference `flac`; without it they skip, and say so.
+fn no_reference_flac() -> bool {
+    use lh_core::tools::{Registry, ToolId};
+    let missing = Registry::discover_one(ToolId::Flac)
+        .require(ToolId::Flac)
+        .is_err();
+    if missing {
+        eprintln!("skipping: reference flac not found");
+    }
+    missing
+}
+
 #[test]
 fn check_against_the_reference_ffp_passes() {
     lh().arg("check")
@@ -164,12 +176,7 @@ fn convert_to_flac_without_the_encoder_is_a_command_failure() {
 /// the show folder holds only the FLAC afterwards.
 #[test]
 fn convert_to_flac_with_move_sources_sets_the_wav_aside() {
-    use lh_core::tools::{Registry, ToolId};
-    if Registry::discover_one(ToolId::Flac)
-        .require(ToolId::Flac)
-        .is_err()
-    {
-        eprintln!("skipping: reference flac not found");
+    if no_reference_flac() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -445,6 +452,9 @@ fn sbe_fix_dry_run_writes_nothing() {
 /// `-o`, and the earlier file comes out sector-aligned. The source directory is untouched.
 #[test]
 fn sbe_fix_executes_a_single_boundary() {
+    if no_reference_flac() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("t01.flac");
     let b = dir.path().join("t02.flac");
@@ -502,6 +512,9 @@ fn sbe_fix_without_output_dir_is_a_command_failure() {
 /// leaving the whole set aligned (exit `0`), not just reported.
 #[test]
 fn sbe_fix_pad_tail_executes_and_fully_aligns_the_set() {
+    if no_reference_flac() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(
         fixtures().join("cdda-sbe.flac"),
@@ -539,6 +552,9 @@ fn sbe_fix_pad_tail_executes_and_fully_aligns_the_set() {
 /// of being refused, the way R2 alone had to.
 #[test]
 fn sbe_fix_executes_a_chained_three_file_set() {
+    if no_reference_flac() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     // Same fixtures reused for a third track: the point here is chaining through the CLI,
     // not this specific misalignment, and cdda-aligned.flac stays a stable "no-op" link.
@@ -817,6 +833,9 @@ fn rename_refuses_to_overwrite_a_file_outside_the_plan() {
 /// replaced into `_original/sbe-fix/`, byte-for-byte itself.
 #[test]
 fn sbe_fix_in_place_sets_the_originals_aside() {
+    if no_reference_flac() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("t01.flac");
     let b = dir.path().join("t02.flac");
@@ -907,12 +926,7 @@ fn sbe_fix_refuses_a_mixed_wav_flac_folder() {
 /// folders, so neither refuses, and the FLACs come out aligned.
 #[test]
 fn sbe_fix_on_wav_then_convert_to_flac() {
-    use lh_core::tools::{Registry, ToolId};
-    if Registry::discover_one(ToolId::Flac)
-        .require(ToolId::Flac)
-        .is_err()
-    {
-        eprintln!("skipping: reference flac not found");
+    if no_reference_flac() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
