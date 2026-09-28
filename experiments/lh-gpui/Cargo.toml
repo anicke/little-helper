@@ -1,0 +1,25 @@
+[package]
+name = "lh-gpui"
+description = "Experiment: one Lossless Little Helper screen (Torrent → Check) in gpui-kit."
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Deliberately outside the main workspace: gpui pulls in a large dependency tree and
+# system libraries (X11/Wayland/fontconfig) that CI and cargo-deny should not have to
+# carry while this is only a trial.
+[workspace]
+
+[[bin]]
+name = "lh-gpui"
+path = "src/main.rs"
+
+[dependencies]
+lh-core = { path = "../../lh-core" }
+gpui-kit = "0.7"
+
+# gpui with full debuginfo is ~9 GB of build output; keep the trial small.
+[profile.dev]
+debug = false
+incremental = false
