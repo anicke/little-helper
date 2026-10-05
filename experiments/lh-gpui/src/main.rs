@@ -1,231 +1,173 @@
-//! Experiment: the Torrent → Check screen from `lh-gui`, rebuilt on gpui-kit to judge how
-//! it looks and behaves next to the iced version. Same behaviour as
-//! `lh-gui/src/areas/torrent.rs` + `App::run_torrent_check`: pick (or drop) a `.torrent`,
-//! see what it describes, check it against a folder, read the per-file table.
+//! Experiment: Lossless Little Helper's screens on gpui-kit, to judge how they look and
+//! behave next to the iced GUI and the TUI. The shell is `lh-tui <folder>`'s workspace
+//! (`lh-tui/src/screens/workspace.rs`) as a window: one show folder, and a sidebar of every
+//! screen grouped the same way — Prepare, Inspect, Checksums, Torrent — each running on
+//! that folder with the defaults the workspace uses.
 //!
-//! Only this one screen — no rail, dock, or working set. The job still runs through
-//! `lh_core::job::Queue` so progress and Cancel behave the way the real app's do.
+//! Ported so far: the batch screens (verify, sbe, convert → FLAC/WAV, check checksums,
+//! create ffp/md5/st5) through one shared view (`batch.rs`), torrent info and torrent
+//! check. The editor screens (rename, tag, setlist, sample, sbe fix, torrent create) are
+//! listed but point at their `lh-tui` command for now. Every job still runs through
+//! `lh_core::job::Queue`, so progress and Cancel behave the way the real apps' do.
 
-use gpui_kit::assets::{Assets, IconName};
+mod batch;
+mod steps;
+mod torrent_check;
+mod torrent_info;
+mod ui;
+
+use gpui_kit::assets::{Assets, IconName, icon_assets};
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::description_list::DescriptionList;
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::progress::Progress;
-use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
+use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, Theme, TitleBar, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, Theme, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use lh_core::display;
-use lh_core::job::{Event, Queue};
-use lh_core::torrent::{FileStatus, Metainfo, TorrentReport, Verdict, check, check_sizes};
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
-type Outcome = lh_core::Result<TorrentReport>;
+use batch::{Batch, Finished};
+use steps::{Item, Step, StepResult, items};
+use torrent_check::{TorrentCheck, TorrentEvent};
+use torrent_info::Files;
+use ui::card;
 
-/// One row of the results table — the same shape as `lh-gui`'s `job::FileRow`.
-struct FileRow {
-    path: SharedString,
-    label: &'static str,
-    failure: bool,
-    detail: SharedString,
-}
+// gpui-kit's `Assets` embeds only the icons its own components use; these are the extra
+// ones the sidebar and buttons draw.
+icon_assets!(
+    AppIcons,
+    [
+        AudioWaveform,
+        FileInput,
+        FileMusic,
+        FileSearch,
+        Hash,
+        ListChecks,
+        ListMusic,
+        PackageCheck,
+        PackagePlus,
+        PencilLine,
+        Play,
+        Ruler,
+        Scissors,
+        ShieldCheck,
+        Tag,
+        Wrench,
+    ]
+);
 
-/// Mirrors `lh-gui/src/job.rs`'s `report_rows`.
-fn report_rows(report: &TorrentReport) -> Vec<FileRow> {
-    let mut rows = Vec::new();
-    for outcome in &report.files {
-        if outcome.status == FileStatus::Padding {
-            continue;
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = AppIcons.load(path)? {
+            return Ok(Some(bytes));
         }
-        let shown = outcome
-            .path
-            .strip_prefix(&report.root)
-            .unwrap_or(&outcome.path);
-        let detail = match &outcome.status {
-            FileStatus::WrongSize { expected, actual } => {
-                format!("expected {expected} bytes, found {actual}")
-            }
-            FileStatus::Unreadable { reason } => reason.clone(),
-            FileStatus::Corrupt { bad_pieces } => display::pieces_phrase(bad_pieces),
-            FileStatus::Suspect { piece, shared_with } => format!(
-                "piece {piece} is shared with {} other file(s); either could be at fault",
-                shared_with.len()
-            ),
-            FileStatus::Partial {
-                verified,
-                unverifiable,
-            } => format!(
-                "{verified} pieces verified, {unverifiable} unreadable because a \
-                 neighbouring file is bad"
-            ),
-            _ => String::new(),
-        };
-        rows.push(FileRow {
-            path: shown.display().to_string().into(),
-            label: outcome.status.label(),
-            failure: outcome.status.is_failure(),
-            detail: detail.into(),
-        });
-    }
-    for extra in &report.extra_local {
-        let shown = extra.strip_prefix(&report.root).unwrap_or(extra);
-        rows.push(FileRow {
-            path: shown.display().to_string().into(),
-            label: "EXTRA",
-            failure: false,
-            detail: SharedString::default(),
-        });
-    }
-    rows
-}
-
-struct Results {
-    rows: Vec<FileRow>,
-}
-
-impl TableDelegate for Results {
-    fn columns_count(&self, _: &App) -> usize {
-        3
+        Assets.load(path)
     }
 
-    fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
-    }
-
-    fn column(&self, col_ix: usize, _: &App) -> Column {
-        match col_ix {
-            0 => Column::new("status", "Status").width(px(120.)),
-            1 => Column::new("path", "File").width(px(420.)),
-            _ => Column::new("detail", "Detail").width(px(360.)),
-        }
-    }
-
-    fn render_td(
-        &mut self,
-        row_ix: usize,
-        col_ix: usize,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
-        let row = &self.rows[row_ix];
-        match col_ix {
-            0 => {
-                let tag = match row.label {
-                    "OK" => Tag::success(),
-                    "EXTRA" => Tag::info(),
-                    _ if row.failure => Tag::danger(),
-                    _ => Tag::warning(),
-                };
-                tag.small().outline().child(row.label).into_any_element()
-            }
-            1 => row.path.clone().into_any_element(),
-            _ => row.detail.clone().into_any_element(),
-        }
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = Assets.list(path)?;
+        paths.extend(AppIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 }
 
-enum RunState {
-    Idle,
-    Running { done: u32, total: u32 },
-    Finished(Result<Verdict, String>),
-    Cancelled,
+fn index_of(step: Step) -> usize {
+    items()
+        .position(|i| i.step == step)
+        .expect("every step is in the menu")
 }
 
-struct TorrentCheck {
-    torrent_path: Option<PathBuf>,
-    meta: Option<Metainfo>,
-    against: Entity<InputState>,
-    quick: bool,
-    error: Option<SharedString>,
-    run: RunState,
-    queue: Queue<Outcome>,
-    table: Entity<TableState<Results>>,
+struct Workspace {
+    folder: Option<PathBuf>,
+    /// What is in the folder right now, by format; rescanned after every run.
+    summary: SharedString,
+    /// The open screen, as an index into `items()`.
+    selected: usize,
+    results: Vec<StepResult>,
+    /// Each batch screen's own view, made the first time it runs, so its last table stays
+    /// put while another screen is open.
+    batches: Vec<Option<Entity<Batch>>>,
+    torrent_check: Entity<TorrentCheck>,
+    torrent_files: Entity<TableState<Files>>,
 }
 
-impl TorrentCheck {
+impl Workspace {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let against = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Folder that holds the torrent's files")
-        });
-        let table = cx.new(|cx| TableState::new(Results { rows: Vec::new() }, window, cx));
-        let queue = Queue::new();
+        let count = items().count();
+        let torrent_check = cx.new(|cx| TorrentCheck::new(window, cx));
+        let torrent_files = cx.new(|cx| TableState::new(Files::new(), window, cx));
 
-        // Bridge the queue's blocking crossbeam receiver onto gpui: wait on the background
-        // executor, apply on the foreground. Ends when the view (and so the queue) drops.
-        let rx = queue.events();
-        cx.spawn(async move |this, cx| {
-            loop {
-                let rx = rx.clone();
-                let Ok(event) = cx.background_spawn(async move { rx.recv() }).await else {
-                    break;
-                };
-                if this
-                    .update(cx, |this, cx| this.on_event(event, cx))
-                    .is_err()
-                {
-                    break;
+        cx.subscribe(&torrent_check, |this, check, event: &TorrentEvent, cx| {
+            match event {
+                TorrentEvent::Loaded => {
+                    let meta = check.read(cx).meta.clone();
+                    this.torrent_files.update(cx, |t, cx| {
+                        t.delegate_mut().load(meta.as_ref());
+                        t.refresh(cx);
+                    });
+                }
+                TorrentEvent::Checked(result) => {
+                    this.results[index_of(Step::TorrentCheck)] = result.clone();
                 }
             }
+            cx.notify();
         })
         .detach();
 
-        Self {
-            torrent_path: None,
-            meta: None,
-            against,
-            quick: false,
-            error: None,
-            run: RunState::Idle,
-            queue,
-            table,
+        Workspace {
+            folder: None,
+            summary: SharedString::default(),
+            selected: index_of(Step::Verify),
+            results: vec![StepResult::NotRun; count],
+            batches: (0..count).map(|_| None).collect(),
+            torrent_check,
+            torrent_files,
         }
     }
 
-    fn pick_torrent(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match Metainfo::read(&path) {
-            Ok(meta) => {
-                self.error = None;
-                // Default the folder to the one beside the .torrent — the common layout.
-                if self.against.read(cx).value().is_empty()
-                    && let Some(dir) = path.parent()
-                {
-                    let guess = dir.to_path_buf();
-                    self.against.update(cx, |s, cx| {
-                        s.set_value(guess.display().to_string(), window, cx)
-                    });
-                }
-                self.meta = Some(meta);
-            }
-            Err(e) => {
-                self.error = Some(e.to_string().into());
-                self.meta = None;
-            }
+    fn busy(&self, cx: &App) -> bool {
+        self.batches.iter().flatten().any(|b| b.read(cx).running())
+            || self.torrent_check.read(cx).running()
+    }
+
+    /// A new show folder: every screen's last result was about the old one, so they go.
+    fn set_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // Resolved once, so `<folder>` in a checksum or torrent name is the folder's real
+        // name even when it was given as `.`.
+        let Ok(dir) = dir.canonicalize() else {
+            return;
+        };
+        if !dir.is_dir() || self.busy(cx) {
+            return;
         }
-        self.torrent_path = Some(path);
+        self.summary = steps::summarize(&dir).into();
+        self.results.fill(StepResult::NotRun);
+        self.batches.fill(None);
+        self.torrent_check
+            .update(cx, |c, cx| c.use_folder(&dir, window, cx));
+        self.folder = Some(dir);
         cx.notify();
     }
 
-    fn browse_torrent(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose .torrent".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = paths.await
-                && let Some(path) = paths.pop()
-            {
-                this.update_in(cx, |this, window, cx| this.pick_torrent(path, window, cx))
-                    .ok();
-            }
-        })
-        .detach();
+    /// A path from the command line or a drop: a folder becomes the show folder, a
+    /// `.torrent` the torrent to check.
+    fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path.is_dir() {
+            self.set_folder(path, window, cx);
+        } else if !self.torrent_check.read(cx).running() {
+            self.torrent_check
+                .update(cx, |c, cx| c.pick_torrent(path, window, cx));
+            self.selected = index_of(Step::TorrentCheck);
+            cx.notify();
+        }
     }
 
     fn browse_folder(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -233,314 +175,405 @@ impl TorrentCheck {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose folder".into()),
+            prompt: Some("Choose show folder".into()),
         });
-        let against = self.against.clone();
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(mut paths))) = paths.await
                 && let Some(path) = paths.pop()
             {
-                against
-                    .update_in(cx, |s, window, cx| {
-                        s.set_value(path.display().to_string(), window, cx)
-                    })
+                this.update_in(cx, |this, window, cx| this.set_folder(path, window, cx))
                     .ok();
             }
         })
         .detach();
     }
 
-    fn start(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let (Some(torrent_path), Some(meta)) = (self.torrent_path.clone(), self.meta.clone())
-        else {
+    fn run_batch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.folder.clone() else {
             return;
         };
-        let against = PathBuf::from(self.against.read(cx).value().trim());
-        let quick = self.quick;
-
-        self.error = None;
-        self.run = RunState::Running { done: 0, total: 0 };
-        self.queue.cancel_token().reset();
-        self.queue
-            .submit(format!("torrent check: {}", meta.name), move |p| {
-                if quick {
-                    check_sizes(&meta, &torrent_path, &against)
-                } else {
-                    check(&meta, &torrent_path, &against, &mut |done, total| {
-                        p.report(done, total);
-                        !p.is_cancelled()
-                    })
-                }
-            });
-        cx.notify();
-    }
-
-    fn on_event(&mut self, event: Event<Outcome>, cx: &mut Context<Self>) {
-        match event {
-            Event::Started { .. } => {}
-            Event::Progress { done, total, .. } => self.run = RunState::Running { done, total },
-            Event::Finished { output, .. } => {
-                self.run = RunState::Finished(match output {
-                    Ok(report) => {
-                        let verdict = report.verdict();
-                        let rows = report_rows(&report);
-                        self.table.update(cx, |t, cx| {
-                            t.delegate_mut().rows = rows;
-                            t.refresh(cx);
-                        });
-                        Ok(verdict)
+        let step = items().nth(index).expect("index comes from items()").step;
+        let prepared = match steps::prepare(step, &dir) {
+            Ok(p) => p,
+            Err(why) => {
+                self.results[index] = StepResult::Refused(why);
+                cx.notify();
+                return;
+            }
+        };
+        self.results[index] = StepResult::NotRun;
+        let batch = match &self.batches[index] {
+            Some(b) => b.clone(),
+            None => {
+                let b = cx.new(|cx| Batch::new(window, cx));
+                cx.subscribe(&b, move |this, _, Finished(result), cx| {
+                    this.results[index] = result.clone();
+                    // A conversion or a written list changes what is in the folder.
+                    if let Some(dir) = &this.folder {
+                        this.summary = steps::summarize(dir).into();
                     }
-                    Err(e) => Err(e.to_string()),
-                });
+                    cx.notify();
+                })
+                .detach();
+                self.batches[index] = Some(b.clone());
+                b
             }
-            Event::Cancelled { .. } => self.run = RunState::Cancelled,
-        }
+        };
+        batch.update(cx, |b, cx| b.start(prepared, cx));
         cx.notify();
     }
 
-    fn render_torrent_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let path_label: SharedString = match &self.torrent_path {
-            Some(p) => p.display().to_string().into(),
-            None => "No .torrent chosen — browse, or drop one on the window.".into(),
-        };
-        let details = self.meta.as_ref().map(|meta| {
-            DescriptionList::new()
-                .columns(2)
-                .bordered(true)
-                .item("Name", meta.name.clone(), 2)
-                .item("Info hash", meta.info_hash_hex(), 2)
-                .item("Files", meta.real_files().count().to_string(), 1)
-                .item(
-                    "Pieces",
-                    format!(
-                        "{} × {}",
-                        meta.pieces.len(),
-                        display::bytes(meta.piece_length)
-                    ),
-                    1,
-                )
-        });
-
-        card(cx, "Torrent")
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .when(self.torrent_path.is_none(), |d| {
-                                d.text_color(cx.theme().muted_foreground)
-                            })
-                            .child(path_label),
-                    )
-                    .child(
-                        Button::new("browse-torrent")
-                            .outline()
-                            .icon(IconName::FileInput)
-                            .label("Browse…")
-                            .on_click(cx.listener(Self::browse_torrent)),
-                    ),
-            )
-            .children(details)
-    }
-
-    fn render_check_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = matches!(self.run, RunState::Running { .. });
-        let status: Option<AnyElement> = match &self.run {
-            RunState::Idle => None,
-            RunState::Running { done, total } => {
-                let pct = if *total > 0 {
-                    *done as f32 / *total as f32 * 100.
-                } else {
-                    0.
-                };
-                Some(
-                    v_flex()
-                        .gap_1()
-                        .child(Progress::new("progress").value(pct).loading(*total == 0))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if *total > 0 {
-                                    format!("Hashing piece {done} of {total}")
-                                } else {
-                                    "Checking sizes…".into()
-                                }),
-                        )
-                        .into_any_element(),
-                )
-            }
-            RunState::Finished(Ok(Verdict::Complete)) => Some(
-                Alert::success(
-                    "verdict",
-                    "Every file is present and every piece hashes correctly.",
-                )
-                .title("Complete")
-                .into_any_element(),
-            ),
-            RunState::Finished(Ok(Verdict::SizesMatch)) => Some(
-                Alert::info(
-                    "verdict",
-                    "Every file is present with the right size. Pieces were not hashed.",
-                )
-                .title("Sizes match")
-                .into_any_element(),
-            ),
-            RunState::Finished(Ok(Verdict::Incomplete)) => {
-                let n = self
-                    .table
-                    .read(cx)
-                    .delegate()
-                    .rows
-                    .iter()
-                    .filter(|r| r.label != "OK")
-                    .count();
-                Some(
-                    Alert::warning(
-                        "verdict",
-                        format!("{n} file(s) need attention — see the table below."),
-                    )
-                    .title("Incomplete")
-                    .into_any_element(),
-                )
-            }
-            RunState::Finished(Err(e)) => Some(
-                Alert::error("verdict", e.clone())
-                    .title("Check failed")
-                    .into_any_element(),
-            ),
-            RunState::Cancelled => Some(
-                Alert::new("verdict", "The check was cancelled before it finished.")
-                    .into_any_element(),
-            ),
-        };
-
-        card(cx, "Check against")
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.against).cleanable(true)),
-                    )
-                    .child(
-                        Button::new("browse-folder")
-                            .outline()
-                            .icon(IconName::FolderOpen)
-                            .label("Browse…")
-                            .on_click(cx.listener(Self::browse_folder)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        Checkbox::new("quick")
-                            .label("Quick check — compare sizes only, skip hashing")
-                            .checked(self.quick)
-                            .disabled(running)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.quick = *checked;
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .when(running, |row| {
-                        row.child(
-                            Button::new("cancel")
-                                .ghost()
-                                .icon(IconName::CircleX)
-                                .label("Cancel")
-                                .on_click(cx.listener(|this, _, _, _| this.queue.cancel())),
-                        )
-                    })
-                    .child(
-                        Button::new("check")
-                            .primary()
-                            .icon(IconName::FileSearch)
-                            .label("Check")
-                            .loading(running)
-                            .disabled(self.meta.is_none() || running)
-                            .on_click(cx.listener(Self::start)),
-                    ),
-            )
-            .children(status)
-    }
-}
-
-/// A titled surface — gpui-kit has `GroupBox`, but a plain bordered card reads closer to
-/// what the iced app is trying (and failing) to look like.
-fn card(cx: &App, title: &'static str) -> Div {
-    v_flex()
-        .gap_3()
-        .p_4()
-        .rounded(cx.theme().radius_lg)
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().background)
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(cx.theme().muted_foreground)
-                .child(title),
-        )
-}
-
-impl TorrentCheck {
-    fn render_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_rows = !self.table.read(cx).delegate().rows.is_empty();
-
-        v_flex()
-            .id("torrent-check")
-            .flex_1()
-            .min_h_0()
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let busy = self.busy(cx);
+        let header = v_flex()
             .w_full()
-            .gap_4()
-            .p_6()
-            .bg(cx.theme().muted.opacity(0.4))
-            .text_color(cx.theme().foreground)
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                if let Some(path) = paths.paths().first() {
-                    this.pick_torrent(path.clone(), window, cx);
-                }
+            .gap_2()
+            .p_2()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("SHOW FOLDER"),
+            )
+            .child(match &self.folder {
+                Some(dir) => v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .child(steps::file_name(dir)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.summary.clone()),
+                    ),
+                None => v_flex().child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("None yet — browse, or drop a folder on the window."),
+                ),
+            })
+            .child(
+                Button::new("browse-show")
+                    .outline()
+                    .small()
+                    .w_full()
+                    .icon(IconName::FolderOpen)
+                    .label("Choose folder…")
+                    .disabled(busy)
+                    .on_click(cx.listener(Self::browse_folder)),
+            );
+
+        let mut index = 0;
+        let groups = steps::MENU.iter().map(|(title, group)| {
+            let menu = SidebarMenu::new().children(group.iter().map(|item| {
+                let i = index;
+                index += 1;
+                self.menu_item(i, item, cx)
+            }));
+            SidebarGroup::new(*title).child(menu)
+        });
+        let groups: Vec<_> = groups.collect();
+
+        Sidebar::new("screens")
+            .collapsible(false)
+            .header(header)
+            .children(groups)
+    }
+
+    fn menu_item(
+        &self,
+        index: usize,
+        item: &'static Item,
+        cx: &mut Context<Self>,
+    ) -> SidebarMenuItem {
+        enum Mark {
+            Tui,
+            Result(IconName, Hsla),
+        }
+        let theme = cx.theme();
+        let mark = match (&self.results[index], item.tui_only) {
+            (_, Some(_)) => Some(Mark::Tui),
+            (StepResult::NotRun, _) => None,
+            (StepResult::Clean(_), _) => Some(Mark::Result(IconName::CircleCheck, theme.success)),
+            (StepResult::Unclean(_), _) => Some(Mark::Result(IconName::CircleX, theme.danger)),
+            (StepResult::Refused(_), _) => {
+                Some(Mark::Result(IconName::TriangleAlert, theme.warning))
+            }
+        };
+        SidebarMenuItem::new(item.label)
+            .icon(item.icon)
+            .active(index == self.selected)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = index;
+                cx.notify();
             }))
-            .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drop_target))
+            .when_some(mark, |this, mark| {
+                this.suffix(move |_, _| match &mark {
+                    Mark::Tui => Tag::secondary().small().child("TUI").into_any_element(),
+                    Mark::Result(icon, color) => div()
+                        .text_color(*color)
+                        .child(Icon::new(*icon).small())
+                        .into_any_element(),
+                })
+            })
+    }
+
+    fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let index = self.selected;
+        let item = items().nth(index).expect("selected comes from items()");
+
+        let header = h_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(item.icon).large()),
+            )
             .child(
                 v_flex()
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Check torrent"))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(item.label),
+                    )
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Verify a local folder against a .torrent's sizes and piece hashes."),
+                            .child(item.about),
                     ),
+            );
+
+        let body: AnyElement = if let Some(command) = item.tui_only {
+            self.render_tui_only(command, cx).into_any_element()
+        } else {
+            match item.step {
+                Step::TorrentCheck => self.torrent_check.clone().into_any_element(),
+                Step::TorrentInfo => self.render_torrent_info(cx).into_any_element(),
+                _ => self
+                    .render_batch_page(index, item, window, cx)
+                    .into_any_element(),
+            }
+        };
+
+        v_flex()
+            .id("page")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .gap_4()
+            .p_6()
+            .bg(cx.theme().muted.opacity(0.4))
+            .text_color(cx.theme().foreground)
+            .child(header)
+            .child(body)
+    }
+
+    fn render_tui_only(&self, command: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let folder = self
+            .folder
+            .as_deref()
+            .map(shell_quote)
+            .unwrap_or_else(|| "<folder>".into());
+        card(cx, "Not in the gpui trial yet")
+            .child(
+                div()
+                    .text_sm()
+                    .child("This screen hasn't been ported. For now, run it from a terminal:"),
             )
-            .when_some(self.error.clone(), |this, e| {
-                this.child(Alert::error("error", e).title("Couldn't read the torrent"))
-            })
-            .child(self.render_torrent_card(cx))
-            .child(self.render_check_card(cx))
-            .when(has_rows, |this| {
-                this.child(
-                    div().flex_1().min_h(px(160.)).child(
-                        DataTable::new(&self.table).stripe(true).bordered(true),
-                    ),
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().muted)
+                    .font_family("monospace")
+                    .text_sm()
+                    .child(format!("lh-tui {command} {folder}")),
+            )
+    }
+
+    fn render_no_folder(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        card(cx, "Show folder").child(
+            h_flex()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Choose a show folder to run this on — or drop one on the window."),
                 )
-            })
+                .child(
+                    Button::new("browse-empty")
+                        .outline()
+                        .icon(IconName::FolderOpen)
+                        .label("Choose folder…")
+                        .on_click(cx.listener(Self::browse_folder)),
+                ),
+        )
+    }
+
+    fn render_batch_page(
+        &mut self,
+        index: usize,
+        item: &'static Item,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(dir) = self.folder.clone() else {
+            return self.render_no_folder(cx).into_any_element();
+        };
+        let batch = self.batches[index].clone();
+        let running = batch.as_ref().is_some_and(|b| b.read(cx).running());
+        let has_rows = batch.as_ref().is_some_and(|b| b.read(cx).has_rows(cx));
+
+        let alert = match &self.results[index] {
+            StepResult::NotRun => None,
+            StepResult::Clean(msg) => Some(Alert::success("result", msg.clone()).title("Clean")),
+            StepResult::Unclean(msg) => {
+                Some(Alert::error("result", msg.clone()).title("Not clean"))
+            }
+            StepResult::Refused(msg) => {
+                Some(Alert::warning("result", msg.clone()).title("Can't run this here"))
+            }
+        };
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_4()
+            .child(
+                card(cx, "Show folder").child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().truncate().child(dir.display().to_string()))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(self.summary.clone()),
+                                ),
+                        )
+                        .child(
+                            Button::new("run")
+                                .primary()
+                                .icon(IconName::Play)
+                                .label(item.label)
+                                .loading(running)
+                                .disabled(running)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.run_batch(index, window, cx)
+                                })),
+                        ),
+                ),
+            )
+            .children(alert)
+            .when_some(batch.filter(|_| has_rows), |this, batch| this.child(batch))
+            .into_any_element()
+    }
+
+    fn render_torrent_info(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let check = self.torrent_check.read(cx);
+        let browse = Button::new("browse-torrent-info")
+            .outline()
+            .icon(IconName::FileInput)
+            .label("Choose .torrent…")
+            .disabled(check.running())
+            .on_click(cx.listener(|this, ev, window, cx| {
+                this.torrent_check
+                    .update(cx, |c, cx| c.browse_torrent(ev, window, cx))
+            }));
+
+        let Some(meta) = &check.meta else {
+            let why = match &self.folder {
+                Some(dir) => match steps::find_torrent(dir) {
+                    Err(why) => why,
+                    Ok(_) => "The folder's torrent couldn't be read.".into(),
+                },
+                None => "No show folder or torrent chosen yet.".into(),
+            };
+            return card(cx, "Torrent")
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(why),
+                        )
+                        .child(browse),
+                )
+                .into_any_element();
+        };
+
+        let path = check
+            .torrent_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_4()
+            .child(
+                card(cx, "Torrent")
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(div().flex_1().min_w_0().truncate().child(path))
+                            .child(browse),
+                    )
+                    .child(torrent_info::details(meta)),
+            )
+            .child(
+                div().flex_1().min_h(px(160.)).child(
+                    DataTable::new(&self.torrent_files)
+                        .stripe(true)
+                        .bordered(true),
+                ),
+            )
+            .into_any_element()
     }
 }
 
-impl Render for TorrentCheck {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+/// A path as it would be typed into a shell: quoted when it has anything but the plain
+/// characters show folders are usually named with.
+fn shell_quote(path: &Path) -> String {
+    let s = path.display().to_string();
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+,".contains(c))
+    {
+        s
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Client-side decorations: GNOME's Wayland compositor draws no title bar for
         // non-GTK apps, so the window draws its own (drag, double-click, min/max/close).
         v_flex()
+            .id("workspace")
             .size_full()
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if let Some(path) = paths.paths().first() {
+                    this.open_path(path.clone(), window, cx);
+                }
+            }))
+            .drag_over::<ExternalPaths>(|s, _, _, cx| s.bg(cx.theme().drop_target))
             .child(
                 TitleBar::new().child(
                     div()
@@ -549,16 +582,23 @@ impl Render for TorrentCheck {
                         .child("Lossless Little Helper"),
                 ),
             )
-            .child(self.render_body(cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .child(self.render_sidebar(cx))
+                    .child(self.render_page(window, cx)),
+            )
     }
 }
 
 fn main() {
-    application().with_assets(Assets).run(|cx| {
+    application().with_assets(AppAssets).run(|cx| {
         init(cx);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(960.), px(760.)), cx)),
-            window_min_size: Some(size(px(720.), px(560.))),
+            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(800.)), cx)),
+            window_min_size: Some(size(px(900.), px(600.))),
             window_decorations: Some(WindowDecorations::Client),
             ..TitleBar::window_options()
         };
@@ -571,10 +611,11 @@ fn main() {
                 })
                 .detach();
             cx.new(|cx| {
-                let mut view = TorrentCheck::new(window, cx);
-                // `lh-gpui some.torrent` opens with it already loaded.
+                let mut view = Workspace::new(window, cx);
+                // `lh-gpui <folder>` opens on that show folder; `lh-gpui some.torrent` on
+                // Torrent check with it loaded.
                 if let Some(path) = std::env::args_os().nth(1) {
-                    view.pick_torrent(path.into(), window, cx);
+                    view.open_path(path.into(), window, cx);
                 }
                 view
             })

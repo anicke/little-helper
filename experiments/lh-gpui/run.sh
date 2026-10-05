@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build and run the gpui-kit trial without the -dev system packages: fontconfig is
 # dlopen'd, and the linker is pointed at symlinks to the runtime xcb/xkbcommon libs.
-# Pass a .torrent path to open with it loaded.
+# Pass a show folder to open on it, or a .torrent to open Torrent check with it loaded.
 set -e
 cd "$(dirname "$0")"
 : "${CARGO_TARGET_DIR:=${TMPDIR:-/tmp}/lh-gpui-target}"
