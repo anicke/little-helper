@@ -1,6 +1,5 @@
 use std::io;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
 
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
@@ -235,8 +234,7 @@ pub(crate) fn run_torrent_create_screen(
     let mut private = false;
     let mut source_tag: Option<String> = None;
 
-    let mut start = Instant::now();
-    let mut finished_at = None;
+    let mut clock = HeaderClock::new();
     let mut tick = 0usize;
     let mut want_quit = false;
 
@@ -261,11 +259,7 @@ pub(crate) fn run_torrent_create_screen(
         let elapsed = if matches!(stage, CreateStage::ChoosingTrackers) {
             0.0
         } else {
-            header_elapsed(
-                start,
-                &mut finished_at,
-                matches!(stage, CreateStage::Done(_)),
-            )
+            clock.elapsed(matches!(stage, CreateStage::Done(_)))
         };
         terminal.draw(|frame| {
             draw_torrent_create(
@@ -291,7 +285,7 @@ pub(crate) fn run_torrent_create_screen(
             )
         })?;
 
-        if event::poll(Duration::from_millis(80))? {
+        if event::poll(clock.wait())? {
             match event::read()? {
                 CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     let ctrl_c = key.code == KeyCode::Char('c')
@@ -319,7 +313,7 @@ pub(crate) fn run_torrent_create_screen(
                                                 started = Some(s);
                                                 pick_error = None;
                                                 stage = CreateStage::Preparing;
-                                                start = Instant::now();
+                                                clock.restart();
                                             }
                                             Err(e) => pick_error = Some(format!("{e:#}")),
                                         }

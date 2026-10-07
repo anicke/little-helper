@@ -1,5 +1,5 @@
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lh_cli::Paths;
 use lh_core::checksum::ChecksumKind;
@@ -16,19 +16,52 @@ pub(crate) fn is_quit(key: &crossterm::event::KeyEvent) -> bool {
 
 pub(crate) const SPINNER: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
 
-/// The elapsed time a header shows: keeps advancing every frame while `done` is false, then
-/// freezes at the instant `done` first turns true. Every screen redraws on an 80ms poll even
-/// once its work is finished (waiting for `q`), so a header computing `start.elapsed()` live
-/// would otherwise keep climbing while nothing is actually happening. `finished_at` is the
-/// caller's own `Option<Instant>`, `None` until that instant, so the freeze survives frames.
-pub(crate) fn header_elapsed(start: Instant, finished_at: &mut Option<Instant>, done: bool) -> f32 {
-    if done && finished_at.is_none() {
-        *finished_at = Some(Instant::now());
+/// The elapsed time a timed screen's header shows, and when to redraw it.
+///
+/// `elapsed` keeps advancing every frame while `done` is false, then freezes at the
+/// instant `done` first turns true: every screen keeps redrawing once its work is finished
+/// (waiting for `q`), so a header computing `start.elapsed()` live would otherwise keep
+/// climbing while nothing is actually happening.
+///
+/// `wait` is how long the loop should wait for input before redrawing: until just past the
+/// next tenth of a second. The header shows elapsed time to one decimal, so a fixed 80ms
+/// poll lands at a different point in each tenth — the digit sometimes holds for two frames
+/// and the clock visibly stutters. Waking on the tenth boundary instead flips the digit
+/// once per frame, right when it changes.
+pub(crate) struct HeaderClock {
+    start: Instant,
+    finished_at: Option<Instant>,
+}
+
+impl HeaderClock {
+    pub(crate) fn new() -> Self {
+        HeaderClock {
+            start: Instant::now(),
+            finished_at: None,
+        }
     }
-    finished_at
-        .unwrap_or_else(Instant::now)
-        .duration_since(start)
-        .as_secs_f32()
+
+    /// Start counting from zero again, e.g. once the screen's work actually kicks off.
+    pub(crate) fn restart(&mut self) {
+        *self = HeaderClock::new();
+    }
+
+    pub(crate) fn elapsed(&mut self, done: bool) -> f32 {
+        if done && self.finished_at.is_none() {
+            self.finished_at = Some(Instant::now());
+        }
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .duration_since(self.start)
+            .as_secs_f32()
+    }
+
+    pub(crate) fn wait(&self) -> Duration {
+        const TENTH: u128 = 100_000;
+        let micros = self.start.elapsed().as_micros();
+        // +1ms so the frame lands after the boundary, not a hair before it.
+        Duration::from_micros((TENTH - micros % TENTH) as u64 + 1_000)
+    }
 }
 
 /// Expand files and folders into a flat list of audio files, reporting anything skipped

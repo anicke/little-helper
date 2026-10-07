@@ -1,6 +1,5 @@
 use std::io;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
 
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyEventKind};
@@ -105,8 +104,7 @@ pub(crate) fn run_torrent_check_screen(
     let events = queue.events();
 
     let mut stage = CheckStage::Preparing;
-    let start = Instant::now();
-    let mut finished_at = None;
+    let mut clock = HeaderClock::new();
     let mut tick = 0usize;
     let mut want_quit = false;
 
@@ -124,14 +122,10 @@ pub(crate) fn run_torrent_check_screen(
             }
         }
 
-        let elapsed = header_elapsed(
-            start,
-            &mut finished_at,
-            matches!(stage, CheckStage::Done(_)),
-        );
+        let elapsed = clock.elapsed(matches!(stage, CheckStage::Done(_)));
         terminal.draw(|frame| draw_torrent_check(frame, &stage, quick, elapsed, tick, &theme))?;
 
-        if event::poll(Duration::from_millis(80))? {
+        if event::poll(clock.wait())? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let quit = is_quit(&key);

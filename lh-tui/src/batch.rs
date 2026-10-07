@@ -4,7 +4,6 @@
 //! [`RowStatus`] impl and how it submits jobs; everything else is here.
 
 use std::io;
-use std::time::{Duration, Instant};
 
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyEventKind};
@@ -116,8 +115,7 @@ pub(crate) fn run_batch<T: Send + 'static, S: RowStatus>(
     let cancel = queue.cancel_token();
     let events = queue.events();
 
-    let start = Instant::now();
-    let mut finished_at = None;
+    let mut clock = HeaderClock::new();
     let mut tick = 0usize;
 
     loop {
@@ -133,12 +131,12 @@ pub(crate) fn run_batch<T: Send + 'static, S: RowStatus>(
         }
 
         let counts = Counts::of(view.labels, &rows);
-        let elapsed = header_elapsed(start, &mut finished_at, counts.done == total);
+        let elapsed = clock.elapsed(counts.done == total);
         terminal.draw(|frame| {
             draw_batch(frame, view, names, &rows, &counts, elapsed, tick, theme);
         })?;
 
-        if event::poll(Duration::from_millis(80))? {
+        if event::poll(clock.wait())? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let quit = is_quit(&key);

@@ -1,6 +1,6 @@
 use std::io;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::*;
 use clap::ValueEnum;
@@ -344,8 +344,10 @@ pub(crate) fn run_sbe_fix_plan_screen(
     theme: Theme,
 ) -> io::Result<()> {
     let rows = fix_rows(files, plan);
-    let start = Instant::now();
+    let mut clock = HeaderClock::new();
     loop {
+        // A dry run has nothing to finish: the clock runs until the screen is left.
+        let elapsed = clock.elapsed(false);
         terminal.draw(|frame| {
             draw_sbe_fix(
                 frame,
@@ -354,12 +356,12 @@ pub(crate) fn run_sbe_fix_plan_screen(
                 plan,
                 &FixStage::Planned,
                 None,
-                start,
+                elapsed,
                 0,
                 &theme,
             )
         })?;
-        if event::poll(Duration::from_millis(80))? {
+        if event::poll(clock.wait())? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let quit = is_quit(&key);
@@ -408,7 +410,7 @@ pub(crate) fn run_sbe_fix_execute_screen(
     let events = queue.events();
 
     let mut stage = FixStage::Fixing(fixing);
-    let start = Instant::now();
+    let mut clock = HeaderClock::new();
     let mut tick = 0usize;
 
     loop {
@@ -425,11 +427,14 @@ pub(crate) fn run_sbe_fix_execute_screen(
             }
         }
 
+        let elapsed = clock.elapsed(matches!(stage, FixStage::Done(_)));
         terminal.draw(|frame| {
-            draw_sbe_fix(frame, dir, &rows, &plan, &stage, None, start, tick, &theme)
+            draw_sbe_fix(
+                frame, dir, &rows, &plan, &stage, None, elapsed, tick, &theme,
+            )
         })?;
 
-        if event::poll(Duration::from_millis(80))? {
+        if event::poll(clock.wait())? {
             if let CtEvent::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     let quit = is_quit(&key);
@@ -460,7 +465,7 @@ pub(crate) fn draw_sbe_fix(
     plan: &FixPlan,
     stage: &FixStage,
     controls: Option<&FixControls>,
-    start: Instant,
+    elapsed: f32,
     tick: usize,
     theme: &Theme,
 ) {
@@ -499,7 +504,7 @@ pub(crate) fn draw_sbe_fix(
                 Span::styled(" lh-tui ", theme.accent.bold()),
                 Span::raw(format!(" {mode}  ")),
                 folder,
-                Span::raw(format!("   {:.1}s", start.elapsed().as_secs_f32())),
+                Span::raw(format!("   {elapsed:.1}s")),
             ]
         }
     });
@@ -772,7 +777,6 @@ pub(crate) fn run_sbe_fix_in_place_screen(
     let mut rows = fix_rows(files, &plan);
     let mut stage = FixStage::Planned;
     let mut queue: Option<InPlaceQueue> = None;
-    let start = Instant::now();
     let mut tick = 0usize;
 
     loop {
@@ -801,7 +805,8 @@ pub(crate) fn run_sbe_fix_in_place_screen(
                 &plan,
                 &stage,
                 Some(&controls),
-                start,
+                // The in-place header shows its settings, not a clock.
+                0.0,
                 tick,
                 &theme,
             )
