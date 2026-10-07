@@ -178,6 +178,24 @@ fn tracker_tiers_survive_a_round_trip() {
     assert_eq!(read_back.trackers().count(), 3);
 }
 
+/// One tracker goes in `announce` alone. Private sites such as Dime reject any upload that
+/// carries `announce-list`, even a list of one, as a multitracker torrent.
+#[test]
+fn a_single_tracker_torrent_has_no_announce_list() {
+    let meta = Metainfo::read(&fixture("verify-multi.torrent")).unwrap();
+    let tiers = vec![vec!["http://bt.dimeadozen.org/announce.php".to_string()]];
+    let out = encode(&Draft {
+        announce: tiers.clone(),
+        ..draft_from(&meta)
+    })
+    .unwrap();
+
+    assert!(find(&out.bytes, b"13:announce-list").is_none());
+    assert!(find(&out.bytes, b"8:announce").is_some());
+    let read_back = Metainfo::from_bytes(&out.bytes, Path::new("dime.torrent")).unwrap();
+    assert_eq!(read_back.announce, tiers);
+}
+
 /// A trackerless torrent is legal, and is what a DHT-only or private-archive torrent wants.
 #[test]
 fn a_trackerless_torrent_has_no_announce_keys() {

@@ -182,12 +182,15 @@ fn encode_outer(draft: &Draft, info: &[u8]) -> std::result::Result<Vec<u8>, Benc
     let mut dict = RawDict::default();
 
     // BEP 3's single tracker is the first URL of the first tier; BEP 12's list carries all
-    // of them. A trackerless torrent has neither key, which is legal and is what you want
-    // for a DHT-only or private-archive torrent.
+    // of them, and is written only when there is more than one. With one it says nothing
+    // `announce` does not, and some private sites (Dime among them) refuse any upload that
+    // carries the key at all: "multitracker torrents not allowed". A trackerless torrent has
+    // neither key, which is legal and is what you want for a DHT-only or private-archive
+    // torrent.
     if let Some(first) = draft.announce.first().and_then(|tier| tier.first()) {
         dict.put(b"announce", first)?;
     }
-    if !draft.announce.is_empty() {
+    if draft.announce.iter().flatten().nth(1).is_some() {
         let tiers = encoded(|e| {
             e.emit_list(|list| {
                 for tier in &draft.announce {
