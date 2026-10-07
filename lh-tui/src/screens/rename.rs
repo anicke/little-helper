@@ -5,7 +5,6 @@ use std::time::Duration;
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lh_cli::RenameArgs;
-use lh_core::etree::ShowDate;
 use lh_core::etree::ShowName;
 use lh_core::job::{Event, Queue};
 use lh_core::model::AudioFile;
@@ -80,11 +79,7 @@ pub(crate) fn rename_screen(
     files: &[AudioFile],
     theme: Theme,
 ) -> io::Result<Option<bool>> {
-    let show_name = args
-        .dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(ShowName::parse);
+    let show_name = ShowName::from_dir(&args.dir);
     let band = args
         .band
         .clone()
@@ -109,31 +104,6 @@ pub(crate) fn rename_screen(
         disc,
         theme,
     )
-}
-
-pub(crate) fn current_spec(
-    band: &Field,
-    date: &Field,
-    disc: &Field,
-    short_year: bool,
-) -> Option<NameSpec> {
-    let band_val = band.value.trim();
-    if band_val.is_empty() {
-        return None;
-    }
-    let (date_val, _) = ShowDate::parse(date.value.trim())?;
-    let disc_val = if disc.value.trim().is_empty() {
-        None
-    } else {
-        Some(disc.value.trim().parse::<u32>().ok()?)
-    };
-    Some(NameSpec {
-        band: band_val.to_string(),
-        date: date_val,
-        short_year,
-        disc: disc_val,
-        keep_suffix: true,
-    })
 }
 
 /// Runs `execute_rename` as the queue's one job, not one job per file — unlike tagging,
@@ -182,8 +152,14 @@ pub(crate) fn run_rename_screen(
     loop {
         let plan = match &applied {
             Some(a) => Some(a.clone()),
-            None => current_spec(&band_field, &date_field, &disc_field, short_year)
-                .map(|s| plan_rename(&files, &s)),
+            None => NameSpec::from_fields(
+                &band_field.value,
+                &date_field.value,
+                &disc_field.value,
+                short_year,
+            )
+            .ok()
+            .map(|s| plan_rename(&files, &s)),
         };
 
         if let Some(q) = &queue {
@@ -246,10 +222,7 @@ pub(crate) fn run_rename_screen(
                             KeyCode::Char('q') if focus == RenameFocus::None => break,
                             KeyCode::Char('a') if focus == RenameFocus::None => {
                                 if let Some(plan) = &plan {
-                                    let changed = plan
-                                        .entries
-                                        .iter()
-                                        .any(|e| e.status == RenameStatus::Changed);
+                                    let changed = plan.changed() > 0;
                                     if plan.has_collisions() {
                                         // Refused silently — the table already shows the
                                         // collision in `theme.error` (docs/tagging.md §6).
@@ -584,11 +557,7 @@ pub(crate) fn draw_rename_gauge(
         RenameStage::Editing => match plan {
             Some(p) if p.has_collisions() => (1.0, theme.error, "refusing: collision".to_string()),
             Some(p) => {
-                let changed = p
-                    .entries
-                    .iter()
-                    .filter(|e| e.status == RenameStatus::Changed)
-                    .count();
+                let changed = p.changed();
                 (
                     1.0,
                     theme.accent,
@@ -617,12 +586,7 @@ pub(crate) fn draw_rename_gauge(
                     .unwrap_or_default();
                 format!("failed: {msg}")
             } else {
-                let renamed = plan.map_or(0, |p| {
-                    p.entries
-                        .iter()
-                        .filter(|e| e.status == RenameStatus::Changed)
-                        .count()
-                });
+                let renamed = plan.map_or(0, RenamePlan::changed);
                 match rows.len() - renamed {
                     0 => format!("{renamed} files renamed"),
                     same => format!("{renamed} files renamed, {same} already had their name"),

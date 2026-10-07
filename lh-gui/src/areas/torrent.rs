@@ -10,9 +10,9 @@ use lh_core::display;
 pub(crate) fn torrent_create_panel(app: &App) -> Element<'_, Message> {
     let mut known = Column::new()
         .spacing(2)
-        .push(text("Known trackers (id, name, health):"));
-    for t in app.trackers.all() {
-        known = known.push(text(format!("{}  {}  {}", t.id, t.name, t.health.label())));
+        .push(text("Known trackers (id, name, announce URL):"));
+    for t in app.trackers.responding() {
+        known = known.push(text(format!("{}  {}  {}", t.id, t.name, t.announce)));
     }
 
     let tracker_input = text_input(

@@ -5,12 +5,14 @@
 //! that folder with the defaults the workspace uses.
 //!
 //! Ported so far: the batch screens (verify, sbe, convert → FLAC/WAV, check checksums,
-//! create ffp/md5/st5) through one shared view (`batch.rs`), torrent info and torrent
-//! check. The editor screens (rename, tag, setlist, sample, sbe fix, torrent create) are
-//! listed but point at their `lh-tui` command for now. Every job still runs through
+//! create ffp/md5/st5) through one shared view (`batch.rs`), rename, torrent info and
+//! torrent check. The other editor screens (tag, setlist, sample, sbe fix, torrent create)
+//! are listed but point at their `lh-tui` command for now. Every job still runs through
 //! `lh_core::job::Queue`, so progress and Cancel behave the way the real apps' do.
 
 mod batch;
+mod rename;
+mod screen;
 mod steps;
 mod torrent_check;
 mod torrent_info;
@@ -30,11 +32,13 @@ use gpui_kit::*;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use batch::{Batch, Finished};
-use steps::{Item, Step, StepResult, items};
-use torrent_check::{TorrentCheck, TorrentEvent};
+use batch::Batch;
+use rename::Rename;
+use screen::{AnyScreen, Screen as _};
+use steps::{Item, Step, StepDone, StepResult, items};
+use torrent_check::{TorrentCheck, TorrentLoaded};
 use torrent_info::Files;
-use ui::card;
+use ui::{card, scan_then};
 
 // gpui-kit's `Assets` embeds only the icons its own components use; these are the extra
 // ones the sidebar and buttons draw.
@@ -87,7 +91,9 @@ fn index_of(step: Step) -> usize {
 
 struct Workspace {
     folder: Option<PathBuf>,
-    /// What is in the folder right now, by format; rescanned after every run.
+    /// While a new folder is being scanned; the screens hear about it once that is done.
+    scanning: bool,
+    /// What is in the folder, by format; rescanned after a run that can change it.
     summary: SharedString,
     /// The open screen, as an index into `items()`.
     selected: usize,
@@ -95,6 +101,9 @@ struct Workspace {
     /// Each batch screen's own view, made the first time it runs, so its last table stays
     /// put while another screen is open.
     batches: Vec<Option<Entity<Batch>>>,
+    /// The screens that keep their own view, each told about a new folder.
+    screens: Vec<(Step, Box<dyn AnyScreen>)>,
+    /// Also in `screens`; Torrent info reads its torrent.
     torrent_check: Entity<TorrentCheck>,
     torrent_files: Entity<TableState<Files>>,
 }
@@ -104,41 +113,82 @@ impl Workspace {
         let count = items().count();
         let torrent_check = cx.new(|cx| TorrentCheck::new(window, cx));
         let torrent_files = cx.new(|cx| TableState::new(Files::new(), window, cx));
+        let rename = cx.new(|cx| Rename::new(window, cx));
 
-        cx.subscribe(&torrent_check, |this, check, event: &TorrentEvent, cx| {
-            match event {
-                TorrentEvent::Loaded => {
-                    let meta = check.read(cx).meta.clone();
-                    this.torrent_files.update(cx, |t, cx| {
-                        t.delegate_mut().load(meta.as_ref());
-                        t.refresh(cx);
-                    });
-                }
-                TorrentEvent::Checked(result) => {
-                    this.results[index_of(Step::TorrentCheck)] = result.clone();
-                }
-            }
+        cx.subscribe(&torrent_check, |this, check, _: &TorrentLoaded, cx| {
+            let meta = check.read(cx).meta.clone();
+            this.torrent_files.update(cx, |t, cx| {
+                t.delegate_mut().load(meta.as_ref());
+                t.refresh(cx);
+            });
             cx.notify();
         })
         .detach();
 
-        Workspace {
+        let mut this = Workspace {
             folder: None,
+            scanning: false,
             summary: SharedString::default(),
             selected: index_of(Step::Verify),
             results: vec![StepResult::NotRun; count],
             batches: (0..count).map(|_| None).collect(),
-            torrent_check,
+            screens: Vec::new(),
+            torrent_check: torrent_check.clone(),
             torrent_files,
-        }
+        };
+        this.add_screen(Step::Rename, rename, window, cx);
+        this.add_screen(Step::TorrentCheck, torrent_check, window, cx);
+        this
+    }
+
+    fn add_screen<T: screen::Screen>(
+        &mut self,
+        step: Step,
+        screen: Entity<T>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.watch(step, &screen, window, cx);
+        self.screens.push((step, Box::new(screen)));
+    }
+
+    /// Records how each of `entity`'s runs went, and rescans the folder summary after a
+    /// run that can change it.
+    fn watch<T: EventEmitter<StepDone>>(
+        &self,
+        step: Step,
+        entity: &Entity<T>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            entity,
+            window,
+            move |this, _, StepDone(result), window, cx| {
+                this.results[index_of(step)] = result.clone();
+                if step.changes_folder() {
+                    this.rescan(window, cx);
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+    }
+
+    fn screen(&self, step: Step) -> Option<&dyn AnyScreen> {
+        self.screens
+            .iter()
+            .find(|(s, _)| *s == step)
+            .map(|(_, screen)| screen.as_ref())
     }
 
     fn busy(&self, cx: &App) -> bool {
         self.batches.iter().flatten().any(|b| b.read(cx).running())
-            || self.torrent_check.read(cx).running()
+            || self.screens.iter().any(|(_, s)| s.running(cx))
     }
 
     /// A new show folder: every screen's last result was about the old one, so they go.
+    /// The screens hear about it once it has been scanned.
     fn set_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // Resolved once, so `<folder>` in a checksum or torrent name is the folder's real
         // name even when it was given as `.`.
@@ -148,13 +198,37 @@ impl Workspace {
         if !dir.is_dir() || self.busy(cx) {
             return;
         }
-        self.summary = steps::summarize(&dir).into();
         self.results.fill(StepResult::NotRun);
         self.batches.fill(None);
-        self.torrent_check
-            .update(cx, |c, cx| c.use_folder(&dir, window, cx));
-        self.folder = Some(dir);
+        self.scanning = true;
+        self.summary = "Scanning…".into();
+        self.folder = Some(dir.clone());
+        scan_then(dir, window, cx, |this, dir, scan, window, cx| {
+            // A folder chosen while this one was scanning wins.
+            if this.folder.as_ref() != Some(dir) {
+                return;
+            }
+            for (_, screen) in &this.screens {
+                screen.use_folder(dir, &scan.audio, window, cx);
+            }
+            this.summary = scan.summary.into();
+            this.scanning = false;
+            cx.notify();
+        });
         cx.notify();
+    }
+
+    /// Refreshes the summary after a run changed what is in the folder.
+    fn rescan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.folder.clone() else {
+            return;
+        };
+        scan_then(dir, window, cx, |this, dir, scan, _, cx| {
+            if this.folder.as_ref() == Some(dir) {
+                this.summary = scan.summary.into();
+                cx.notify();
+            }
+        });
     }
 
     /// A path from the command line or a drop: a folder becomes the show folder, a
@@ -206,15 +280,7 @@ impl Workspace {
             Some(b) => b.clone(),
             None => {
                 let b = cx.new(|cx| Batch::new(window, cx));
-                cx.subscribe(&b, move |this, _, Finished(result), cx| {
-                    this.results[index] = result.clone();
-                    // A conversion or a written list changes what is in the folder.
-                    if let Some(dir) = &this.folder {
-                        this.summary = steps::summarize(dir).into();
-                    }
-                    cx.notify();
-                })
-                .detach();
+                self.watch(step, &b, window, cx);
                 self.batches[index] = Some(b.clone());
                 b
             }
@@ -353,14 +419,25 @@ impl Workspace {
 
         let body: AnyElement = if let Some(command) = item.tui_only {
             self.render_tui_only(command, cx).into_any_element()
-        } else {
-            match item.step {
-                Step::TorrentCheck => self.torrent_check.clone().into_any_element(),
-                Step::TorrentInfo => self.render_torrent_info(cx).into_any_element(),
-                _ => self
-                    .render_batch_page(index, item, window, cx)
-                    .into_any_element(),
+        } else if item.step.needs_folder() && self.folder.is_none() {
+            self.render_no_folder(cx).into_any_element()
+        } else if let Some(screen) = self.screen(item.step) {
+            if item.step.needs_folder() && self.scanning {
+                card(cx, "Show folder")
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Scanning the folder…"),
+                    )
+                    .into_any_element()
+            } else {
+                screen.view().into_any_element()
             }
+        } else if item.step == Step::TorrentInfo {
+            self.render_torrent_info(cx).into_any_element()
+        } else {
+            self.render_batch_page(index, item, window, cx)
+                .into_any_element()
         };
 
         v_flex()
@@ -428,7 +505,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(dir) = self.folder.clone() else {
-            return self.render_no_folder(cx).into_any_element();
+            unreachable!("render_page shows no batch page without a folder");
         };
         let batch = self.batches[index].clone();
         let running = batch.as_ref().is_some_and(|b| b.read(cx).running());

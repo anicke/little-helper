@@ -575,8 +575,8 @@ confirmed — `run_torrent_create` no longer calls `resolve()` itself; it only l
 `TrackerList`/`Passkeys` before `ratatui::init()`, same as before, and hands the raw
 `TorrentCreateArgs` to the screen.
 
-* **Two widgets, one `CreateFocus`.** A `List` of `TrackerList::iter()`'s entries (id, name,
-  `Health::label()`) with an app-owned `cursor: usize` and a `ListState` built fresh each
+* **Two widgets, one `CreateFocus`.** A `List` of `TrackerList::responding()`'s entries (id, name,
+  announce URL) with an app-owned `cursor: usize` and a `ListState` built fresh each
   frame purely for the selection highlight — the same pattern `draw_titles` (§7) uses — plus
   one `Field` (§7's single-line text widget, reused verbatim) for a comma-separated custom
   id/URL. `CreateFocus::None` is "nothing is being edited," the same convention

@@ -16,11 +16,7 @@ pub(crate) fn cmd_rename(args: &RenameArgs) -> Result<bool> {
     if !args.dir.is_dir() {
         anyhow::bail!("{} is not a directory", args.dir.display());
     }
-    let show_name = args
-        .dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(ShowName::parse);
+    let show_name = ShowName::from_dir(&args.dir);
 
     let band = args
         .band
@@ -53,15 +49,7 @@ pub(crate) fn cmd_rename(args: &RenameArgs) -> Result<bool> {
         anyhow::bail!("no audio files found in {}", args.dir.display());
     }
 
-    let spec = NameSpec {
-        band,
-        date,
-        short_year: args.short_year,
-        disc: args.disc,
-        // No `--keep-suffix` flag (docs/tagging.md §5): keeping a title suffix a file
-        // already carries costs nothing when there is none, so it is always on here.
-        keep_suffix: true,
-    };
+    let spec = NameSpec::new(band, date, args.short_year, args.disc);
     let files: Vec<PathBuf> = set.files.iter().map(|f| f.path.clone()).collect();
     let plan = plan_rename(&files, &spec);
     print_rename_plan(&plan);

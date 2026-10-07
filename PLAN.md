@@ -22,7 +22,7 @@ Independent project, not affiliated with the author of Traders' Little Helper.
 | M2 `lh-cli` | **done** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers`, `tag`, `rename`, `setlist` all work |
 | M3 `lh-gui` | **done** for §8's contents (table, drag and drop, operation panel, job queue, log pane, Tools panel); open only for the tag, rename and sbe-fix screens — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell revamp is done: [docs/gui-shell.md](docs/gui-shell.md), S1–S4 all done (rail shell, selection, checksum areas, `iced::widget::table`). Tag/rename ([docs/tagging.md](docs/tagging.md)) has no GUI screen yet |
 | `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `check`, `convert`, `sbe fix`, `torrent create`/`check`/`info`, `tag`/`rename`, `setlist` and `sample` have real live screens, everything else runs headless like `lh` itself |
-| gpui-kit trial | **experiment, not a milestone** — `experiments/lh-gpui`, outside the workspace and CI; see §4 "gpui-kit trial". `lh-tui`'s workspace as a window: verify, sbe, convert → FLAC/WAV, check checksums, create ffp/md5/st5, torrent info and torrent check ported; rename, tag, setlist, sample, sbe fix and torrent create not yet |
+| gpui-kit trial | **experiment, not a milestone** — `experiments/lh-gpui`, outside the workspace and CI; see §4 "gpui-kit trial". `lh-tui`'s workspace as a window: verify, sbe, convert → FLAC/WAV, check checksums, create ffp/md5/st5, rename, torrent info and torrent check ported; tag, setlist, sample, sbe fix and torrent create not yet |
 | Architecture cleanup | **in progress** — behaviour-preserving refactors across all four crates, see [docs/architecture-cleanup.md](docs/architecture-cleanup.md) (A1–A6): A1 done (`ChecksumKind::from_path`, `checksum::check_entry`, `scan::collect`, `convert::destination` returning `Result`, and `lh_core::display` now hold what each front end used to reimplement); A2 done (`lh-cli`'s public surface is now just `Cli`/`Command`/the arg structs/`run`; `lh-tui` reaches `lh-core` directly for collecting files and telling a checksum kind, rather than through `lh-cli`'s internals); A3 done (`convert::to_wav`, `convert::to_flac`, `torrent::create` and `torrent::check` all take one `&mut dyn FnMut(u32, u32) -> bool` callback — `check` gained the cancellation checkpoint it lacked, wired through in both the GUI and TUI); A4 done (SBE repair moved out of `analysis` into its own top-level `repair` module, so `analysis` is now only `sbe`/`verify`, read-only as its doc says; `tag::{read_comment_block, restore_comment_block}`, `output` and `format::wav::WavLayout` are `pub(crate)`, no longer reachable outside `lh-core`); A5 done (each front end split into per-command modules); A6 done (`lh-tui`'s `TerminalGuard` replaces the hand-paired `ratatui::init`/`restore` (and bracketed-paste) sites, and one generic `batch::run_batch` over a `RowStatus` trait drives verify, checksum, check, sbe and convert; the editor screens share the guard and `draw_gauge` only) |
 | M4 Packaging | not started |
 
@@ -304,13 +304,16 @@ sidebar marks each screen's last result.
 
 * **Ported:** the batch screens — verify, sbe, convert → FLAC and → WAV, check checksums
   (every list in the folder, as one table), create ffp/md5/st5 — through one shared batch
-  view (the counterpart of `lh-tui/src/batch.rs`); torrent info; torrent check, which takes
+  view (the counterpart of `lh-tui/src/batch.rs`); rename, seeded from an etree folder
+  name, previewing the plan as the fields change and saying what is missing when there is
+  none, then running `execute_rename` as one job (all or nothing, as in the TUI), with
+  "Edit again" rescanning the renamed folder; torrent info; torrent check, which takes
   the folder's torrent and shares it with torrent info. Unlike the TUI, a screen waits for
   Run rather than starting when opened.
-* **Not yet:** rename, tag, setlist, sample, sbe fix, torrent create — listed, pointing at
-  their `lh-tui` command. Tag and rename are the natural next pair.
+* **Not yet:** tag, setlist, sample, sbe fix, torrent create — listed, pointing at
+  their `lh-tui` command. Tag is next.
 * **Evidence:** builds, clippy-clean, launches; unit tests run every batch step's jobs and
-  result against copies of the `lh-core` fixtures. It has been looked at by the user, not
+  result against copies of the `lh-core` fixtures, and rename's spec parsing and folder-name seeding. It has been looked at by the user, not
   by screenshot — screen capture is still blocked on this machine.
 
 Open: whether gpui-kit replaces Iced for `lh-gui`. That is decided once the editor screens

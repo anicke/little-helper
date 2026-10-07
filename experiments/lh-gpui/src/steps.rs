@@ -8,7 +8,7 @@ use lh_core::analysis::{Sbe, Verification, sbe, verify};
 use lh_core::checksum::{ChecksumFile, ChecksumKind, Entry, EntryOutcome, check_entry, compute};
 use lh_core::convert::{EncodeOpts, ORIGINALS_DIR, destination, to_flac, to_wav};
 use lh_core::model::{AudioFile, AudioFormat};
-use lh_core::scan;
+use lh_core::scan::{self, WorkingSet};
 use lh_core::tools::{Registry, ToolId};
 use lh_core::torrent::{Metainfo, default_output};
 use std::path::{Path, PathBuf};
@@ -72,12 +72,11 @@ pub const MENU: [(&str, &[Item]); 4] = [
     (
         "Prepare",
         &[
-            tui(
+            item(
                 Step::Rename,
                 "Rename",
                 "Name files from band, date and track.",
                 IconName::PencilLine,
-                "rename",
             ),
             item(
                 Step::ConvertFlac,
@@ -193,9 +192,26 @@ pub const MENU: [(&str, &[Item]); 4] = [
     ),
 ];
 
+impl Step {
+    /// Whether the screen works on the show folder; the torrent screens can take a
+    /// `.torrent` without one.
+    pub fn needs_folder(self) -> bool {
+        !matches!(self, Step::TorrentInfo | Step::TorrentCheck)
+    }
+
+    /// Whether a run can change what the folder summary counts: the files and their
+    /// formats. A rename keeps both; a conversion or a written list does not.
+    pub fn changes_folder(self) -> bool {
+        matches!(self, Step::ConvertFlac | Step::ConvertWav | Step::Create(_))
+    }
+}
+
 pub fn items() -> impl Iterator<Item = &'static Item> {
     MENU.iter().flat_map(|(_, items)| items.iter())
 }
+
+/// How a screen's run went — what every screen, batch or not, tells the workspace.
+pub struct StepDone(pub StepResult);
 
 /// How a screen last went, shown on its page and beside it in the sidebar.
 #[derive(Clone)]
@@ -224,18 +240,41 @@ pub fn file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// One show folder's audio files, not recursive; refuses a folder with none.
-fn scan_folder(dir: &Path) -> Result<Vec<AudioFile>, String> {
-    let set = scan::scan(dir, false).map_err(|e| format!("scanning {}: {e:#}", dir.display()))?;
+/// A show folder's audio files, or why there are none to work on.
+pub type Audio = Result<Vec<AudioFile>, String>;
+
+/// What one scan of a show folder found.
+pub struct FolderScan {
+    /// By format — `12 files: 12 WAV`.
+    pub summary: String,
+    pub audio: Audio,
+}
+
+/// Scans a show folder, not recursively. It probes every audio file, so the window does
+/// this off the UI thread (`ui::scan_then`).
+pub fn scan_show(dir: &Path) -> FolderScan {
+    let scanned = scan::scan(dir, false);
+    FolderScan {
+        summary: summary(&scanned),
+        audio: audio_files(dir, scanned),
+    }
+}
+
+/// One show folder's audio files; refuses a folder with none.
+fn scan_folder(dir: &Path) -> Audio {
+    audio_files(dir, scan::scan(dir, false))
+}
+
+fn audio_files(dir: &Path, scanned: lh_core::Result<WorkingSet>) -> Audio {
+    let set = scanned.map_err(|e| format!("scanning {}: {e:#}", dir.display()))?;
     if set.files.is_empty() {
         return Err(format!("No audio files in {}.", file_name(dir)));
     }
     Ok(set.files)
 }
 
-/// What is in the folder right now, by format — `12 files: 12 WAV`.
-pub fn summarize(dir: &Path) -> String {
-    let set = match scan::scan(dir, false) {
+fn summary(scanned: &lh_core::Result<WorkingSet>) -> String {
+    let set = match scanned {
         Ok(s) => s,
         Err(e) => return format!("scanning failed: {e:#}"),
     };

@@ -258,11 +258,8 @@ pub(crate) fn cmd_torrent_trackers() -> Result<bool> {
         }
     }
 
-    let usable = list
-        .iter()
-        .filter(|t| t.health.responds() && t.health.usable())
-        .count();
-    let total = list.iter().filter(|t| t.health.responds()).count();
+    let usable = list.responding().filter(|t| t.health.usable()).count();
+    let total = list.responding().count();
     println!("{usable} of {total} entries can be used as they stand.");
     match &list.user_list {
         Some(path) if path.exists() => println!("your own list: {}", path.display()),

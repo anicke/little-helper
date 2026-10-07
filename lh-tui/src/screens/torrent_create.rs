@@ -207,7 +207,9 @@ pub(crate) fn run_torrent_create_screen(
     keys: &Passkeys,
     theme: Theme,
 ) -> io::Result<lh_core::Result<Created>> {
-    let entries: Vec<Tracker> = list.iter().cloned().collect();
+    // Only trackers that answered when last checked — the same cut `lh torrent trackers`
+    // makes. A broken or unreachable entry can still be typed by id into the custom field.
+    let entries: Vec<Tracker> = list.responding().cloned().collect();
     let mut picked: Vec<String> = args.trackers.clone();
     let mut cursor = 0usize;
     let mut custom = Field::default();
@@ -557,7 +559,7 @@ pub(crate) fn draw_tracker_picker(
                 Span::styled(format!("{marker}{mark} "), theme.dim),
                 Span::styled(format!("{:<14}", t.id), style),
                 Span::styled(format!("{:<26}", t.name), style),
-                Span::styled(t.health.label(), theme.dim),
+                Span::styled(t.announce.clone(), theme.dim),
             ]))
         })
         .collect();

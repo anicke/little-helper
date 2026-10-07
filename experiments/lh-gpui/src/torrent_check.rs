@@ -22,8 +22,9 @@ use lh_core::job::{Event, Queue};
 use lh_core::torrent::{FileStatus, Metainfo, TorrentReport, Verdict, check, check_sizes};
 use std::path::{Path, PathBuf};
 
-use crate::steps::{StepResult, find_torrent};
-use crate::ui::card;
+use crate::screen::Screen;
+use crate::steps::{Audio, StepDone, StepResult, find_torrent};
+use crate::ui::{bridge, card};
 
 type Outcome = lh_core::Result<TorrentReport>;
 
@@ -147,14 +148,30 @@ pub struct TorrentCheck {
     table: Entity<TableState<Results>>,
 }
 
-/// What the workspace hears from this screen.
-pub enum TorrentEvent {
-    /// A different torrent (or none) is now chosen.
-    Loaded,
-    Checked(StepResult),
-}
+/// A different torrent (or none) is now chosen, for Torrent info to show.
+pub struct TorrentLoaded;
 
-impl EventEmitter<TorrentEvent> for TorrentCheck {}
+impl EventEmitter<TorrentLoaded> for TorrentCheck {}
+impl EventEmitter<StepDone> for TorrentCheck {}
+
+impl Screen for TorrentCheck {
+    fn running(&self) -> bool {
+        matches!(self.run, RunState::Running { .. })
+    }
+
+    /// Check against the folder, and take its torrent if it has one.
+    fn use_folder(&mut self, dir: &Path, _: &Audio, window: &mut Window, cx: &mut Context<Self>) {
+        if self.running() {
+            return;
+        }
+        let shown = dir.display().to_string();
+        self.against
+            .update(cx, |s, cx| s.set_value(shown, window, cx));
+        if let Ok((file, _)) = find_torrent(dir) {
+            self.pick_torrent(file, window, cx);
+        }
+    }
+}
 
 impl TorrentCheck {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -164,24 +181,8 @@ impl TorrentCheck {
         let table = cx.new(|cx| TableState::new(Results { rows: Vec::new() }, window, cx));
         let queue = Queue::new();
 
-        // Bridge the queue's blocking crossbeam receiver onto gpui: wait on the background
-        // executor, apply on the foreground. Ends when the view (and so the queue) drops.
-        let rx = queue.events();
-        cx.spawn(async move |this, cx| {
-            loop {
-                let rx = rx.clone();
-                let Ok(event) = cx.background_spawn(async move { rx.recv() }).await else {
-                    break;
-                };
-                if this
-                    .update(cx, |this, cx| this.on_event(event, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        // Ends when the view (and so the queue) drops.
+        bridge(&queue, cx, Self::on_event);
 
         Self {
             torrent_path: None,
@@ -221,25 +222,8 @@ impl TorrentCheck {
             t.delegate_mut().rows.clear();
             t.refresh(cx);
         });
-        cx.emit(TorrentEvent::Loaded);
+        cx.emit(TorrentLoaded);
         cx.notify();
-    }
-
-    /// A new show folder: check against it, and take its torrent if it has one.
-    pub fn use_folder(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if self.running() {
-            return;
-        }
-        let shown = dir.display().to_string();
-        self.against
-            .update(cx, |s, cx| s.set_value(shown, window, cx));
-        if let Ok((file, _)) = find_torrent(dir) {
-            self.pick_torrent(file, window, cx);
-        }
-    }
-
-    pub fn running(&self) -> bool {
-        matches!(self.run, RunState::Running { .. })
     }
 
     pub fn browse_torrent(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -320,7 +304,7 @@ impl TorrentCheck {
                     },
                     Err(e) => StepResult::Unclean(e.to_string()),
                 };
-                cx.emit(TorrentEvent::Checked(result));
+                cx.emit(StepDone(result));
                 self.run = RunState::Finished(match output {
                     Ok(report) => {
                         let verdict = report.verdict();

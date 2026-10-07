@@ -236,6 +236,11 @@ pub struct ShowName {
 }
 
 impl ShowName {
+    /// The show a folder's own name gives, when it is an etree show name.
+    pub fn from_dir(dir: &std::path::Path) -> Option<Self> {
+        dir.file_name()?.to_str().and_then(Self::parse)
+    }
+
     pub fn parse(name: &str) -> Option<Self> {
         let mut parts = name.split('.');
         let (band, date, year_form, rest) = split_band_date(parts.next()?)?;

@@ -310,6 +310,12 @@ impl TrackerList {
             .filter(|t| t.origin != Origin::Overridden)
     }
 
+    /// The choosable entries that answered when last checked ([`Health::responds`]) —
+    /// what a picker offers and what `lh torrent trackers` counts.
+    pub fn responding(&self) -> impl Iterator<Item = &Tracker> {
+        self.iter().filter(|t| t.health.responds())
+    }
+
     /// Every entry, replaced ones included.
     pub fn all(&self) -> impl Iterator<Item = &Tracker> {
         self.entries.iter()

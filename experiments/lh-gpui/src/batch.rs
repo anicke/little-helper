@@ -15,7 +15,8 @@ use gpui_kit::*;
 use lh_core::job::{self, Event, Queue};
 use std::time::{Duration, Instant};
 
-use crate::steps::StepResult;
+use crate::steps::{StepDone, StepResult};
+use crate::ui::bridge;
 
 /// How a finished row's status reads.
 #[derive(Clone, Copy)]
@@ -179,9 +180,6 @@ fn tag(tone: Tone) -> Tag {
     }
 }
 
-/// Emitted once a run has every row in, with what the step made of it.
-pub struct Finished(pub StepResult);
-
 pub struct Batch {
     table: Entity<TableState<Rows>>,
     labels: &'static [&'static str],
@@ -193,7 +191,7 @@ pub struct Batch {
     took: Option<Duration>,
 }
 
-impl EventEmitter<Finished> for Batch {}
+impl EventEmitter<StepDone> for Batch {}
 
 impl Batch {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -263,25 +261,12 @@ impl Batch {
             });
         }
 
-        // Bridge the queue's blocking receiver onto gpui. It ends when the run is over and
-        // the queue dropped, so a finished batch holds no background thread.
-        let rx = queue.events();
+        // Ends when the run is over and the queue dropped, so a finished batch holds no
+        // background thread.
         let generation = self.generation;
-        cx.spawn(async move |this, cx| {
-            loop {
-                let rx = rx.clone();
-                let Ok(event) = cx.background_spawn(async move { rx.recv() }).await else {
-                    break;
-                };
-                if this
-                    .update(cx, |this, cx| this.on_event(generation, event, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        bridge(&queue, cx, move |this, event, cx| {
+            this.on_event(generation, event, cx)
+        });
 
         self.queue = Some(queue);
         cx.notify();
@@ -326,7 +311,7 @@ impl Batch {
                     .iter()
                     .map(|r| r.state.digest())
                     .collect();
-                cx.emit(Finished(finish(clean, digests)));
+                cx.emit(StepDone(finish(clean, digests)));
             }
         }
         cx.notify();

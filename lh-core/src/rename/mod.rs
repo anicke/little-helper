@@ -28,7 +28,52 @@ pub struct NameSpec {
     pub keep_suffix: bool,
 }
 
+/// Why typed fields do not make a [`NameSpec`] yet.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SpecError {
+    #[error("no band")]
+    NoBand,
+    #[error("{0:?} is not a date as YYYY-MM-DD or YY-MM-DD")]
+    BadDate(String),
+    #[error("disc {0:?} is not a number")]
+    BadDisc(String),
+}
+
 impl NameSpec {
+    /// The spec every front end renames with: a file's title suffix is always carried
+    /// forward. There is no `--keep-suffix` flag (docs/tagging.md §5) — keeping a suffix
+    /// costs nothing when a file has none.
+    pub fn new(band: String, date: ShowDate, short_year: bool, disc: Option<u32>) -> Self {
+        Self {
+            band,
+            date,
+            short_year,
+            disc,
+            keep_suffix: true,
+        }
+    }
+
+    /// A spec from the fields an editor screen shows, each trimmed: a band, a date as
+    /// `YYYY-MM-DD` or `YY-MM-DD`, and a disc number, empty for a set without discs.
+    pub fn from_fields(
+        band: &str,
+        date: &str,
+        disc: &str,
+        short_year: bool,
+    ) -> std::result::Result<Self, SpecError> {
+        let band = band.trim();
+        if band.is_empty() {
+            return Err(SpecError::NoBand);
+        }
+        let date = date.trim();
+        let (date, _) = ShowDate::parse(date).ok_or_else(|| SpecError::BadDate(date.into()))?;
+        let disc = match disc.trim() {
+            "" => None,
+            d => Some(d.parse().map_err(|_| SpecError::BadDisc(d.into()))?),
+        };
+        Ok(Self::new(band.to_string(), date, short_year, disc))
+    }
+
     fn year_form(&self) -> YearForm {
         if self.short_year {
             YearForm::Short
@@ -68,6 +113,14 @@ impl RenamePlan {
         self.entries
             .iter()
             .any(|e| e.status == RenameStatus::Collision)
+    }
+
+    /// How many files the plan would actually rename.
+    pub fn changed(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.status == RenameStatus::Changed)
+            .count()
     }
 }
 
@@ -233,6 +286,35 @@ mod tests {
             disc: None,
             keep_suffix: false,
         }
+    }
+
+    #[test]
+    fn from_fields_trims_and_says_which_field_is_wrong() {
+        let s = NameSpec::from_fields(" gd ", " 77-05-08 ", " 2 ", true).unwrap();
+        assert_eq!(
+            (s.band.as_str(), s.disc, s.short_year),
+            ("gd", Some(2), true)
+        );
+        assert_eq!(s.date, ShowDate::new(1977, 5, 8).unwrap());
+        assert!(s.keep_suffix);
+        assert_eq!(
+            NameSpec::from_fields("gd", "1977-05-08", "", false)
+                .unwrap()
+                .disc,
+            None
+        );
+        assert_eq!(
+            NameSpec::from_fields(" ", "1977-05-08", "", false).unwrap_err(),
+            SpecError::NoBand
+        );
+        assert_eq!(
+            NameSpec::from_fields("gd", "1977-5-8", "", false).unwrap_err(),
+            SpecError::BadDate("1977-5-8".into())
+        );
+        assert_eq!(
+            NameSpec::from_fields("gd", "1977-05-08", "two", false).unwrap_err(),
+            SpecError::BadDisc("two".into())
+        );
     }
 
     #[test]

@@ -146,11 +146,7 @@ pub(crate) fn prepare_tag(args: &TagArgs, files: Vec<AudioFile>) -> Result<TagSe
         }
     }
 
-    let show_name = args
-        .dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(ShowName::parse);
+    let show_name = ShowName::from_dir(&args.dir);
 
     // Seed the show-level fields from the first file that already carries any
     // tags, then from the folder name's own date where that leaves it blank
