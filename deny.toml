@@ -6,7 +6,7 @@ all-features = true
 [advisories]
 # Every vulnerability advisory fails the check, anywhere in the tree. "Unmaintained" notices
 # only fail for our direct dependencies: deeper ones (today ttf-parser and paste, both via
-# iced) can only be fixed upstream.
+# a GUI toolkit) can only be fixed upstream.
 unmaintained = "workspace"
 yanked = "deny"
 
@@ -23,6 +23,9 @@ allow = [
     "Unicode-3.0",
     "BSL-1.0",
     "CC0-1.0",
+    "0BSD",
+    # libbz2-rs-sys, via gpui: BSD-style, permissive.
+    "bzip2-1.0.6",
     # File-level copyleft; fine to ship unmodified (option-ext, via directories).
     "MPL-2.0",
 ]

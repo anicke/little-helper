@@ -28,7 +28,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # lh-gui needs system deps on Linux; core and cli do not.
+      # lh-gui (gpui) links xcb, xkbcommon and fontconfig on Linux; core and cli do not.
       #
       # `flac` and `mktorrent` are the oracles the conversion and torrent-creation tests
       # compare against. Both are deterministic pure computation, so running them on a
@@ -40,7 +40,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev flac mktorrent
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev flac mktorrent
       - name: Install the reference flac
         if: runner.os == 'macOS'
         run: brew install flac
@@ -61,7 +61,7 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+      - run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
 

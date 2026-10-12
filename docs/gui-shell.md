@@ -1,5 +1,8 @@
 # GUI shell
 
+> **Historical.** This describes the Iced app, which gpui-kit replaced as `lh-gui` on
+> 2026-10-12 (`PLAN.md` §4 "gpui-kit desktop app"). Kept for the decisions it records.
+
 `lh-gui` works but has no shape. G1–G4 (`docs/gui.md`) each bolted one more panel onto the
 bottom of a single `column!`, and the window now renders **ten stacked regions at once** —
 path bar, file table, operation picker, torrent-create form, torrent-check form, torrent

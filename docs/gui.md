@@ -1,5 +1,8 @@
 # GUI
 
+> **Historical.** This describes the Iced app, which gpui-kit replaced as `lh-gui` on
+> 2026-10-12 (`PLAN.md` §4 "gpui-kit desktop app"). Kept for the decisions it records.
+
 `lh-gui`, milestone M3 in `PLAN.md` — the last v0.1 piece besides packaging (M4). Everything
 in `PLAN.md` §2's scope table is implemented and exposed through `lh-cli` already (M1/M2
 done, §0); this crate is a second front end onto the same `lh-core`, per Principle 4. It adds

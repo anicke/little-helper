@@ -32,11 +32,13 @@ tracing = "0.1"
 crossbeam-channel = "0.5"
 rayon = "1"
 ctrlc = "3"
-iced = "0.14"
-iced_fonts = { version = "0.3", default-features = false, features = ["lucide"] }
-rfd = "0.17"
+gpui-kit = "0.7"
 ratatui = "0.30"
 crossterm = "0.29"
+
+# gpui with full debuginfo is ~9 GB of build output; keep debuginfo for our own crates only.
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 lto = "thin"

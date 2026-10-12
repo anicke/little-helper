@@ -619,8 +619,8 @@ pub(crate) mod tests {
 
     /// A show folder of fixtures, fresh per test.
     pub(crate) fn show(name: &str, fixtures: &[&str]) -> PathBuf {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lh-core/tests/fixtures");
-        let dir = std::env::temp_dir().join(format!("lh-gpui-test-{}-{name}", std::process::id()));
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lh-core/tests/fixtures");
+        let dir = std::env::temp_dir().join(format!("lh-gui-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for f in fixtures {

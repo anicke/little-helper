@@ -13,16 +13,14 @@ Independent project, not affiliated with the author of Traders' Little Helper.
 
 ## 0. Status
 
-*Updated 2026-10-05.*
+*Updated 2026-10-12.*
 
 | Milestone | State |
 |---|---|
 | M0 Scaffold | **done** — workspace, CI matrix, toolchain pin, fixture generator |
 | M1 `lh-core` | **done** — every §8 item is in place, and it has grown past them: probe, checksums, SBE, verify, scan, tool registry, conversion, torrent read/write/tracker list, job queue (J1, J2) done; SBE repair ([docs/sbe-repair.md](docs/sbe-repair.md), R1–R5) done for FLAC and WAV, including the TUI screen and in-place fixing; etree naming, tagging and rename ([docs/tagging.md](docs/tagging.md), N1–N3) done; the info `.txt` setlist ([docs/info-file.md](docs/info-file.md), I1) done; MP3 sample clips under a size limit (`lh sample`, [docs/sample.md](docs/sample.md)) done, through `lame` or `ffmpeg` |
 | M2 `lh-cli` | **done** — `info`, `verify`, `sbe`, `sbe fix` (plan and execute, any number of files), `ffp`, `md5`, `st5`, `check`, `convert`, `tools`, `torrent info/create/check/trackers`, `tag`, `rename`, `setlist` all work |
-| M3 `lh-gui` | **done** for §8's contents (table, drag and drop, operation panel, job queue, log pane, Tools panel); open only for the tag, rename and sbe-fix screens — see [docs/gui.md](docs/gui.md); G0–G4 all done (spike, scaffold + file table + Tools panel, job queue, convert + log pane, torrent panels). The shell revamp is done: [docs/gui-shell.md](docs/gui-shell.md), S1–S4 all done (rail shell, selection, checksum areas, `iced::widget::table`). Tag/rename ([docs/tagging.md](docs/tagging.md)) has no GUI screen yet |
-| `lh-tui` | **in progress, not a numbered milestone** — a second, independent front end (§4 note below); see [docs/tui.md](docs/tui.md). Every `lh` subcommand is callable; `verify`, `ffp`/`md5`/`st5`, `check`, `convert`, `sbe fix`, `torrent create`/`check`/`info`, `tag`/`rename`, `setlist` and `sample` have real live screens, everything else runs headless like `lh` itself |
-| gpui-kit trial | **experiment, not a milestone** — `experiments/lh-gpui`, outside the workspace and CI; see §4 "gpui-kit trial". `lh-tui`'s workspace as a window: verify, sbe, convert → FLAC/WAV, check checksums, create ffp/md5/st5, rename, tag, setlist, sample, torrent info and torrent check ported; sbe fix and torrent create not yet |
+| M3 `lh-gui` | **replaced by gpui-kit on 2026-10-12** — the iced app (G0–G4, S1–S4; [docs/gui.md](docs/gui.md), [docs/gui-shell.md](docs/gui-shell.md), now historical) gave way to the gpui-kit trial, which moved from `experiments/lh-gpui` into `lh-gui` and the workspace, CI and cargo-deny; see §4 "gpui-kit desktop app". `lh-tui`'s workspace as a window: verify, sbe, convert → FLAC/WAV, check checksums, create ffp/md5/st5, rename, tag, setlist, sample, torrent info and torrent check; sbe fix and torrent create not yet (the iced app had torrent create; until it is ported, use `lh-tui`) |
 | Architecture cleanup | **in progress** — behaviour-preserving refactors across all four crates, see [docs/architecture-cleanup.md](docs/architecture-cleanup.md) (A1–A6): A1 done (`ChecksumKind::from_path`, `checksum::check_entry`, `scan::collect`, `convert::destination` returning `Result`, and `lh_core::display` now hold what each front end used to reimplement); A2 done (`lh-cli`'s public surface is now just `Cli`/`Command`/the arg structs/`run`; `lh-tui` reaches `lh-core` directly for collecting files and telling a checksum kind, rather than through `lh-cli`'s internals); A3 done (`convert::to_wav`, `convert::to_flac`, `torrent::create` and `torrent::check` all take one `&mut dyn FnMut(u32, u32) -> bool` callback — `check` gained the cancellation checkpoint it lacked, wired through in both the GUI and TUI); A4 done (SBE repair moved out of `analysis` into its own top-level `repair` module, so `analysis` is now only `sbe`/`verify`, read-only as its doc says; `tag::{read_comment_block, restore_comment_block}`, `output` and `format::wav::WavLayout` are `pub(crate)`, no longer reachable outside `lh-core`); A5 done (each front end split into per-command modules); A6 done (`lh-tui`'s `TerminalGuard` replaces the hand-paired `ratatui::init`/`restore` (and bracketed-paste) sites, and one generic `batch::run_batch` over a `RowStatus` trait drives verify, checksum, check, sbe and convert; the editor screens share the guard and `draw_gauge` only) |
 | M4 Packaging | not started |
 
@@ -194,7 +192,7 @@ little-helper/            cargo workspace
 │   └── config.rs         where config files live (LH_CONFIG_DIR, then the platform's)
 ├── lh-cli/               headless batch (clap): the grammar, every cmd_*, and run
 ├── lh-tui/               terminal UI (ratatui); shares lh-cli's Cli/Command grammar
-└── lh-gui/               iced 0.14
+└── lh-gui/               desktop app (gpui-kit 0.7); `run.sh` builds it without -dev packages
 ```
 
 ### The tool registry
@@ -286,12 +284,13 @@ Note the name collision that doc resolves: TLH's own **Tools** menu means *repai
 (fix SBEs, strip header, create skt), all of which is v0.2 here. The GUI calls the
 discovered-binary registry above **Binaries** so that `Tools` stays free for TLH's meaning.
 
-### gpui-kit trial
+### gpui-kit desktop app
 
-*Started 2026-09-28, widened 2026-10-05.* `experiments/lh-gpui` tries gpui-kit 0.7 as an
-alternative to Iced. It lives outside the workspace with its own lockfile and toolchain pin
-(Rust 1.96), so gpui's dependency tree and system libraries stay out of CI and cargo-deny;
-`run.sh` builds it without the `-dev` system packages. Like every front end it adds no
+*Started 2026-09-28 as a trial in `experiments/lh-gpui`, widened 2026-10-05, made `lh-gui`
+2026-10-12, replacing the Iced app.* It needs Rust 1.96 (gpui uses `cold_path`), so `lh-gui`
+sets its own `rust-version`; the rest of the workspace keeps 1.85. On Linux it links xcb,
+xkbcommon and fontconfig (CI installs their `-dev` packages); `lh-gui/run.sh` builds it
+without them. Like every front end it adds no
 domain logic: jobs go through `lh_core::job::Queue`, so progress and Cancel behave as in
 `lh-gui` and `lh-tui`.
 
@@ -327,8 +326,8 @@ sidebar marks each screen's last result.
   refusal to replace, and sample's field parsing, size line and track loading. It has been looked at by the user, not
   by screenshot — screen capture is still blocked on this machine.
 
-Open: whether gpui-kit replaces Iced for `lh-gui`. That is decided once the editor screens
-are ported and it has been used on real shows, not before.
+Decided 2026-10-12: gpui-kit replaces Iced. The Iced app's docs (`docs/gui.md`,
+`docs/gui-shell.md`) stay as history.
 
 ---
 
@@ -336,10 +335,9 @@ are ported and it has been used on real shows, not before.
 
 | Concern | Crate |
 |---|---|
-| GUI | `iced` 0.14 |
+| GUI | `gpui-kit` 0.7 |
 | FLAC decode / STREAMINFO | `claxon`, `metaflac` |
 | Hashing | `md-5` |
-| File dialogs | `rfd` |
 | Directory walk | `walkdir` |
 | Tool discovery | `which` |
 | CLI | `clap` |
