@@ -9,8 +9,8 @@ use lh_cli::SampleArgs;
 use lh_core::job::{Event, Queue};
 use lh_core::model::AudioFile;
 use lh_core::sample::{
-    self, Clip, Mode, Request, Sample, estimate_bytes, format_size, format_time, longest_fitting,
-    parse_size, parse_time,
+    self, Clip, Mode, Request, Sample, estimate_bytes, format_length, format_limit, format_size,
+    format_time, longest_fitting, parse_size, parse_time,
 };
 use lh_core::tag::{self, Field as TagField};
 use lh_core::tools::Tool;
@@ -224,7 +224,7 @@ impl State {
             focus: Focus::Tracks,
             start: Field::default(),
             length: Field::default(),
-            limit: Field::new(size_text(setup.max_bytes)),
+            limit: Field::new(format_limit(setup.max_bytes)),
             mode,
             output_for: setup.output.as_ref().map(|_| setup.selected),
             status: Status::Idle,
@@ -236,7 +236,7 @@ impl State {
         if let Some(length) = state.setup.length {
             let clip = Clip::centred(state.track().secs, length);
             state.start = Field::new(format_time(clip.start));
-            state.length = Field::new(secs_text(length));
+            state.length = Field::new(format_length(length));
         }
         if let Some(start) = state.setup.start {
             state.start = Field::new(format_time(start));
@@ -272,7 +272,7 @@ impl State {
         let max = parse_size(&self.limit.value).unwrap_or(sample::DEFAULT_MAX_BYTES);
         let clip = Clip::default_for(self.track().secs, self.mode(), max);
         self.start = Field::new(format_time(clip.start));
-        self.length = Field::new(secs_text(clip.length));
+        self.length = Field::new(format_length(clip.length));
     }
 
     fn output(&self) -> lh_core::Result<PathBuf> {
@@ -502,26 +502,6 @@ fn start(state: &mut State, overwrite: bool) -> Option<Job> {
         track,
     };
     Some(Job { queue })
-}
-
-/// `1M`, `900K` or bytes, whichever the limit is a whole number of.
-fn size_text(bytes: u64) -> String {
-    if bytes % 1_000_000 == 0 {
-        format!("{}M", bytes / 1_000_000)
-    } else if bytes % 1000 == 0 {
-        format!("{}K", bytes / 1000)
-    } else {
-        bytes.to_string()
-    }
-}
-
-/// A length as the field shows it: `30`, or `12.5`.
-fn secs_text(secs: f64) -> String {
-    if secs.fract() == 0.0 {
-        format!("{secs}")
-    } else {
-        format!("{secs:.1}")
-    }
 }
 
 fn draw_sample(frame: &mut Frame, target: &str, state: &State, spin: char, theme: &Theme) {

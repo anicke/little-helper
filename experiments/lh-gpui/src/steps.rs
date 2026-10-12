@@ -102,12 +102,11 @@ pub const MENU: [(&str, &[Item]); 4] = [
                 "Write the info .txt: setlist and times.",
                 IconName::ListMusic,
             ),
-            tui(
+            item(
                 Step::Sample,
                 "Sample",
                 "Cut a short MP3 clip, beside the folder.",
                 IconName::Scissors,
-                "sample",
             ),
         ],
     ),

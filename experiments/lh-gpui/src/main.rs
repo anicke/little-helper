@@ -5,13 +5,14 @@
 //! that folder with the defaults the workspace uses.
 //!
 //! Ported so far: the batch screens (verify, sbe, convert → FLAC/WAV, check checksums,
-//! create ffp/md5/st5) through one shared view (`batch.rs`), rename, tag, setlist, torrent
-//! info and torrent check. The other editor screens (sample, sbe fix, torrent create)
+//! create ffp/md5/st5) through one shared view (`batch.rs`), rename, tag, setlist, sample,
+//! torrent info and torrent check. The other editor screens (sbe fix, torrent create)
 //! are listed but point at their `lh-tui` command for now. Every job still runs through
 //! `lh_core::job::Queue`, so progress and Cancel behave the way the real apps' do.
 
 mod batch;
 mod rename;
+mod sample;
 mod screen;
 mod setlist;
 mod steps;
@@ -36,6 +37,7 @@ use std::path::{Path, PathBuf};
 
 use batch::Batch;
 use rename::Rename;
+use sample::SampleEdit;
 use screen::{AnyScreen, Screen as _};
 use setlist::Setlist;
 use steps::{Item, Step, StepDone, StepResult, items};
@@ -123,6 +125,7 @@ impl Workspace {
         let rename = cx.new(|cx| Rename::new(window, cx));
         let tag = cx.new(|cx| TagEdit::new(window, cx));
         let setlist = cx.new(|_| Setlist::new());
+        let sample = cx.new(|cx| SampleEdit::new(window, cx));
 
         cx.subscribe(&torrent_check, |this, check, _: &TorrentLoaded, cx| {
             let meta = check.read(cx).meta.clone();
@@ -149,6 +152,7 @@ impl Workspace {
         this.add_screen(Step::Rename, rename, window, cx);
         this.add_screen(Step::Tag, tag, window, cx);
         this.add_screen(Step::Setlist, setlist, window, cx);
+        this.add_screen(Step::Sample, sample, window, cx);
         this.add_screen(Step::TorrentCheck, torrent_check, window, cx);
         this
     }

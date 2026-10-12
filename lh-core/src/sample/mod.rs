@@ -578,6 +578,27 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+/// A limit as a field shows it, and [`parse_size`] reads back: `1M`, `900K` or bytes,
+/// whichever it is a whole number of.
+pub fn format_limit(bytes: u64) -> String {
+    if bytes % 1_000_000 == 0 {
+        format!("{}M", bytes / 1_000_000)
+    } else if bytes % 1000 == 0 {
+        format!("{}K", bytes / 1000)
+    } else {
+        bytes.to_string()
+    }
+}
+
+/// A clip's length as a field shows it, and [`parse_time`] reads back: `30`, or `12.5`.
+pub fn format_length(secs: f64) -> String {
+    if secs.fract() == 0.0 {
+        format!("{secs}")
+    } else {
+        format!("{secs:.1}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +626,17 @@ mod tests {
         assert_eq!(parse_size("12345"), Some(12_345));
         assert_eq!(parse_size("0"), None);
         assert_eq!(parse_size("1G"), None);
+    }
+
+    #[test]
+    fn fields_read_back() {
+        for bytes in [1_000_000, 900_000, 12_345] {
+            assert_eq!(parse_size(&format_limit(bytes)), Some(bytes));
+        }
+        assert_eq!(format_limit(900_000), "900K");
+        assert_eq!(format_length(30.0), "30");
+        assert_eq!(format_length(12.5), "12.5");
+        assert_eq!(parse_time(&format_length(12.5)), Some(12.5));
     }
 
     #[test]
