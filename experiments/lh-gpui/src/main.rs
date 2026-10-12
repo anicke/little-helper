@@ -5,14 +5,15 @@
 //! that folder with the defaults the workspace uses.
 //!
 //! Ported so far: the batch screens (verify, sbe, convert → FLAC/WAV, check checksums,
-//! create ffp/md5/st5) through one shared view (`batch.rs`), rename, tag, torrent info and
-//! torrent check. The other editor screens (setlist, sample, sbe fix, torrent create)
+//! create ffp/md5/st5) through one shared view (`batch.rs`), rename, tag, setlist, torrent
+//! info and torrent check. The other editor screens (sample, sbe fix, torrent create)
 //! are listed but point at their `lh-tui` command for now. Every job still runs through
 //! `lh_core::job::Queue`, so progress and Cancel behave the way the real apps' do.
 
 mod batch;
 mod rename;
 mod screen;
+mod setlist;
 mod steps;
 mod tag;
 mod torrent_check;
@@ -36,6 +37,7 @@ use std::path::{Path, PathBuf};
 use batch::Batch;
 use rename::Rename;
 use screen::{AnyScreen, Screen as _};
+use setlist::Setlist;
 use steps::{Item, Step, StepDone, StepResult, items};
 use tag::TagEdit;
 use torrent_check::{TorrentCheck, TorrentLoaded};
@@ -58,6 +60,7 @@ icon_assets!(
         PackagePlus,
         PencilLine,
         Play,
+        RefreshCw,
         Ruler,
         Scissors,
         ShieldCheck,
@@ -107,6 +110,8 @@ struct Workspace {
     screens: Vec<(Step, Box<dyn AnyScreen>)>,
     /// Also in `screens`; Torrent info reads its torrent.
     torrent_check: Entity<TorrentCheck>,
+    /// Also in `screens`; planned again after a run that changes what it says.
+    setlist: Entity<Setlist>,
     torrent_files: Entity<TableState<Files>>,
 }
 
@@ -117,6 +122,7 @@ impl Workspace {
         let torrent_files = cx.new(|cx| TableState::new(Files::new(), window, cx));
         let rename = cx.new(|cx| Rename::new(window, cx));
         let tag = cx.new(|cx| TagEdit::new(window, cx));
+        let setlist = cx.new(|_| Setlist::new());
 
         cx.subscribe(&torrent_check, |this, check, _: &TorrentLoaded, cx| {
             let meta = check.read(cx).meta.clone();
@@ -137,10 +143,12 @@ impl Workspace {
             batches: (0..count).map(|_| None).collect(),
             screens: Vec::new(),
             torrent_check: torrent_check.clone(),
+            setlist: setlist.clone(),
             torrent_files,
         };
         this.add_screen(Step::Rename, rename, window, cx);
         this.add_screen(Step::Tag, tag, window, cx);
+        this.add_screen(Step::Setlist, setlist, window, cx);
         this.add_screen(Step::TorrentCheck, torrent_check, window, cx);
         this
     }
@@ -172,6 +180,9 @@ impl Workspace {
                 this.results[index_of(step)] = result.clone();
                 if step.changes_folder() {
                     this.rescan(window, cx);
+                }
+                if step.changes_setlist() {
+                    this.setlist.update(cx, |s, cx| s.reload(window, cx));
                 }
                 cx.notify();
             },

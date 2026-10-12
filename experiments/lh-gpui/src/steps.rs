@@ -96,12 +96,11 @@ pub const MENU: [(&str, &[Item]); 4] = [
                 "Edit show fields and track titles.",
                 IconName::Tag,
             ),
-            tui(
+            item(
                 Step::Setlist,
                 "Setlist",
                 "Write the info .txt: setlist and times.",
                 IconName::ListMusic,
-                "setlist",
             ),
             tui(
                 Step::Sample,
@@ -202,6 +201,15 @@ impl Step {
     /// formats. A rename keeps both; a conversion or a written list does not.
     pub fn changes_folder(self) -> bool {
         matches!(self, Step::ConvertFlac | Step::ConvertWav | Step::Create(_))
+    }
+
+    /// Whether a run can change what the setlist says: the FLACs' tags, names, or which
+    /// files are FLAC at all.
+    pub fn changes_setlist(self) -> bool {
+        matches!(
+            self,
+            Step::Rename | Step::Tag | Step::ConvertFlac | Step::ConvertWav
+        )
     }
 }
 
