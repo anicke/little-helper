@@ -52,6 +52,11 @@ pub(crate) fn cmd_torrent_info(file: &Path, list_files: bool) -> Result<bool> {
             println!("  {:<12} {line}", if i == 0 { "comment" } else { "" });
         }
     }
+    if t.multitracker {
+        println!("  tracker type multitracker (announce-list)");
+    } else if t.trackers().next().is_some() {
+        println!("  tracker type single (announce only)");
+    }
     for (i, tracker) in t.trackers().enumerate() {
         println!("  {:<12} {tracker}", if i == 0 { "trackers" } else { "" });
     }

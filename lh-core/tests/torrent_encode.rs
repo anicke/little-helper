@@ -176,6 +176,7 @@ fn tracker_tiers_survive_a_round_trip() {
     // BEP 3's single `announce` is the first URL of the first tier, and it must not come
     // back a second time as a tier of its own.
     assert_eq!(read_back.trackers().count(), 3);
+    assert!(read_back.multitracker);
 }
 
 /// One tracker goes in `announce` alone. Private sites such as Dime reject any upload that
@@ -194,6 +195,7 @@ fn a_single_tracker_torrent_has_no_announce_list() {
     assert!(find(&out.bytes, b"8:announce").is_some());
     let read_back = Metainfo::from_bytes(&out.bytes, Path::new("dime.torrent")).unwrap();
     assert_eq!(read_back.announce, tiers);
+    assert!(!read_back.multitracker);
 }
 
 /// A trackerless torrent is legal, and is what a DHT-only or private-archive torrent wants.

@@ -44,6 +44,10 @@ pub struct Metainfo {
     /// Tracker tiers (BEP 12). Clients choose at random within a tier and fall through
     /// between tiers, so the nesting carries meaning and is kept rather than flattened.
     pub announce: Vec<Vec<String>>,
+    /// Whether the file carries `announce-list` at all, however few URLs are in it. Some
+    /// private sites (Dime among them) refuse any upload that has the key, so a one-URL
+    /// list matters even though `announce` above cannot show the difference.
+    pub multitracker: bool,
     pub comment: Option<String>,
     pub created_by: Option<String>,
     pub creation_date: Option<i64>,
@@ -87,6 +91,7 @@ impl Metainfo {
 
         let mut announce: Option<String> = None;
         let mut tiers: Vec<Vec<String>> = Vec::new();
+        let mut multitracker = false;
         let mut comment = None;
         let mut created_by = None;
         let mut creation_date = None;
@@ -99,6 +104,7 @@ impl Metainfo {
             match key {
                 b"announce" => announce = Some(text(value, origin)?),
                 b"announce-list" => {
+                    multitracker = true;
                     // A list of tiers, each a list of URLs.
                     let mut list = value.try_into_list().map_err(|source| Error::Bencode {
                         path: origin.into(),
@@ -156,6 +162,7 @@ impl Metainfo {
             private: info.private,
             source: info.source,
             announce: tiers,
+            multitracker,
             comment,
             created_by,
             creation_date,

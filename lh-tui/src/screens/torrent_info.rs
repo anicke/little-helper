@@ -170,6 +170,11 @@ pub(crate) fn torrent_info_lines<'a>(t: &Metainfo, theme: &'a Theme) -> Vec<Line
             )));
         }
     }
+    if t.multitracker {
+        lines.push(Line::from("tracker type multitracker (announce-list)"));
+    } else if t.trackers().next().is_some() {
+        lines.push(Line::from("tracker type single (announce only)"));
+    }
     for (i, tracker) in t.trackers().enumerate() {
         lines.push(Line::from(format!(
             "{:<12} {tracker}",
