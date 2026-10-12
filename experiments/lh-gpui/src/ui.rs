@@ -52,21 +52,34 @@ pub fn bridge<T: Send + 'static, V: 'static>(
     .detach();
 }
 
-/// Scans `dir` on the background executor, then hands the result to `then` on the
-/// foreground — a show folder's probe pass never blocks the window.
+/// Runs `work` on the background executor, then hands its result to `then` on the
+/// foreground — a folder's probe or tag read never blocks the window.
+pub fn background_then<V: 'static, R: Send + 'static>(
+    window: &mut Window,
+    cx: &mut Context<V>,
+    work: impl FnOnce() -> R + Send + 'static,
+    then: impl FnOnce(&mut V, R, &mut Window, &mut Context<V>) + 'static,
+) {
+    cx.spawn_in(window, async move |this, cx| {
+        let result = cx.background_spawn(async move { work() }).await;
+        this.update_in(cx, |this, window, cx| then(this, result, window, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// Scans the show folder `dir` in the background, then hands the scan to `then`.
 pub fn scan_then<V: 'static>(
     dir: PathBuf,
     window: &mut Window,
     cx: &mut Context<V>,
     then: impl FnOnce(&mut V, &PathBuf, FolderScan, &mut Window, &mut Context<V>) + 'static,
 ) {
-    cx.spawn_in(window, async move |this, cx| {
-        let scan = {
-            let dir = dir.clone();
-            cx.background_spawn(async move { scan_show(&dir) }).await
-        };
-        this.update_in(cx, |this, window, cx| then(this, &dir, scan, window, cx))
-            .ok();
-    })
-    .detach();
+    let scanned = dir.clone();
+    background_then(
+        window,
+        cx,
+        move || scan_show(&scanned),
+        move |this, scan, window, cx| then(this, &dir, scan, window, cx),
+    );
 }

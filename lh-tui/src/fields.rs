@@ -113,11 +113,12 @@ impl Field {
 /// is briefly the wrong length is finished by editing afterwards, not by failing the
 /// screen.
 ///
-/// Many terminals (xterm, VTE, …) send pasted newlines as bare `\r`, which `str::lines`
-/// does not split on, so `\r\n` and `\r` are normalised to `\n` first.
+/// Lines split as `tag::title_lines` splits them, whatever newlines the terminal sent.
 pub(crate) fn paste_titles(text: &str, len: usize) -> Vec<Field> {
-    let text = text.replace("\r\n", "\n").replace('\r', "\n");
-    let mut fields: Vec<Field> = text.lines().map(Field::new).collect();
+    let mut fields: Vec<Field> = lh_core::tag::title_lines(text)
+        .into_iter()
+        .map(Field::new)
+        .collect();
     fields.resize_with(len, Field::default);
     fields
 }

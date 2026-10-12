@@ -1,6 +1,5 @@
 use crate::*;
 use anyhow::{Context, Result};
-use lh_core::checksum::ffp;
 use lh_core::scan;
 use lh_core::tag::{self, Tags};
 use std::path::Path;
@@ -44,11 +43,12 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
     }
 
     let titles = match &args.titles {
-        Some(path) if path == Path::new("-") => Some(read_titles(
-            std::io::read_to_string(std::io::stdin()).context("reading titles from stdin")?,
+        Some(path) if path == Path::new("-") => Some(tag::title_lines(
+            &std::io::read_to_string(std::io::stdin()).context("reading titles from stdin")?,
         )),
-        Some(path) => Some(read_titles(
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+        Some(path) => Some(tag::title_lines(
+            &std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?,
         )),
         None => None,
     };
@@ -70,19 +70,14 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
         genre: args.genre.clone(),
         comment: args.comment.clone(),
         location: args.location.clone(),
-        title: None,
-        track_number: None,
-        track_total: Some(files.len().to_string()),
+        ..Tags::default()
     };
 
     let mut any_change = false;
     let mut wrote = 0usize;
     for (i, f) in files.iter().enumerate() {
-        let mut edit = show_edit.clone();
-        edit.track_number = Some((i + 1).to_string());
-        if let Some(titles) = &titles {
-            edit.title = Some(titles[i].clone());
-        }
+        let title = titles.as_ref().map(|titles| titles[i].clone());
+        let edit = Tags::for_track(&show_edit, i, files.len(), title);
 
         let before = tag::read(&f.path)
             .with_context(|| format!("reading tags from {}", f.path.display()))?;
@@ -98,12 +93,8 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
         }
 
         if args.yes {
-            let audio_before = ffp(&f.path)
-                .with_context(|| format!("reading the audio MD5 of {}", f.path.display()))?;
-            tag::apply(&f.path, &edit)
+            tag::write(&f.path, &edit)
                 .with_context(|| format!("writing tags to {}", f.path.display()))?;
-            tag::assert_audio_unchanged(&f.path, audio_before)
-                .with_context(|| format!("checking {} after the write", f.path.display()))?;
             wrote += 1;
         }
     }
@@ -118,8 +109,4 @@ pub(crate) fn cmd_tag(args: &TagArgs) -> Result<bool> {
     }
     println!("wrote {wrote} files");
     Ok(true)
-}
-
-fn read_titles(text: String) -> Vec<String> {
-    text.lines().map(str::to_string).collect()
 }

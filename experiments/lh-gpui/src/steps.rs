@@ -90,12 +90,11 @@ pub const MENU: [(&str, &[Item]); 4] = [
                 "Decode FLACs back to WAV.",
                 IconName::AudioWaveform,
             ),
-            tui(
+            item(
                 Step::Tag,
                 "Tag",
                 "Edit show fields and track titles.",
                 IconName::Tag,
-                "tag",
             ),
             tui(
                 Step::Setlist,
@@ -607,12 +606,12 @@ fn prepare_create(dir: &Path, kind: ChecksumKind) -> Result<Prepared, String> {
 /// What each batch step does on a real folder, without a window: its jobs run in turn on
 /// this thread, the way the queue would run them, and the step's finish sees the rows.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use lh_core::job::{CancelToken, Progress};
 
     /// A show folder of fixtures, fresh per test.
-    fn show(name: &str, fixtures: &[&str]) -> PathBuf {
+    pub(crate) fn show(name: &str, fixtures: &[&str]) -> PathBuf {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lh-core/tests/fixtures");
         let dir = std::env::temp_dir().join(format!("lh-gpui-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

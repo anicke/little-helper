@@ -5,8 +5,6 @@ use std::time::Duration;
 use crate::*;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers};
 use lh_cli::TagArgs;
-use lh_core::checksum::ffp;
-use lh_core::etree::ShowName;
 use lh_core::job::{Event, Queue};
 use lh_core::model::AudioFile;
 use lh_core::tag::{self, Tags};
@@ -18,19 +16,6 @@ use ratatui::{DefaultTerminal, Frame};
 use std::path::Path;
 
 // --- Tag ---------------------------------------------------------------------------------
-
-/// The six show-level fields a person edits directly, in the order shown on screen. The
-/// other three of `tag::Field::ALL` are handled separately: `TITLE` is per-track (the
-/// titles pane below), `TRACKNUMBER` and `TRACKTOTAL` are always derived from position and
-/// count and have no field at all (docs/tagging.md §5).
-pub(crate) const TAG_SHOW_FIELDS: [tag::Field; 6] = [
-    tag::Field::Artist,
-    tag::Field::Album,
-    tag::Field::Date,
-    tag::Field::Genre,
-    tag::Field::Comment,
-    tag::Field::Location,
-];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TagFocus {
@@ -115,14 +100,12 @@ pub(crate) fn run_tag(args: TagArgs, theme: ThemeName) -> ExitCode {
 /// Reads every file's tags and seeds the edit from them, the folder name and `args` —
 /// everything that can fail before the screen opens.
 pub(crate) fn prepare_tag(args: &TagArgs, files: Vec<AudioFile>) -> Result<TagSetup, Refusal> {
-    // Only taggable files are tracks: numbering, titles and the diff all run over them
-    // alone, so a WAV left beside its converted FLAC doesn't shift every track number.
-    let total = files.len();
-    let files: Vec<AudioFile> = files
-        .into_iter()
-        .filter(|f| tag::is_taggable(f.format))
-        .collect();
-    let ignored = total - files.len();
+    let tag::Tracks {
+        files,
+        before,
+        ignored,
+    } = tag::read_tracks(files)
+        .map_err(|e| Refusal::new(2, format!("lh-tui: reading tags: {e:#}")))?;
     if files.is_empty() {
         return Err(Refusal::new(
             1,
@@ -130,37 +113,7 @@ pub(crate) fn prepare_tag(args: &TagArgs, files: Vec<AudioFile>) -> Result<TagSe
         ));
     }
 
-    // Read every file's existing tags up front — the "before" state the diff pane and
-    // the apply stage's audio-unchanged postcondition are both built from
-    // (docs/tagging.md §1 contract point 2).
-    let mut before: Vec<Tags> = Vec::with_capacity(files.len());
-    for f in &files {
-        match tag::read(&f.path) {
-            Ok(t) => before.push(t),
-            Err(e) => {
-                return Err(Refusal::new(
-                    2,
-                    format!("lh-tui: reading tags from {}: {e:#}", f.path.display()),
-                ));
-            }
-        }
-    }
-
-    let show_name = ShowName::from_dir(&args.dir);
-
-    // Seed the show-level fields from the first file that already carries any
-    // tags, then from the folder name's own date where that leaves it blank
-    // (docs/tagging.md §6).
-    let mut show = before
-        .iter()
-        .find(|t| !t.is_empty())
-        .cloned()
-        .unwrap_or_default();
-    if show.date.is_none() {
-        if let Some(sn) = &show_name {
-            show.date = Some(sn.date.render_iso());
-        }
-    }
+    let mut show = tag::seed_show(&before, &args.dir);
     if let Some(v) = &args.artist {
         show.artist = Some(v.clone());
     }
@@ -192,7 +145,7 @@ pub(crate) fn prepare_tag(args: &TagArgs, files: Vec<AudioFile>) -> Result<TagSe
             std::fs::read_to_string(path)
                 .map_err(|e| Refusal::new(2, format!("lh-tui: reading {}: {e}", path.display())))?
         };
-        let lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let lines = tag::title_lines(&text);
         if lines.len() != files.len() {
             return Err(Refusal::new(
                 2,
@@ -236,14 +189,16 @@ pub(crate) fn tag_screen(
 }
 
 pub(crate) fn tag_edit(fields: &[Field; 6], titles: &[Field], track: usize, total: usize) -> Tags {
-    let mut edit = Tags::default();
-    for (field, value) in TAG_SHOW_FIELDS.iter().zip(fields.iter()) {
-        edit.set(*field, value.edit_value());
+    let mut show = Tags::default();
+    for (field, value) in tag::Field::SHOW.iter().zip(fields.iter()) {
+        show.set(*field, value.edit_value());
     }
-    edit.track_number = Some((track + 1).to_string());
-    edit.track_total = Some(total.to_string());
-    edit.title = titles.get(track).and_then(Field::edit_value);
-    edit
+    Tags::for_track(
+        &show,
+        track,
+        total,
+        titles.get(track).and_then(Field::edit_value),
+    )
 }
 
 /// Builds the write queue for the current edit, or `None` when there is nothing to
@@ -294,9 +249,7 @@ pub(crate) fn start_tag_write(
         let path = f.path.clone();
         let edit = edits[i].clone();
         queue.submit(f.file_name(), move |_progress| -> lh_core::Result<Tags> {
-            let audio_before = ffp(&path)?;
-            tag::apply(&path, &edit)?;
-            tag::assert_audio_unchanged(&path, audio_before)?;
+            tag::write(&path, &edit)?;
             tag::read(&path)
         });
         submitted.push(i);
@@ -316,7 +269,7 @@ pub(crate) fn run_tag_screen(
     theme: Theme,
 ) -> io::Result<Option<bool>> {
     let mut fields: [Field; 6] =
-        TAG_SHOW_FIELDS.map(|f| Field::new(show_seed.get(f).unwrap_or_default()));
+        tag::Field::SHOW.map(|f| Field::new(show_seed.get(f).unwrap_or_default()));
     let mut titles: Vec<Field> = title_seed.into_iter().map(Field::new).collect();
     let mut focus = TagFocus::None;
     let mut title_idx = 0usize;
@@ -456,16 +409,16 @@ pub(crate) fn run_tag_screen(
                                 focus = match focus {
                                     TagFocus::None | TagFocus::Titles => TagFocus::Show(0),
                                     TagFocus::Show(i) => {
-                                        TagFocus::Show((i + 1) % TAG_SHOW_FIELDS.len())
+                                        TagFocus::Show((i + 1) % tag::Field::SHOW.len())
                                     }
                                 };
                             }
                             KeyCode::BackTab => {
                                 focus = match focus {
                                     TagFocus::None | TagFocus::Titles => {
-                                        TagFocus::Show(TAG_SHOW_FIELDS.len() - 1)
+                                        TagFocus::Show(tag::Field::SHOW.len() - 1)
                                     }
-                                    TagFocus::Show(0) => TagFocus::Show(TAG_SHOW_FIELDS.len() - 1),
+                                    TagFocus::Show(0) => TagFocus::Show(tag::Field::SHOW.len() - 1),
                                     TagFocus::Show(i) => TagFocus::Show(i - 1),
                                 };
                             }
@@ -633,7 +586,7 @@ pub(crate) fn draw_show_fields(
     focus: TagFocus,
     theme: &Theme,
 ) {
-    let lines: Vec<Line> = TAG_SHOW_FIELDS
+    let lines: Vec<Line> = tag::Field::SHOW
         .iter()
         .enumerate()
         .map(|(i, f)| {
@@ -805,12 +758,12 @@ pub(crate) fn draw_tag_result(
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(TAG_SHOW_FIELDS.len() as u16 + 2),
+            Constraint::Length(tag::Field::SHOW.len() as u16 + 2),
             Constraint::Min(3),
         ])
         .split(area);
 
-    let show_lines: Vec<Line> = TAG_SHOW_FIELDS
+    let show_lines: Vec<Line> = tag::Field::SHOW
         .iter()
         .map(|&field| {
             let first = rows.first().and_then(|r| r.tags.get(field));

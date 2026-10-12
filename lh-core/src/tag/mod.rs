@@ -26,7 +26,8 @@
 
 use crate::checksum;
 use crate::error::{Error, Result};
-use crate::model::AudioFormat;
+use crate::etree::ShowName;
+use crate::model::{AudioFile, AudioFormat};
 use std::path::Path;
 
 /// One of the eight fields the etree standard names, or `TRACKTOTAL` (see the module docs).
@@ -57,6 +58,18 @@ impl Field {
         Self::Date,
         Self::TrackNumber,
         Self::TrackTotal,
+        Self::Genre,
+        Self::Comment,
+        Self::Location,
+    ];
+
+    /// The six show-level fields a person types, in the order a screen shows them. The
+    /// other three are per-track (`TITLE`) or derived from position and count
+    /// (`TRACKNUMBER`, `TRACKTOTAL`), never typed (docs/tagging.md §5).
+    pub const SHOW: [Field; 6] = [
+        Self::Artist,
+        Self::Album,
+        Self::Date,
         Self::Genre,
         Self::Comment,
         Self::Location,
@@ -151,6 +164,18 @@ impl Tags {
         Field::ALL.iter().all(|f| self.get(*f).is_none())
     }
 
+    /// The edit track `index` of `total` gets: `show`'s show-level fields, its position as
+    /// `TRACKNUMBER`, the count as `TRACKTOTAL`, and `title` (docs/tagging.md §5). Every
+    /// front end builds a track's edit this way, so numbering cannot drift between them.
+    pub fn for_track(show: &Tags, index: usize, total: usize, title: Option<String>) -> Tags {
+        Tags {
+            title,
+            track_number: Some((index + 1).to_string()),
+            track_total: Some(total.to_string()),
+            ..show.clone()
+        }
+    }
+
     /// What a file carrying `self` carries once [`apply`] has written `edit`: the edit's
     /// value where it names one, nothing where it clears one (`Some("")`), and `self`'s
     /// value everywhere it is `None`. A screen shows this before a write lands, then swaps
@@ -242,6 +267,70 @@ pub fn apply(path: &Path, edit: &Tags) -> Result<()> {
         }
     }
     save(path, tag)
+}
+
+/// [`apply`] under docs/tagging.md §1's contract: the audio MD5 is read before the write
+/// and checked after it, so a write that touched the audio is an error, not a success.
+pub fn write(path: &Path, edit: &Tags) -> Result<()> {
+    let audio_before = checksum::ffp(path)?;
+    apply(path, edit)?;
+    assert_audio_unchanged(path, audio_before)
+}
+
+/// A show folder's tracks: its taggable files, in order, and what each carries now.
+#[derive(Debug, Clone)]
+pub struct Tracks {
+    pub files: Vec<AudioFile>,
+    /// Each file's tags as read — the "before" every diff and the audio check are against
+    /// (docs/tagging.md §1 contract point 2).
+    pub before: Vec<Tags>,
+    /// Files left out for not being taggable: a WAV beside its converted FLAC is not a
+    /// track, so it must not shift every track number.
+    pub ignored: usize,
+}
+
+/// Keeps the taggable files of a folder's scan and reads each one's tags. An editor
+/// refuses when `files` comes back empty, in its own words.
+pub fn read_tracks(files: Vec<AudioFile>) -> Result<Tracks> {
+    let total = files.len();
+    let files: Vec<AudioFile> = files
+        .into_iter()
+        .filter(|f| is_taggable(f.format))
+        .collect();
+    let before = files
+        .iter()
+        .map(|f| read(&f.path))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Tracks {
+        ignored: total - files.len(),
+        files,
+        before,
+    })
+}
+
+/// The show-level fields an editor opens with, given every file's tags as read: the first
+/// file that carries any, then the folder's etree date where that leaves `DATE` blank
+/// (docs/tagging.md §6).
+pub fn seed_show(before: &[Tags], dir: &Path) -> Tags {
+    let mut show = before
+        .iter()
+        .find(|t| !t.is_empty())
+        .cloned()
+        .unwrap_or_default();
+    if show.date.is_none() {
+        show.date = ShowName::from_dir(dir).map(|n| n.date.render_iso());
+    }
+    show
+}
+
+/// One title per line of `text`, however its lines end: many terminals send a pasted
+/// newline as a bare `\r`, which `str::lines` does not split on.
+pub fn title_lines(text: &str) -> Vec<String> {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// docs/tagging.md §1, contract point 2: the audio MD5 a file carried before a write must be
@@ -378,6 +467,46 @@ mod tests {
         let mut edit = Tags::default();
         edit.set(Field::Genre, Some(String::new()));
         assert_eq!(before.changes(&edit), [(Field::Genre, Some("Polka"), "")]);
+    }
+
+    #[test]
+    fn for_track_numbers_by_position_and_keeps_the_show_fields() {
+        let mut show = Tags::default();
+        show.set(Field::Artist, Some("Grateful Dead".into()));
+        show.set(Field::Title, Some("not a show field".into()));
+        let edit = Tags::for_track(&show, 2, 12, Some("Sugaree".into()));
+        assert_eq!(edit.get(Field::Artist), Some("Grateful Dead"));
+        assert_eq!(edit.get(Field::Title), Some("Sugaree"));
+        assert_eq!(edit.get(Field::TrackNumber), Some("3"));
+        assert_eq!(edit.get(Field::TrackTotal), Some("12"));
+        assert_eq!(edit.get(Field::Album), None);
+    }
+
+    #[test]
+    fn seed_show_takes_the_first_tagged_file_then_the_folder_date() {
+        let mut tagged = Tags::default();
+        tagged.set(Field::Artist, Some("Grateful Dead".into()));
+        let before = [Tags::default(), tagged];
+        let seeded = seed_show(&before, Path::new("/shows/gd1977-05-08.sbd.shnf"));
+        assert_eq!(seeded.get(Field::Artist), Some("Grateful Dead"));
+        assert_eq!(seeded.get(Field::Date), Some("1977-05-08"));
+        // A date the files carry wins over the folder's.
+        let mut dated = Tags::default();
+        dated.set(Field::Date, Some("1977-05-09".into()));
+        let seeded = seed_show(&[dated], Path::new("/shows/gd1977-05-08.sbd.shnf"));
+        assert_eq!(seeded.get(Field::Date), Some("1977-05-09"));
+        assert_eq!(seed_show(&[], Path::new("/shows/My Show")), Tags::default());
+    }
+
+    #[test]
+    fn title_lines_splits_every_newline_style() {
+        for text in [
+            "One\nTwo\nThree",
+            "One\r\nTwo\r\nThree",
+            "One\rTwo\rThree\r",
+        ] {
+            assert_eq!(title_lines(text), ["One", "Two", "Three"]);
+        }
     }
 
     #[test]
