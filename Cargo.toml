@@ -27,9 +27,7 @@ same-file = "1"
 which = "8"
 dunce = "1"
 clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
 directories = "6"
-tracing = "0.1"
 crossbeam-channel = "0.5"
 rayon = "1"
 ctrlc = "3"

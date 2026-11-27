@@ -22,7 +22,6 @@ walkdir.workspace = true
 same-file.workspace = true
 which.workspace = true
 dunce.workspace = true
-tracing.workspace = true
 rayon.workspace = true
 crossbeam-channel.workspace = true
 tempfile = "3"
