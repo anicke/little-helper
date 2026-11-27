@@ -92,10 +92,7 @@ fn a_job_can_see_its_own_cancellation_mid_run() {
     let queue: Queue<bool> = Queue::with_workers(1);
     queue.submit("checks itself", |progress| {
         // Nothing has called cancel() yet.
-        if progress.is_cancelled() {
-            return false;
-        }
-        true
+        !progress.is_cancelled()
     });
     let results = drain_terminal(&queue, 1);
     assert_eq!(results[&0], Some(true));
