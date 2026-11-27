@@ -221,7 +221,7 @@ impl From<Refusal> for Stop {
 pub(crate) fn run_workspace(dir: PathBuf, theme: ThemeName) -> ExitCode {
     // Resolved once, so `<folder>` in a checksum or torrent name is the folder's real name
     // even when it was given as `.`.
-    let dir = match dir.canonicalize() {
+    let dir = match dunce::canonicalize(&dir) {
         Ok(d) if d.is_dir() => d,
         _ => {
             eprintln!("lh-tui: {} is not a directory", dir.display());

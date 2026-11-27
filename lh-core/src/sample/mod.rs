@@ -210,7 +210,7 @@ pub fn find_encoder() -> Result<Tool> {
 /// would end up in the checksums and the torrent (docs/sample.md §1).
 pub fn default_output(src: &Path) -> Result<PathBuf> {
     let no_file_name = || Error::malformed(src, "has no file name to work from");
-    let abs = src.canonicalize().map_err(|e| Error::io(src, e))?;
+    let abs = dunce::canonicalize(src).map_err(|e| Error::io(src, e))?;
     let folder = abs.parent().ok_or_else(no_file_name)?;
     let dir = folder.parent().unwrap_or(folder);
     let mut name = abs.file_stem().ok_or_else(no_file_name)?.to_os_string();

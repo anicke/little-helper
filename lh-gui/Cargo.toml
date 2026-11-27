@@ -18,3 +18,4 @@ path = "src/main.rs"
 lh-core.workspace = true
 gpui-kit.workspace = true
 hex.workspace = true
+dunce.workspace = true

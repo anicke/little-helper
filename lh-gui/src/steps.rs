@@ -626,7 +626,7 @@ pub(crate) mod tests {
         for f in fixtures {
             std::fs::copy(src.join(f), dir.join(f)).unwrap();
         }
-        dir.canonicalize().unwrap()
+        dunce::canonicalize(&dir).unwrap()
     }
 
     /// Each row's (name, label), and the step's result.

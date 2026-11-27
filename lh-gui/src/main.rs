@@ -210,7 +210,7 @@ impl Workspace {
     fn set_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // Resolved once, so `<folder>` in a checksum or torrent name is the folder's real
         // name even when it was given as `.`.
-        let Ok(dir) = dir.canonicalize() else {
+        let Ok(dir) = dunce::canonicalize(&dir) else {
             return;
         };
         if !dir.is_dir() || self.busy(cx) {

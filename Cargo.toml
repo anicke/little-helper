@@ -25,6 +25,7 @@ anyhow = "1"
 walkdir = "2"
 same-file = "1"
 which = "8"
+dunce = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 directories = "6"
